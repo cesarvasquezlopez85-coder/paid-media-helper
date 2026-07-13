@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paid Media Helper — Plataforma de Google Ads</title>
+<link rel="stylesheet" href="styles.css">
+<script src="https://unpkg.com/lucide@latest"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+
+<div class="app-shell">
+
+  <aside class="sidebar" id="sidebar">
+    <button class="sidebar-toggle" id="sidebar-toggle" title="Colapsar menú" aria-label="Colapsar menú">
+      <i data-lucide="chevron-left" width="14" height="14"></i>
+    </button>
+    <div class="sidebar-brand">
+      <div class="sidebar-brand-title">PAID MEDIA HELPER</div>
+      <div class="sidebar-brand-sub">Plataforma de ayuda para Google Ads</div>
+    </div>
+    <div class="sidebar-divider"></div>
+
+    <button class="nav-btn" data-nav="rendimiento">
+      <span class="icon"><i data-lucide="bar-chart-2" width="18" height="18"></i></span>
+      <span>Rendimiento</span>
+    </button>
+    <button class="nav-btn" data-nav="bookings">
+      <span class="icon"><i data-lucide="calendar-days" width="18" height="18"></i></span>
+      <span>Bookings</span>
+    </button>
+    <button class="nav-btn" data-nav="negativizacion">
+      <span class="icon"><i data-lucide="search" width="18" height="18"></i></span>
+      <span>Negativización</span>
+    </button>
+
+    <div class="sidebar-footer">
+      V1. Los umbrales son heurísticos y no reemplazan el criterio del estratega de cuenta.
+    </div>
+    <div class="sidebar-session" id="sidebar-session">
+      <div class="sidebar-session-user" id="sidebar-username"></div>
+      <button class="sidebar-logout" id="sidebar-logout">Cerrar sesión</button>
+    </div>
+    <div class="sidebar-credit">
+      <div>Desarrollado por Cesar Vasquez</div>
+      <a href="https://www.linkedin.com/in/cesar-vasquez-lopez" target="_blank" rel="noopener">Ver Perfil en LKDN</a>
+    </div>
+  </aside>
+
+  <main class="content">
+    <div class="content-inner" id="page-root"></div>
+  </main>
+
+</div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

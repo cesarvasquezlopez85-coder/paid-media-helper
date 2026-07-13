@@ -1,0 +1,10 @@
+# Datos y estado local — no debe subirse al repo
+webapp/data.db
+.DS_Store
+__pycache__/
+*.pyc
+.claude/settings.local.json
+
+# Datos reales de cliente (repo es público) — quedan solo en disco local
+OUTPUTS/plataforma-google-ads/Negativos_Estelar_Playa_Manzanillo.xlsx
+negativos_candidatos.csv

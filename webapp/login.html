@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Paid Media Helper — Acceso</title>
+<link rel="stylesheet" href="styles.css">
+<style>
+  body {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .login-shell { width: 100%; max-width: 380px; }
+  .login-brand { text-align: center; margin-bottom: 22px; }
+  .login-brand-title {
+    font-family: var(--font-display); font-weight: 700; font-size: 20px;
+    color: var(--color-text-heading); letter-spacing: -0.01em;
+  }
+  .login-brand-sub {
+    font-size: 12px; color: var(--color-text-muted); text-transform: uppercase;
+    letter-spacing: .06em; margin-top: 4px;
+  }
+  .login-card { padding: 26px 26px 24px; }
+  .login-tabs { display: flex; border: 1px solid var(--color-border); border-radius: var(--radius-sm); overflow: hidden; margin-bottom: 20px; }
+  .login-tab {
+    flex: 1; border: none; background: #fff; color: var(--color-text-heading);
+    font-size: 12.5px; font-weight: 600; padding: 10px; cursor: pointer;
+  }
+  .login-tab.active { background: var(--navy-800); color: #fff; }
+  .login-form { display: flex; flex-direction: column; gap: 14px; }
+  .login-field { display: flex; flex-direction: column; gap: 6px; }
+  .login-field label { font-size: 12px; font-weight: 600; color: var(--color-text-heading); }
+  .login-field input { width: 100%; }
+  .login-submit {
+    margin-top: 4px; border: 1px solid var(--color-button-accent-bg); background: var(--color-button-accent-bg);
+    color: var(--color-button-accent-text); font-family: var(--font-body); font-weight: 600; font-size: 13.5px;
+    padding: 11px 16px; border-radius: var(--radius-sm); cursor: pointer;
+  }
+  .login-submit:disabled { opacity: .6; cursor: not-allowed; }
+  .login-error {
+    display: none; border: 1px solid var(--danger-border); background: var(--danger-bg); color: var(--danger);
+    border-radius: var(--radius-sm); padding: 10px 12px; font-size: 12.5px; line-height: 1.5;
+  }
+  .login-error.visible { display: block; }
+  .login-hint { text-align: center; margin-top: 16px; font-size: 11.5px; color: var(--color-text-muted); line-height: 1.5; }
+</style>
+</head>
+<body>
+
+<div class="login-shell">
+  <div class="login-brand">
+    <div class="login-brand-title">PAID MEDIA HELPER</div>
+    <div class="login-brand-sub">Plataforma de ayuda para Google Ads</div>
+  </div>
+
+  <div class="card login-card">
+    <div class="login-tabs">
+      <button type="button" class="login-tab active" data-mode="login">Iniciar sesión</button>
+      <button type="button" class="login-tab" data-mode="register">Crear cuenta</button>
+    </div>
+
+    <div class="login-error" id="login-error"></div>
+
+    <form class="login-form" id="login-form">
+      <div class="login-field">
+        <label>Usuario</label>
+        <input type="text" id="login-username" autocomplete="username" required minlength="3" />
+      </div>
+      <div class="login-field">
+        <label>Contraseña</label>
+        <input type="password" id="login-password" autocomplete="current-password" required minlength="6" />
+      </div>
+      <button type="submit" class="login-submit" id="login-submit">Iniciar sesión</button>
+    </form>
+  </div>
+
+  <p class="login-hint" id="login-hint">¿Primera vez? Usa "Crear cuenta" — cualquiera con este link puede registrarse.</p>
+</div>
+
+<script>
+  const form = document.getElementById('login-form');
+  const usernameInput = document.getElementById('login-username');
+  const passwordInput = document.getElementById('login-password');
+  const submitBtn = document.getElementById('login-submit');
+  const errorBox = document.getElementById('login-error');
+  const hint = document.getElementById('login-hint');
+  const tabs = document.querySelectorAll('.login-tab');
+  let mode = 'login';
+
+  function setMode(next) {
+    mode = next;
+    tabs.forEach((t) => t.classList.toggle('active', t.dataset.mode === mode));
+    submitBtn.textContent = mode === 'login' ? 'Iniciar sesión' : 'Crear cuenta';
+    passwordInput.autocomplete = mode === 'login' ? 'current-password' : 'new-password';
+    hint.textContent = mode === 'login'
+      ? '¿No tienes cuenta? Usa "Crear cuenta" arriba.'
+      : 'Cualquiera con este link puede registrarse — es de uso interno del equipo.';
+    errorBox.classList.remove('visible');
+  }
+  tabs.forEach((t) => t.addEventListener('click', () => setMode(t.dataset.mode)));
+
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    errorBox.classList.remove('visible');
+    submitBtn.disabled = true;
+    const endpoint = mode === 'login' ? '/api/login' : '/api/register';
+    fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: usernameInput.value.trim(), password: passwordInput.value }),
+    })
+      .then((resp) => resp.json().then((data) => ({ ok: resp.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'No se pudo completar la operación.');
+        window.location.href = '/';
+      })
+      .catch((err) => {
+        errorBox.textContent = err.message;
+        errorBox.classList.add('visible');
+        submitBtn.disabled = false;
+      });
+  });
+
+  // Si ya hay sesión activa, no tiene sentido mostrar el login.
+  fetch('/api/me').then((r) => r.json()).then((data) => {
+    if (data.authenticated) window.location.href = '/';
+  });
+</script>
+</body>
+</html>

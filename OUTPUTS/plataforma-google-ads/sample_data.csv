@@ -1,0 +1,12 @@
+Campaign,Campaign status,Budget,Impr.,Clicks,CTR,Avg. CPC,Cost,Conversions,Cost / conv.,Conv. rate,Search Lost IS (budget),Search Lost IS (rank)
+Search - Marca Estelar Manzanillo,Enabled,$50.00,12000,480,4.00%,$0.35,$168.00,22,$7.64,4.58%,2.00%,3.00%
+Search - Habitaciones Cartagena,Enabled,$80.00,9000,300,3.33%,$1.20,$360.00,6,$60.00,2.00%,5.00%,8.00%
+Search - Genérico Hoteles Caribe,Enabled,$60.00,15000,180,1.20%,$0.90,$162.00,9,$18.00,5.00%,4.00%,6.00%
+Display - Remarketing,Enabled,$30.00,200000,800,0.40%,$0.15,$120.00,15,$8.00,1.88%,0.00%,0.00%
+Search - Ofertas Fin de Semana,Enabled,$40.00,8000,320,4.00%,$0.45,$144.00,18,$8.00,5.63%,22.00%,3.00%
+Search - Todo Incluido,Enabled,$70.00,11000,400,3.64%,$0.60,$240.00,14,$17.14,3.50%,2.00%,25.00%
+Performance Max - Reservas,Enabled,$100.00,50000,900,1.80%,$0.70,$630.00,35,$18.00,3.89%,5.00%,4.00%
+Search - Competidores Brand,Enabled,$35.00,5000,150,3.00%,$1.80,$270.00,3,$90.00,2.00%,1.00%,2.00%
+Search - Bodas y Eventos,Enabled,$20.00,2000,60,3.00%,$0.50,$30.00,2,$15.00,3.33%,0.00%,1.00%
+Search - Corporativo,Paused,$25.00,1000,25,2.50%,$0.60,$15.00,1,$15.00,4.00%,0.00%,0.00%
+Total: all campaigns,--,,313000,3615,,,"$2,139.00",125,,,,
