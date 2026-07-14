@@ -12,7 +12,7 @@ const state = {
     brandKeywords: 'marca, brand, branded, brnd',
     status: 'idle', error: null, fileName: null,
     rows: null, resumen: null, recs: null,
-    chartTab: 'gasto',
+    chartTab: 'gasto', campaignFilter: 'all',
   },
 
   neg: {
@@ -154,7 +154,8 @@ function renderRendPage() {
       </div>`;
   } else if (s.status === 'ready') {
     body = state.layoutVariant === 'A' ? renderRendLayoutA() : renderRendLayoutB();
-    const hasCpaFilePct = (s.rows || []).some((r) => !Number.isNaN(r.cpa_file_pct));
+    const filteredRows = getRendFilteredRows();
+    const hasCpaFilePct = filteredRows.some((r) => !Number.isNaN(r.cpa_file_pct));
     body += `
       <p class="footnote">
         Los umbrales son heurísticos y ajustables — no reemplazan el criterio del estratega de cuenta.
@@ -162,6 +163,19 @@ function renderRendPage() {
         Sin la columna "Campaign type", o sin match de marca en el nombre, se trata como Search genérica.
         ${hasCpaFilePct ? ' "CPA %" es la columna "CPA" tal cual viene en tu export — es una métrica distinta al CPA en $ que ya calculamos desde "Costo/conv." (usado en el resto de la pantalla).' : ''}
       </p>`;
+  }
+
+  let campaignFilterHtml = '';
+  if (s.status === 'ready' && s.rows && s.rows.length) {
+    const campaigns = [...new Set(s.rows.map((r) => r.campaign))].sort((a, b) => a.localeCompare(b));
+    const options = ['<option value="all">Todas las campañas</option>']
+      .concat(campaigns.map((c) => `<option value="${escapeHtml(c)}" ${s.campaignFilter === c ? 'selected' : ''}>${escapeHtml(c)}</option>`))
+      .join('');
+    campaignFilterHtml = `
+      <div class="field">
+        <label>Ver solo esta campaña</label>
+        <select id="rend-campaign-filter" style="width:320px">${options}</select>
+      </div>`;
   }
 
   return `
@@ -176,9 +190,16 @@ function renderRendPage() {
       </div>
       <button class="btn-outline" data-action="rend-demo">Usar sample_data.csv de ejemplo</button>
       ${s.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.fileName)}</strong></div>` : ''}
+      ${campaignFilterHtml}
     </div>
     ${body}
   `;
+}
+
+function getRendFilteredRows() {
+  const s = state.rend;
+  if (!s.rows) return [];
+  return s.campaignFilter === 'all' ? s.rows : s.rows.filter((r) => r.campaign === s.campaignFilter);
 }
 
 function buildGastoRows(rows) {
@@ -255,7 +276,9 @@ function barRowsHtml(rows, compact) {
 
 function renderRendLayoutA() {
   const s = state.rend;
-  const rows = s.rows, resumen = s.resumen, recs = s.recs || [];
+  const rows = getRendFilteredRows();
+  const resumen = engine.summarize(rows);
+  const recs = engine.generateRecommendations(rows);
 
   const hasCpaFilePct = rows.some((r) => !Number.isNaN(r.cpa_file_pct));
 
@@ -338,7 +361,9 @@ function renderRendLayoutA() {
 
 function renderRendLayoutB() {
   const s = state.rend;
-  const rows = s.rows, resumen = s.resumen, recs = s.recs || [];
+  const rows = getRendFilteredRows();
+  const resumen = engine.summarize(rows);
+  const recs = engine.generateRecommendations(rows);
 
   const gastoRows = buildGastoRows(rows);
   const cpaRows = buildCpaRows(rows, resumen.avg_cpa_simple);
@@ -451,7 +476,7 @@ function runRendAnalysis(text, fileName) {
     const rows = engine.computeMetrics(rowsRaw);
     const resumen = engine.summarize(rows);
     const recs = engine.generateRecommendations(rows);
-    Object.assign(s, { status: 'ready', rows, resumen, recs, fileName });
+    Object.assign(s, { status: 'ready', rows, resumen, recs, fileName, campaignFilter: 'all' });
   } catch (err) {
     Object.assign(s, { status: 'error', error: err.message || String(err), fileName });
   }
@@ -1074,6 +1099,12 @@ function bindEvents() {
     render();
     readFileAsCsvText(file).then((text) => runRendAnalysis(text, file.name))
       .catch((err) => { state.rend.status = 'error'; state.rend.error = err.message || String(err); render(); });
+  });
+
+  const rendCampaignFilter = document.getElementById('rend-campaign-filter');
+  if (rendCampaignFilter) rendCampaignFilter.addEventListener('change', (e) => {
+    state.rend.campaignFilter = e.target.value;
+    render();
   });
 
   document.querySelectorAll('[data-rend-tab]').forEach((btn) => {
