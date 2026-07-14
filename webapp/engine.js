@@ -330,7 +330,14 @@ export function loadSearchTerms(text) {
   const { headers, records } = parsed;
   const termCol = findColumn(headers, TERM_COLUMN_ALIASES.term);
   if (!termCol) throw new Error("No se encontró una columna de término de búsqueda reconocible.");
-  const filtered = records.filter((r) => r[termCol] && !String(r[termCol]).startsWith("Total:"));
+  // Mismo caso que en Función 1 (loadCampaignReport): el export nativo de
+  // Google Ads puede poner la etiqueta "Total: ..." en una columna distinta
+  // a la del término de búsqueda, dejando esa columna como "--" o vacía —
+  // eso no lo detectaba el filtro original y la fila se colaba como si
+  // fuera un término real, con sus métricas ya agregadas. Se descarta si
+  // CUALQUIER columna de la fila empieza con "Total:", igual que en Función 1.
+  const isTotalRow = (r) => Object.values(r).some((v) => /^\s*total\s*:/i.test(String(v ?? "")));
+  const filtered = records.filter((r) => r[termCol] && r[termCol] !== "--" && !isTotalRow(r));
   return filtered.map((r) => {
     const row = { term: String(r[termCol]) };
     for (const field of ["clicks", "impr", "cost", "conversions"]) {
