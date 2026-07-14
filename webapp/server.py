@@ -35,12 +35,21 @@ import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-PORT = 8642
+PORT = int(os.environ.get("PORT", 8642))
 TIMEOUT_SECONDS = 15
 MAX_BYTES = 5_000_000  # 5 MB — suficiente para una página, evita descargas gigantes
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "data.db")
+# DATA_DIR es configurable para que en producción la base de datos viva en un
+# volumen persistente separado del código (ver Dockerfile) — en local, sin la
+# variable de entorno, sigue guardándose junto a server.py como siempre.
+DATA_DIR = os.environ.get("DATA_DIR", BASE_DIR)
+DB_PATH = os.path.join(DATA_DIR, "data.db")
+
+# En producción (detrás de HTTPS) la cookie de sesión debe llevar el atributo
+# Secure — en local (http://localhost) un navegador la ignoraría y rompería
+# el login, así que solo se activa si PMH_SECURE_COOKIES=1 (ver Dockerfile).
+SECURE_COOKIES = os.environ.get("PMH_SECURE_COOKIES") == "1"
 
 SESSION_COOKIE = "pmh_session"
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 14  # 14 días
@@ -292,6 +301,8 @@ class Handler(SimpleHTTPRequestHandler):
         jar[SESSION_COOKIE] = ""
         jar[SESSION_COOKIE]["path"] = "/"
         jar[SESSION_COOKIE]["max-age"] = 0
+        if SECURE_COOKIES:
+            jar[SESSION_COOKIE]["secure"] = True
         self._send_json(200, {"ok": True}, extra_headers=[("Set-Cookie", jar[SESSION_COOKIE].OutputString())])
 
     def _start_session(self, user_id, username):
@@ -312,6 +323,8 @@ class Handler(SimpleHTTPRequestHandler):
         jar[SESSION_COOKIE]["httponly"] = True
         jar[SESSION_COOKIE]["samesite"] = "Lax"
         jar[SESSION_COOKIE]["max-age"] = SESSION_TTL_SECONDS
+        if SECURE_COOKIES:
+            jar[SESSION_COOKIE]["secure"] = True
         self._send_json(
             200,
             {"ok": True, "username": username},
