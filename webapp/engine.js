@@ -103,6 +103,7 @@ const COLUMN_ALIASES = {
   conversions: ["Conversions", "Conversiones"],
   cost_per_conv: ["Cost / conv.", "Costo/conv.", "Costo / conv."],
   conv_rate: ["Conv. rate", "Tasa de conv."],
+  conv_value: ["Conv. value", "Valor de conv.", "Conversion value", "Total conv. value"],
   lost_is_budget: ["Search Lost IS (budget)", "IS perdido por presupuesto (búsqueda)", "Search lost IS (budget)", "% impr. perdidas de la Búsqueda (presupuesto)"],
   lost_is_rank: ["Search Lost IS (rank)", "IS perdido por ranking (búsqueda)", "Search lost IS (rank)", "% impr. perdidas de la Búsqueda (ranking)"],
   campaign_type: ["Campaign type", "Tipo de campaña"],
@@ -186,7 +187,7 @@ export function loadCampaignReport(text, brandKeywords) {
     return v !== undefined && v !== "" && v !== "--" && !isTotalRow(r);
   });
 
-  const numericFields = ["budget", "impressions", "clicks", "ctr", "avg_cpc", "cost", "conversions", "cost_per_conv", "conv_rate", "lost_is_budget", "lost_is_rank", "cpa_file_pct"];
+  const numericFields = ["budget", "impressions", "clicks", "ctr", "avg_cpc", "cost", "conversions", "cost_per_conv", "conv_rate", "lost_is_budget", "lost_is_rank", "cpa_file_pct", "conv_value"];
   const typeCol = findColumn(headers, COLUMN_ALIASES.campaign_type);
   const statusCol = findColumn(headers, COLUMN_ALIASES.status);
 
@@ -216,6 +217,7 @@ export function computeMetrics(rows) {
       : (row.conversions > 0 ? row.cost / row.conversions : NaN);
     if (Number.isNaN(row.ctr) && row.impressions > 0) row.ctr = row.clicks / row.impressions;
     row.share_of_spend = totalCost > 0 ? (Number.isNaN(row.cost) ? 0 : row.cost) / totalCost : 0;
+    row.roas = !Number.isNaN(row.conv_value) && row.cost > 0 ? row.conv_value / row.cost : NaN;
     return row;
   });
 }
@@ -226,6 +228,13 @@ export function summarize(rows) {
   const avgCpaWeighted = totalConversions > 0 ? totalCost / totalConversions : null;
   const validCpa = rows.map((r) => r.cpa).filter((v) => !Number.isNaN(v));
   const avgCpaSimple = validCpa.length ? validCpa.reduce((a, b) => a + b, 0) / validCpa.length : null;
+  // ROAS de cuenta = valor de conversión total ÷ gasto total (ponderado, no
+  // el promedio de los ROAS por campaña) — mismo criterio que el CPA
+  // ponderado. Solo se calcula si el archivo trae la columna "Valor de
+  // conv."; si no, queda en null y la pantalla muestra "N/D".
+  const hasConvValue = rows.some((r) => !Number.isNaN(r.conv_value));
+  const totalConvValue = rows.reduce((s, r) => s + (Number.isNaN(r.conv_value) ? 0 : r.conv_value), 0);
+  const roas = hasConvValue && totalCost > 0 ? totalConvValue / totalCost : null;
   return {
     total_cost: totalCost,
     total_conversions: totalConversions,
@@ -233,6 +242,7 @@ export function summarize(rows) {
     avg_cpa_simple: avgCpaSimple,
     campanas_analizadas: rows.length,
     campanas_con_gasto: rows.filter((r) => r.cost > 0).length,
+    roas,
   };
 }
 
