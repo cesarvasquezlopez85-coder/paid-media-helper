@@ -160,7 +160,7 @@ function renderRendPage() {
         Los umbrales son heurísticos y ajustables — no reemplazan el criterio del estratega de cuenta.
         CTR mínimo por tipo: Search marca 20%, Search genérica 8%, Display 1%, Performance Max 3%.
         Sin la columna "Campaign type", o sin match de marca en el nombre, se trata como Search genérica.
-        ${hasCpaFilePct ? ' "CPA (según archivo, %)" es la columna "CPA" tal cual viene en tu export — es una métrica distinta al CPA en $ que ya calculamos desde "Costo/conv." (usado en el resto de la pantalla).' : ''}
+        ${hasCpaFilePct ? ' "CPA %" es la columna "CPA" tal cual viene en tu export — es una métrica distinta al CPA en $ que ya calculamos desde "Costo/conv." (usado en el resto de la pantalla).' : ''}
       </p>`;
   }
 
@@ -271,7 +271,7 @@ function renderRendLayoutA() {
   const tabDefs = [
     ['gasto', 'Gasto'], ['cpa', 'CPA'], ['ctr', 'CTR'], ['is', 'Impression share perdido'],
   ];
-  if (hasCpaFilePct) tabDefs.push(['cpa_file', 'CPA (archivo, %)']);
+  if (hasCpaFilePct) tabDefs.push(['cpa_file', 'CPA %']);
   const tabs = tabDefs
     .map(([key, label]) => `<button class="tab-btn ${s.chartTab === key ? 'active' : ''}" data-rend-tab="${key}">${label}</button>`).join('');
 
@@ -393,7 +393,7 @@ function renderRendLayoutB() {
         </div>
         ${hasCpaFilePct ? `
         <div class="card dense-panel">
-          <h3 class="dense-chart-title">CPA (según archivo, %)</h3>
+          <h3 class="dense-chart-title">CPA %</h3>
           <div class="bar-rows compact">${barRowsHtml(cpaFilePctRows)}</div>
         </div>` : ''}
       </div>
