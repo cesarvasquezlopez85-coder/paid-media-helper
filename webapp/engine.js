@@ -60,7 +60,10 @@ export function textToTable(text) {
 export function toNumber(raw) {
   if (raw === null || raw === undefined) return NaN;
   if (typeof raw === "number") return raw;
-  const cleaned = String(raw).replace(/%/g, "").replace(/\$/g, "").replace(/,/g, "").trim();
+  // Google Ads a veces reporta valores muy bajos como "< 10%" en vez de un
+  // número exacto (visto en impr. perdidas de Búsqueda) — se toma el número
+  // que acompaña al símbolo como aproximación en vez de descartar el dato.
+  const cleaned = String(raw).replace(/%/g, "").replace(/\$/g, "").replace(/,/g, "").replace(/[<>]/g, "").trim();
   if (cleaned === "" || cleaned === "--") return NaN;
   const n = parseFloat(cleaned);
   return Number.isNaN(n) ? NaN : n;
@@ -100,8 +103,8 @@ const COLUMN_ALIASES = {
   conversions: ["Conversions", "Conversiones"],
   cost_per_conv: ["Cost / conv.", "Costo/conv.", "Costo / conv."],
   conv_rate: ["Conv. rate", "Tasa de conv."],
-  lost_is_budget: ["Search Lost IS (budget)", "IS perdido por presupuesto (búsqueda)", "Search lost IS (budget)"],
-  lost_is_rank: ["Search Lost IS (rank)", "IS perdido por ranking (búsqueda)", "Search lost IS (rank)"],
+  lost_is_budget: ["Search Lost IS (budget)", "IS perdido por presupuesto (búsqueda)", "Search lost IS (budget)", "% impr. perdidas de la Búsqueda (presupuesto)"],
+  lost_is_rank: ["Search Lost IS (rank)", "IS perdido por ranking (búsqueda)", "Search lost IS (rank)", "% impr. perdidas de la Búsqueda (ranking)"],
   campaign_type: ["Campaign type", "Tipo de campaña"],
 };
 
