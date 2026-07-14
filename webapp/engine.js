@@ -238,6 +238,7 @@ export function summarize(rows) {
   return {
     total_cost: totalCost,
     total_conversions: totalConversions,
+    total_conv_value: hasConvValue ? totalConvValue : null,
     avg_cpa_weighted: avgCpaWeighted,
     avg_cpa_simple: avgCpaSimple,
     campanas_analizadas: rows.length,

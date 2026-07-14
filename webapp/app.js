@@ -332,9 +332,8 @@ function renderRendLayoutA() {
         <div class="stat-value">${fmtInt(resumen.total_conversions)}</div>
       </div>
       <div class="card stat-card">
-        <div class="stat-label">CPA promedio · ponderado por gasto</div>
-        <div class="stat-value">${resumen.avg_cpa_weighted != null ? fmtMoney(resumen.avg_cpa_weighted) : 'N/D'}</div>
-        <div class="stat-sub">Gasto total ÷ conversiones totales</div>
+        <div class="stat-label">Valor de conversión</div>
+        <div class="stat-value">${resumen.total_conv_value != null ? fmtMoney(resumen.total_conv_value) : 'N/D'}</div>
       </div>
       <div class="card stat-card accent">
         <div class="stat-label">CPA promedio · simple entre campañas</div>
@@ -391,7 +390,7 @@ function renderRendLayoutB() {
           <h3>Resumen ejecutivo</h3>
           <div class="dense-row"><span>Gasto total</span><strong>${fmtMoney(resumen.total_cost)}</strong></div>
           <div class="dense-row"><span>Conversiones</span><strong>${fmtInt(resumen.total_conversions)}</strong></div>
-          <div class="dense-row"><span>CPA ponderado</span><strong>${resumen.avg_cpa_weighted != null ? fmtMoney(resumen.avg_cpa_weighted) : 'N/D'}</strong></div>
+          <div class="dense-row"><span>Valor de conversión</span><strong>${resumen.total_conv_value != null ? fmtMoney(resumen.total_conv_value) : 'N/D'}</strong></div>
           <div class="dense-row accent"><span>CPA simple (alerta)</span><strong>${resumen.avg_cpa_simple != null ? fmtMoney(resumen.avg_cpa_simple) : 'N/D'}</strong></div>
           <div class="dense-row"><span>ROAS</span><strong>${resumen.roas != null ? resumen.roas.toFixed(2) + 'x' : 'N/D'}</strong></div>
         </div>
