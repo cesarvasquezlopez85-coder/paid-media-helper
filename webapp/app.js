@@ -154,11 +154,13 @@ function renderRendPage() {
       </div>`;
   } else if (s.status === 'ready') {
     body = state.layoutVariant === 'A' ? renderRendLayoutA() : renderRendLayoutB();
+    const hasCpaFilePct = (s.rows || []).some((r) => !Number.isNaN(r.cpa_file_pct));
     body += `
       <p class="footnote">
         Los umbrales son heurísticos y ajustables — no reemplazan el criterio del estratega de cuenta.
         CTR mínimo por tipo: Search marca 20%, Search genérica 8%, Display 1%, Performance Max 3%.
         Sin la columna "Campaign type", o sin match de marca en el nombre, se trata como Search genérica.
+        ${hasCpaFilePct ? ' "CPA (según archivo, %)" es la columna "CPA" tal cual viene en tu export — es una métrica distinta al CPA en $ que ya calculamos desde "Costo/conv." (usado en el resto de la pantalla).' : ''}
       </p>`;
   }
 
@@ -216,6 +218,19 @@ function buildCtrRows(rows) {
     };
   });
 }
+// Columna "CPA" del archivo, en % — distinta del CPA en $ que ya calculamos
+// nosotros (cpa, desde "Costo/conv."). Solo aparece cuando el export trae
+// esa columna (reportes con métricas de adquisición de clientes nuevos).
+function buildCpaFilePctRows(rows) {
+  const valid = rows.filter((r) => !Number.isNaN(r.cpa_file_pct));
+  const maxVal = Math.max(0.01, ...valid.map((r) => r.cpa_file_pct));
+  return [...valid].sort((a, b) => b.cpa_file_pct - a.cpa_file_pct).map((r) => ({
+    campaign: r.campaign,
+    valueLabel: (r.cpa_file_pct * 100).toFixed(2) + '%',
+    width: pctWidth(r.cpa_file_pct, maxVal),
+    color: 'var(--navy-800)',
+  }));
+}
 function buildIsRows(rows) {
   const maxVal = Math.max(0.01, ...rows.map((r) => (r.lost_is_budget || 0) + (r.lost_is_rank || 0)));
   return [...rows].sort((a, b) => ((b.lost_is_budget || 0) + (b.lost_is_rank || 0)) - ((a.lost_is_budget || 0) + (a.lost_is_rank || 0))).map((r) => {
@@ -242,17 +257,23 @@ function renderRendLayoutA() {
   const s = state.rend;
   const rows = s.rows, resumen = s.resumen, recs = s.recs || [];
 
+  const hasCpaFilePct = rows.some((r) => !Number.isNaN(r.cpa_file_pct));
+
   const tabMap = {
     gasto: buildGastoRows(rows),
     cpa: buildCpaRows(rows, resumen.avg_cpa_simple),
     ctr: buildCtrRows(rows),
     is: buildIsRows(rows),
   };
+  if (hasCpaFilePct) tabMap.cpa_file = buildCpaFilePctRows(rows);
   const activeRows = tabMap[s.chartTab] || tabMap.gasto;
 
-  const tabs = [
+  const tabDefs = [
     ['gasto', 'Gasto'], ['cpa', 'CPA'], ['ctr', 'CTR'], ['is', 'Impression share perdido'],
-  ].map(([key, label]) => `<button class="tab-btn ${s.chartTab === key ? 'active' : ''}" data-rend-tab="${key}">${label}</button>`).join('');
+  ];
+  if (hasCpaFilePct) tabDefs.push(['cpa_file', 'CPA (archivo, %)']);
+  const tabs = tabDefs
+    .map(([key, label]) => `<button class="tab-btn ${s.chartTab === key ? 'active' : ''}" data-rend-tab="${key}">${label}</button>`).join('');
 
   const recsHtml = recs.length
     ? `<div class="rec-list">${recs.map((r) => {
@@ -323,6 +344,8 @@ function renderRendLayoutB() {
   const cpaRows = buildCpaRows(rows, resumen.avg_cpa_simple);
   const ctrRows = buildCtrRows(rows);
   const isRows = buildIsRows(rows);
+  const hasCpaFilePct = rows.some((r) => !Number.isNaN(r.cpa_file_pct));
+  const cpaFilePctRows = hasCpaFilePct ? buildCpaFilePctRows(rows) : [];
 
   const recsHtml = recs.length
     ? recs.map((r) => `
@@ -368,6 +391,11 @@ function renderRendLayoutB() {
           <h3 class="dense-chart-title">Impression share perdido</h3>
           <div class="bar-rows compact">${barRowsHtml(isRows)}</div>
         </div>
+        ${hasCpaFilePct ? `
+        <div class="card dense-panel">
+          <h3 class="dense-chart-title">CPA (según archivo, %)</h3>
+          <div class="bar-rows compact">${barRowsHtml(cpaFilePctRows)}</div>
+        </div>` : ''}
       </div>
     </div>
   `;

@@ -106,6 +106,12 @@ const COLUMN_ALIASES = {
   lost_is_budget: ["Search Lost IS (budget)", "IS perdido por presupuesto (búsqueda)", "Search lost IS (budget)", "% impr. perdidas de la Búsqueda (presupuesto)"],
   lost_is_rank: ["Search Lost IS (rank)", "IS perdido por ranking (búsqueda)", "Search lost IS (rank)", "% impr. perdidas de la Búsqueda (ranking)"],
   campaign_type: ["Campaign type", "Tipo de campaña"],
+  // Columna "CPA" del export nativo: en los reportes con métricas de
+  // adquisición de clientes nuevos, Google Ads la trae en % (no en $) —
+  // es distinta de "Costo/conv." (cost_per_conv, sí en $), que es la que
+  // usa el CPA en dólares que ya calcula la app. Se muestra aparte, tal
+  // cual viene en el archivo, sin reemplazar el CPA en $.
+  cpa_file_pct: ["CPA"],
 };
 
 export const CTR_THRESHOLDS_BY_TYPE = {
@@ -180,7 +186,7 @@ export function loadCampaignReport(text, brandKeywords) {
     return v !== undefined && v !== "" && v !== "--" && !isTotalRow(r);
   });
 
-  const numericFields = ["budget", "impressions", "clicks", "ctr", "avg_cpc", "cost", "conversions", "cost_per_conv", "conv_rate", "lost_is_budget", "lost_is_rank"];
+  const numericFields = ["budget", "impressions", "clicks", "ctr", "avg_cpc", "cost", "conversions", "cost_per_conv", "conv_rate", "lost_is_budget", "lost_is_rank", "cpa_file_pct"];
   const typeCol = findColumn(headers, COLUMN_ALIASES.campaign_type);
   const statusCol = findColumn(headers, COLUMN_ALIASES.status);
 
@@ -189,7 +195,7 @@ export function loadCampaignReport(text, brandKeywords) {
     for (const field of numericFields) {
       const col = findColumn(headers, COLUMN_ALIASES[field]);
       let v = col ? toNumber(r[col]) : NaN;
-      if (["ctr", "conv_rate", "lost_is_budget", "lost_is_rank"].includes(field) && !Number.isNaN(v)) v = v / 100;
+      if (["ctr", "conv_rate", "lost_is_budget", "lost_is_rank", "cpa_file_pct"].includes(field) && !Number.isNaN(v)) v = v / 100;
       row[field] = v;
     }
     row.status = statusCol ? String(r[statusCol]) : "N/D";
