@@ -162,9 +162,19 @@ export function loadCampaignReport(text, brandKeywords) {
   if (!campaignCol) {
     throw new Error('No se encontró una columna de campaña reconocible. Revisa que el archivo sea un export de campañas de Google Ads.');
   }
+  // El export nativo de Google Ads agrega, al final del archivo, una fila de
+  // total general ("Total: Campañas") y además un subtotal por cada tipo de
+  // campaña presente ("Total: Cuenta", "Total: Búsqueda", "Total: Máximo
+  // rendimiento", etc.). La etiqueta "Total: ..." no siempre cae en la
+  // columna "Campaña" — la fila "Total: Campañas" real la trae en la columna
+  // "Estado de la campaña", y deja "--" en "Campaña" (no vacío, no contiene
+  // "total"), así que ese filtro por sí solo dejaba pasar esa fila como si
+  // fuera una campaña real y duplicaba cada métrica del resumen. Ahora se
+  // descarta la fila si CUALQUIER columna empieza con "Total:".
+  const isTotalRow = (r) => Object.values(r).some((v) => /^\s*total\s*:/i.test(String(v ?? "")));
   const filtered = records.filter((r) => {
     const v = r[campaignCol];
-    return v !== undefined && v !== "" && !String(v).toLowerCase().includes("total");
+    return v !== undefined && v !== "" && v !== "--" && !isTotalRow(r);
   });
 
   const numericFields = ["budget", "impressions", "clicks", "ctr", "avg_cpc", "cost", "conversions", "cost_per_conv", "conv_rate", "lost_is_budget", "lost_is_rank"];

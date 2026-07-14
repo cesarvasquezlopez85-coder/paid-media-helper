@@ -373,10 +373,28 @@ function renderRendLayoutB() {
   `;
 }
 
+// Los exports de Google Ads en español a veces vienen en UTF-16 (con BOM) en
+// vez de UTF-8 — leerlos como UTF-8 no solo rompe los acentos, rompe también
+// cualquier comparación de texto exacta (ej. las filas "Total: ..." dejan de
+// matchear la palabra "total" porque cada caracter queda separado por un
+// byte nulo, y esas filas terminan tratándose como campañas reales). Se
+// detecta la codificación real por el BOM en vez de asumir UTF-8 siempre.
+function decodeFileText(buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return new TextDecoder('utf-16le').decode(buffer);
+  }
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    return new TextDecoder('utf-16be').decode(buffer);
+  }
+  return new TextDecoder('utf-8').decode(buffer);
+}
+
 function readFileAsCsvText(file) {
   return new Promise((resolve, reject) => {
     const isExcel = /\.(xlsx|xls)$/i.test(file.name);
     const reader = new FileReader();
+    reader.onerror = () => reject(new Error('No se pudo leer el archivo.'));
     if (isExcel) {
       reader.onload = () => {
         try {
@@ -386,12 +404,13 @@ function readFileAsCsvText(file) {
           resolve(window.XLSX.utils.sheet_to_csv(sheet));
         } catch (err) { reject(new Error('No se pudo leer el archivo Excel: ' + err.message)); }
       };
-      reader.onerror = () => reject(new Error('No se pudo leer el archivo.'));
       reader.readAsArrayBuffer(file);
     } else {
-      reader.onload = () => resolve(String(reader.result));
-      reader.onerror = () => reject(new Error('No se pudo leer el archivo.'));
-      reader.readAsText(file);
+      reader.onload = () => {
+        try { resolve(decodeFileText(reader.result)); }
+        catch (err) { reject(new Error('No se pudo leer el archivo.')); }
+      };
+      reader.readAsArrayBuffer(file);
     }
   });
 }
@@ -1046,9 +1065,12 @@ function bindEvents() {
     state.neg.status = 'loading'; state.neg.error = null; state.neg.fileName = file.name;
     render();
     const reader = new FileReader();
-    reader.onload = () => runNegAnalysis(String(reader.result), file.name);
+    reader.onload = () => {
+      try { runNegAnalysis(decodeFileText(reader.result), file.name); }
+      catch (err) { state.neg.status = 'error'; state.neg.error = 'No se pudo leer el archivo.'; render(); }
+    };
     reader.onerror = () => { state.neg.status = 'error'; state.neg.error = 'No se pudo leer el archivo.'; render(); };
-    reader.readAsText(file, 'utf-8');
+    reader.readAsArrayBuffer(file);
   });
 
   // Generador de copys
