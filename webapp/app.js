@@ -342,7 +342,7 @@ function renderRendLayoutA() {
       </div>
       <div class="card stat-card">
         <div class="stat-label">ROAS</div>
-        <div class="stat-value">${resumen.roas != null ? resumen.roas.toFixed(2) + 'x' : 'N/D'}</div>
+        <div class="stat-value">${resumen.roas != null ? (resumen.roas * 100).toFixed(0) + '%' : 'N/D'}</div>
         <div class="stat-sub">Valor de conv. ÷ gasto</div>
       </div>
     </div>
@@ -392,7 +392,7 @@ function renderRendLayoutB() {
           <div class="dense-row"><span>Conversiones</span><strong>${fmtInt(resumen.total_conversions)}</strong></div>
           <div class="dense-row"><span>Valor de conversión</span><strong>${resumen.total_conv_value != null ? fmtMoney(resumen.total_conv_value) : 'N/D'}</strong></div>
           <div class="dense-row accent"><span>CPA simple (alerta)</span><strong>${resumen.avg_cpa_simple != null ? fmtMoney(resumen.avg_cpa_simple) : 'N/D'}</strong></div>
-          <div class="dense-row"><span>ROAS</span><strong>${resumen.roas != null ? resumen.roas.toFixed(2) + 'x' : 'N/D'}</strong></div>
+          <div class="dense-row"><span>ROAS</span><strong>${resumen.roas != null ? (resumen.roas * 100).toFixed(0) + '%' : 'N/D'}</strong></div>
         </div>
         <div class="card dense-recs">
           <h3>Recomendaciones (${recs.length})</h3>
