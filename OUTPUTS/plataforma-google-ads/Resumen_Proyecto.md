@@ -2,13 +2,13 @@
 
 ## Qué es
 
-Una herramienta interna para que cualquier persona del equipo suba archivos de una cuenta de Google Ads y reciba sin intervención manual: (1) gráficas de rendimiento y recomendaciones de optimización, (2) una lista de candidatos a palabra clave negativa, y (3) análisis de reservas reales para cuentas de hotel. Pensada para cubrir 100+ cuentas de forma self-serve.
+Una herramienta interna para que cualquier persona del equipo suba archivos de una cuenta de Google Ads y reciba sin intervención manual: (1) gráficas de rendimiento y recomendaciones de optimización, (2) comparación de rendimiento entre dos periodos con recomendaciones por tendencia, (3) una lista de candidatos a palabra clave negativa, y (4) análisis de reservas reales para cuentas de hotel. Pensada para cubrir 100+ cuentas de forma self-serve.
 
-Hay una cuarta función ya construida — generador de copys de anuncio desde una URL — pero **está oculta del menú a pedido de cesar**: tras probarla con cuentas reales, el resultado no lo convenció lo suficiente para quedar en v1. Queda pendiente para v2 (ver "Función 3" más abajo y `roadmap.md`).
+Hay una función más ya construida — generador de copys de anuncio desde una URL — pero **está oculta del menú a pedido de cesar**: tras probarla con cuentas reales, el resultado no lo convenció lo suficiente para quedar en v1. Queda pendiente para v2 (ver "Función 3" más abajo y `roadmap.md`).
 
-Ya no es solo un prototipo de Streamlit: existe una implementación web completa (`webapp/`, HTML/CSS/JS + un servidor Python sin dependencias externas) con login por usuario/contraseña, que reproduce el diseño hecho en Claude Design. Corre local (`python3 webapp/server.py` → `http://localhost:8642`) — ver "Cómo corre la plataforma" más abajo.
+Ya no es solo un prototipo de Streamlit, y ya no corre solo local: existe una implementación web completa (`webapp/`, HTML/CSS/JS + un servidor Python sin dependencias externas) con login por usuario/contraseña, que reproduce el diseño hecho en Claude Design. **Vive en producción en [Railway](https://railway.app)**, en `https://paid-media-helper.up.railway.app`, con auto-deploy desde la rama `main` del repo de GitHub — cualquier cambio que se suba se despliega solo, sin pasos manuales. También se puede correr local con `python3 webapp/server.py` → `http://localhost:8642` — ver "Cómo corre la plataforma" más abajo.
 
-## Estado: cuatro funciones construidas, tres activas en el menú (la cuarta en pausa para v2)
+## Estado: cinco funciones construidas, cuatro activas en el menú (la quinta — Función 3, copys — en pausa para v2)
 
 ### Función 1 — Análisis de rendimiento
 
@@ -18,7 +18,17 @@ Umbral de CTR segmentado por tipo de campaña (Fase 1, ya construido): Search se
 
 El resumen ejecutivo ahora muestra el CPA promedio de cuenta en dos versiones diferenciadas: ponderado por gasto y simple entre campañas (este último es el que usa la alerta de "CPA alto"), para que no se confundan como un solo número.
 
-**Validada con la primera cuenta real** (Click Clack Bogotá): esa primera carga encontró un bug real — el export nativo de campañas de Google Ads trae 2-3 líneas de título (informe, cuenta, rango de fechas) antes del encabezado real, y la app asumía que la línea 1 ya era el encabezado. El `sample_data.csv` sintético usado hasta entonces no tenía ese preámbulo, así que el caso nunca se había probado. Ya corregido: la app busca la fila de encabezado entre las primeras líneas, igual que ya hacía la Función 2. Pendiente: repetir la carga con esta cuenta y anotar si las recomendaciones coinciden con el criterio de cesar, y seguir con el resto de las 3-5 cuentas objetivo de Fase 1.
+**Validada con la primera cuenta real** (Click Clack Bogotá): esa primera carga encontró un bug real — el export nativo de campañas de Google Ads trae 2-3 líneas de título (informe, cuenta, rango de fechas) antes del encabezado real, y la app asumía que la línea 1 ya era el encabezado. El `sample_data.csv` sintético usado hasta entonces no tenía ese preámbulo, así que el caso nunca se había probado. Ya corregido: la app busca la fila de encabezado entre las primeras líneas, igual que ya hacía la Función 2.
+
+**Segunda cuenta real** (Estelar, 2026-07-13) encontró y corrigió 4 bugs más:
+1. El archivo venía en **UTF-16 con BOM** en vez de UTF-8 — rompía no solo los acentos, sino cualquier comparación de texto exacto (como detectar filas de total). Corregido detectando la codificación real por el BOM.
+2. La fila "Total: Campañas" traía la etiqueta en la columna "Estado de la campaña", no en "Campaña" (que quedaba como `"--"`) — se colaba como una campaña más con los totales ya agregados, **duplicando cada número del resumen ejecutivo**. Corregido revisando todas las columnas de la fila, no solo la de campaña — mismo fix aplicado también a la Función 2 (Negativización), que tenía el mismo riesgo.
+3. Las columnas reales de "Impression share perdido" venían en español con un nombre distinto al reconocido, así que ese dato salía siempre en cero. Corregido agregando los alias reales y soporte para el formato `"< 10%"` que Google Ads usa en vez de un número exacto.
+4. El archivo trae una columna literal "CPA" en % (distinta de "Costo/conv.", el CPA real en $). Se agregó como pestaña/panel aparte ("CPA %"), sin tocar el CPA en $ que ya existía.
+
+**Nuevas tarjetas y filtros (2026-07-13/14):** la tarjeta "Campañas con gasto" se reemplazó por **ROAS** (valor de conversión ÷ gasto, en %, "N/D" si el archivo no trae "Valor de conv."); la tarjeta "CPA promedio · ponderado por gasto" se reemplazó por **Valor de conversión** total; se agregó un **filtro por campaña** para ver el resumen, los gráficos y las recomendaciones de una sola campaña sin volver a subir el archivo.
+
+Pendiente: repetir la carga de ambas cuentas y anotar explícitamente si las recomendaciones coinciden con el criterio de cesar, y seguir con el resto de las 3-5 cuentas objetivo de Fase 1.
 
 ### Función 2 — Negativización de términos de búsqueda
 
@@ -33,6 +43,8 @@ Se validó con el reporte real de la cuenta Estelar Playa Manzanillo (934 térmi
 | Candidatos a negativo | 824 | $121.43 | 151 |
 
 El caso que validó el mecanismo: "Manzanillo del Mar" es una zona real de Cartagena distinta de la playa donde está el hotel. Un match de texto simple habría mantenido esos 14 términos por error; con la excepción configurada, quedaron separados en "revisar" para que alguien decida.
+
+**Fix aplicado 2026-07-14:** tenía el mismo riesgo que se encontró en la Función 1 con filas de total — solo revisaba la columna del término de búsqueda para descartarlas. Corregido para revisar todas las columnas de la fila, igual que Función 1.
 
 ### Función 3 — Generador de copys desde URL (construida, oculta del menú — pendiente para v2)
 
@@ -63,20 +75,34 @@ Se validó con un export real de reservas de la cuenta Click Clack (columnas `Al
 
 Pendiente: seguir validando con más cuentas de hotel reales.
 
-## Por qué ninguna de las tres funciones de Google Ads usa un modelo de lenguaje por análisis
+### Función 5 — Comparar periodos (nueva, 2026-07-14)
+
+Sección para ver tendencia, no solo la foto de un momento. Se suben dos exports de campañas (mismo formato de la Función 1) — periodo actual y periodo anterior, cualquier rango de fechas que el usuario quiera — y la app empareja las campañas por nombre exacto, mostrando el cambio % en gasto, CPA, CTR, conversiones y ROAS, tanto por campaña como a nivel de cuenta.
+
+Incluye recomendaciones por tendencia (distintas de las de umbral fijo de la Función 1): CPA subió más de 20%, CTR bajó más de 20%, conversiones cayeron más de 20%, o el gasto subió más de 30% sin que las conversiones acompañaran — pensadas para detectar una campaña que está empeorando rápido, antes de que cruce el umbral fijo de "CPA alto".
+
+Campañas que solo existen en uno de los dos periodos (nuevas, pausadas, renombradas) se listan aparte en vez de forzar una comparación sin sentido. Se movió a segundo lugar en el menú, justo después de Rendimiento.
+
+Verificada con datos sintéticos de dos periodos (botón "Usar ejemplo"). Pendiente: probarla con dos exports reales del mismo cliente.
+
+## Por qué ninguna de las funciones de Google Ads usa un modelo de lenguaje por análisis
 
 A 100+ cuentas, llamar a una API por cada archivo o URL tiene costo y latencia reales, y en el caso de negativización y copys implicaría que cada persona del equipo tenga su propia clave de API. Por eso la Función 2 compara contra términos núcleo/excepciones definidas por el usuario, y la Función 3 combina extracción real de la página con plantillas de copywriting de conversión. El costo de esta decisión: ninguna de las dos "entiende" el contenido como lo haría un modelo — solo detectan lo que ya se les definió o lo que literalmente está escrito en la página. Por eso ambas funciones piden revisión humana antes de publicar nada.
 
 ## Cómo corre la plataforma, y el login
 
+**En producción:** `https://paid-media-helper.up.railway.app` — no depende de que la máquina de cesar esté prendida. Corre en [Railway](https://railway.app) con auto-deploy: cualquier cambio que llegue a la rama `main` del repo de GitHub se despliega solo. La base de datos (`data.db`, usuarios y sesiones) vive en un volumen persistente separado del código, así no se pierde en cada redeploy.
+
+**En local (opcional, para desarrollo):**
 ```
 cd webapp
 python3 server.py
 ```
+Abre `http://localhost:8642`.
 
-Abre `http://localhost:8642` — pide iniciar sesión o crear cuenta antes de dejar entrar. El registro es abierto (cualquiera con el link puede crear su cuenta), con contraseñas guardadas con hash + salt (nunca en texto plano) en una base SQLite local (`webapp/data.db`), y sesión por cookie de 14 días.
+En ambos casos, la app pide iniciar sesión o crear cuenta antes de dejar entrar. El registro es abierto (cualquiera con el link puede crear su cuenta), con contraseñas guardadas con hash + salt (nunca en texto plano), y sesión por cookie de 14 días — con el flag `Secure` activado en producción (solo se envía por HTTPS, que Railway provee automático).
 
-**Esto es apropiado mientras la app corra local o en una red interna de confianza, como hoy.** Antes de exponerla en una red compartida o en internet hace falta: HTTPS + cookie de sesión marcada `Secure`, y decidir si el registro sigue abierto o pasa a altas manuales. Además, Rendimiento y Negativización procesan el archivo subido enteramente en el navegador (nunca tocan el servidor) — el login controla quién *entra* a la app, no hay una segunda barrera del lado del servidor para esas dos funciones específicas una vez que alguien ya la tiene abierta.
+**Ya expuesta en internet, no solo en red local/interna como antes** (2026-07-13/14): eso resuelve la advertencia de HTTPS que tenía esta sección — **sigue pendiente** decidir si el registro abierto continúa así o pasa a altas manuales, ahora que cualquiera con el link (no solo alguien en la red interna) puede crear una cuenta. Además, Rendimiento y Negativización procesan el archivo subido enteramente en el navegador (nunca tocan el servidor) — el login controla quién *entra* a la app, no hay una segunda barrera del lado del servidor para esas dos funciones específicas una vez que alguien ya la tiene abierta.
 
 ## Limitaciones conocidas
 
@@ -85,24 +111,27 @@ Abre `http://localhost:8642` — pide iniciar sesión o crear cuenta antes de de
 - "Estelar" como término núcleo (Función 2) es amplio — es una cadena con varias propiedades en Colombia, puede retener búsquedas de otro hotel Estelar.
 - La Función 3 no ejecuta JavaScript: páginas que cargan su contenido dinámicamente van a dar poco texto real y el resultado se apoya más en plantillas genéricas.
 - La Función 3 no valida las políticas de contenido de Google Ads (mayúsculas, superlativos, marcas de terceros) — solo longitud de caracteres.
-- Ninguna de las cuatro funciones valida que el archivo/URL subido sea reciente ni de la cuenta correcta.
-- **Control de acceso: ya no está pendiente** (ver "Cómo corre la plataforma, y el login" arriba) — pero el registro abierto y la ausencia de HTTPS solo son apropiados corriendo local/red interna, no listos para exponer más ampliamente.
-- No hay persistencia de historial entre cargas todavía para ninguna de las cuatro funciones (Fase 2) — la base de datos que ya existe solo guarda cuentas de usuario, no resultados de análisis.
+- Ninguna de las cinco funciones valida que el archivo/URL subido sea reciente ni de la cuenta correcta.
+- **Control de acceso y despliegue: ya no están pendientes** (ver "Cómo corre la plataforma, y el login" arriba) — HTTPS resuelto por Railway; sigue pendiente decidir si el registro abierto continúa así ahora que la app es alcanzable por internet.
+- No hay persistencia de historial entre cargas todavía para ninguna función (Fase 2) — la base de datos que ya existe solo guarda cuentas de usuario, no resultados de análisis. La Función 5 (Comparar periodos) cubre parte de esta necesidad hoy, pero de forma manual (subiendo dos archivos cada vez).
+- Falta comprar y conectar un dominio propio — hoy la app vive en el dominio genérico de Railway (`paid-media-helper.up.railway.app`).
+- La Función 5 (Comparar periodos) solo se probó con datos sintéticos — falta validarla con dos exports reales del mismo cliente.
 
 ## Próximos pasos
 
-1. Repetir la carga de Función 1 con Click Clack Bogotá (ya corregido el bug de encabezado) y seguir con el resto de las 3-5 cuentas reales objetivo, comparando las recomendaciones contra el criterio de cesar como estratega.
+1. Repetir la carga de Función 1 con Click Clack Bogotá y con Estelar (ya corregidos los bugs de encabezado, UTF-16, filas "Total:" y columnas no reconocidas) y seguir con el resto de las 3-5 cuentas reales objetivo, comparando las recomendaciones contra el criterio de cesar como estratega.
 2. Revisar a mano los 14 términos en "revisar" y los que solo contienen "estelar" antes de subir cualquier negativo real a la cuenta.
 3. Función 3 en pausa: decidir para v2 si se retoma mejorando aún más las plantillas o si se cambia a generación real vía Claude API (con costo por llamada) — el enfoque de reglas ya recibió varias rondas de mejora y cesar decidió que el resultado no alcanza el estándar que necesita para v1.
 4. Seguir validando la Función 4 (Bookings) con más cuentas de hotel reales.
-5. Antes de exponer la app fuera de una red de confianza: HTTPS + cookie de sesión `Secure`, y decidir si el registro de usuarios sigue abierto.
-6. Decidir dónde va a vivir la app para que el equipo la use sin depender de una máquina local.
+5. Probar la Función 5 (Comparar periodos) con dos exports reales del mismo cliente.
+6. Decidir si el registro de usuarios sigue abierto o pasa a altas manuales, ahora que la app es alcanzable por internet.
+7. Comprar y conectar un dominio propio para reemplazar el de Railway.
 
 ## Archivos del proyecto
 
 | Archivo | Para qué sirve |
 |---|---|
-| `webapp/` | Implementación web completa (HTML/CSS/JS + servidor Python), con login y las cuatro funciones — correr con `python3 webapp/server.py`. Ver `webapp/README.md` |
+| `webapp/` | Implementación web completa (HTML/CSS/JS + servidor Python + `Dockerfile`), con login y las cinco funciones — en producción en Railway, o local con `python3 webapp/server.py`. Ver `webapp/README.md` |
 | `Especificacion_v1_Plataforma_Google_Ads.docx` | Especificación completa de las tres funciones originales de Google Ads: alcance, formato de archivo, mecanismo, arquitectura, riesgos |
 | `app.py` | Interfaz Streamlit con las tres funciones (correr con `streamlit run app.py`) |
 | `analysis.py` | Lógica de la Función 1 (rendimiento), reusable sin la interfaz |
