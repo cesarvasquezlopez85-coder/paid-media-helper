@@ -81,7 +81,7 @@ Sección para ver tendencia, no solo la foto de un momento. Se suben dos exports
 
 Incluye recomendaciones por tendencia (distintas de las de umbral fijo de la Función 1): CPA subió más de 20%, CTR bajó más de 20%, conversiones cayeron más de 20%, o el gasto subió más de 30% sin que las conversiones acompañaran — pensadas para detectar una campaña que está empeorando rápido, antes de que cruce el umbral fijo de "CPA alto".
 
-Campañas que solo existen en uno de los dos periodos (nuevas, pausadas, renombradas) se listan aparte en vez de forzar una comparación sin sentido. Se movió a segundo lugar en el menú, justo después de Rendimiento.
+Campañas que solo existen en uno de los dos periodos (nuevas, pausadas, renombradas) se listan aparte en vez de forzar una comparación sin sentido. Se movió a segundo lugar en el menú, justo después de Rendimiento. También tiene **filtro por campaña** ("Ver solo esta campaña", 2026-07-14) — mismo patrón que el de Rendimiento — para ver el resumen, las recomendaciones y la tabla de una sola campaña sin volver a subir los archivos.
 
 Verificada con datos sintéticos de dos periodos (botón "Usar ejemplo"). Pendiente: probarla con dos exports reales del mismo cliente.
 
