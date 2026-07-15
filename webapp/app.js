@@ -610,6 +610,11 @@ function renderComparePage() {
         <div class="stat-value">${currentSummary.roas != null ? (currentSummary.roas * 100).toFixed(0) + '%' : 'N/D'}</div>
         <div class="stat-sub">${deltaBadge(deltas.delta_roas, 'good_up')} vs. ${previousSummary.roas != null ? (previousSummary.roas * 100).toFixed(0) + '%' : 'N/D'}</div>
       </div>
+      <div class="card stat-card">
+        <div class="stat-label">Valor de conversión</div>
+        <div class="stat-value">${currentSummary.total_conv_value != null ? fmtMoney(currentSummary.total_conv_value) : 'N/D'}</div>
+        <div class="stat-sub">${deltaBadge(deltas.delta_conv_value, 'good_up')} vs. ${previousSummary.total_conv_value != null ? fmtMoney(previousSummary.total_conv_value) : 'N/D'}</div>
+      </div>
     </div>`;
 
   const recsHtml = trendRecs.length
