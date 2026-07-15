@@ -35,6 +35,7 @@ const state = {
   compare: {
     current: { status: 'idle', error: null, fileName: null, rows: null },
     previous: { status: 'idle', error: null, fileName: null, rows: null },
+    campaignFilter: 'all',
   },
 };
 
@@ -508,7 +509,19 @@ function runCompareAnalysis(which, text, fileName) {
   } catch (err) {
     Object.assign(slot, { status: 'error', error: err.message || String(err), fileName, rows: null });
   }
+  state.compare.campaignFilter = 'all';
   render();
+}
+
+function getCompareFilteredRows() {
+  const s = state.compare;
+  const currentRows = s.current.rows || [];
+  const previousRows = s.previous.rows || [];
+  if (s.campaignFilter === 'all') return { currentRows, previousRows };
+  return {
+    currentRows: currentRows.filter((r) => r.campaign === s.campaignFilter),
+    previousRows: previousRows.filter((r) => r.campaign === s.campaignFilter),
+  };
 }
 
 // mode: 'good_up' (subir es mejora, ej. conversiones/CTR/ROAS), 'good_down'
@@ -556,10 +569,23 @@ function renderComparePage() {
       </div>`;
   }
 
-  const currentSummary = engine.summarize(s.current.rows);
-  const previousSummary = engine.summarize(s.previous.rows);
+  const allCampaignNames = [...new Set([...s.current.rows.map((r) => r.campaign), ...s.previous.rows.map((r) => r.campaign)])].sort((a, b) => a.localeCompare(b));
+  const campaignFilterHtml = `
+    <div class="card control-panel align-end">
+      <div class="field">
+        <label>Ver solo esta campaña</label>
+        <select id="compare-campaign-filter" style="width:320px">
+          <option value="all" ${s.campaignFilter === 'all' ? 'selected' : ''}>Todas las campañas</option>
+          ${allCampaignNames.map((c) => `<option value="${escapeHtml(c)}" ${s.campaignFilter === c ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}
+        </select>
+      </div>
+    </div>`;
+
+  const { currentRows, previousRows } = getCompareFilteredRows();
+  const currentSummary = engine.summarize(currentRows);
+  const previousSummary = engine.summarize(previousRows);
   const deltas = engine.compareSummaries(currentSummary, previousSummary);
-  const { matched, onlyCurrent, onlyPrevious } = engine.compareCampaignPeriods(s.current.rows, s.previous.rows);
+  const { matched, onlyCurrent, onlyPrevious } = engine.compareCampaignPeriods(currentRows, previousRows);
   const trendRecs = engine.generateTrendRecommendations(matched);
 
   const statGrid = `
@@ -638,6 +664,7 @@ function renderComparePage() {
 
   return `
     ${uploadPanel}
+    ${campaignFilterHtml}
     ${statGrid}
     <div>
       <h2 class="section-title">Recomendaciones por tendencia (${trendRecs.length})</h2>
@@ -1307,6 +1334,11 @@ function bindEvents() {
     render();
     readFileAsCsvText(file).then((text) => runCompareAnalysis('previous', text, file.name))
       .catch((err) => { state.compare.previous.status = 'error'; state.compare.previous.error = err.message || String(err); render(); });
+  });
+  const compareCampaignFilter = document.getElementById('compare-campaign-filter');
+  if (compareCampaignFilter) compareCampaignFilter.addEventListener('change', (e) => {
+    state.compare.campaignFilter = e.target.value;
+    render();
   });
 
   // Negativización
