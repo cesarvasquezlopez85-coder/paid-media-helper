@@ -347,6 +347,14 @@ main.content { flex: 1; overflow-y: auto; height: 100%; }
   border-radius: var(--radius-md); padding: 18px 20px; font-size: 13.5px;
 }
 
+.delta-badge {
+  display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 6px;
+  border-radius: 999px; white-space: nowrap;
+}
+.delta-badge.good { background: var(--ok-bg); color: var(--ok-text); }
+.delta-badge.bad { background: var(--danger-bg); color: var(--danger); }
+.delta-badge.neutral { background: var(--gray-100); color: var(--color-text-muted); }
+
 .stat-grid { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
 .stat-card { flex: 1; min-width: 170px; padding: 18px 20px; }
 .stat-card.accent { border-color: var(--color-accent); }

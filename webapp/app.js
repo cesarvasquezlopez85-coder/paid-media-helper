@@ -31,6 +31,11 @@ const state = {
     status: 'idle', error: null, fileName: null, rows: null, dateOrder: null,
     marketFilter: 'all', hotelFilter: 'all',
   },
+
+  compare: {
+    current: { status: 'idle', error: null, fileName: null, rows: null },
+    previous: { status: 'idle', error: null, fileName: null, rows: null },
+  },
 };
 
 const PAGE_META = {
@@ -49,6 +54,10 @@ const PAGE_META = {
   bookings: {
     title: 'Bookings',
     caption: 'Sube el export de reservas reales (Excel/CSV) y obtén reservas por mercado, días de antelación entre la reserva y la estadía, y un heatmap de reservas por mes de llegada y mercado.',
+  },
+  comparativa: {
+    title: 'Comparar periodos',
+    caption: 'Sube el export de campañas de dos periodos distintos y obtén qué campañas mejoraron o empeoraron, con recomendaciones basadas en la tendencia.',
   },
 };
 
@@ -110,6 +119,7 @@ function render() {
   if (state.page === 'rendimiento') pageHtml = renderRendPage();
   else if (state.page === 'negativizacion') pageHtml = renderNegPage();
   else if (state.page === 'copys') pageHtml = renderCopyPage();
+  else if (state.page === 'comparativa') pageHtml = renderComparePage();
   else pageHtml = renderBookPage();
 
   root.innerHTML = `
@@ -481,6 +491,174 @@ function runRendAnalysis(text, fileName) {
     Object.assign(s, { status: 'error', error: err.message || String(err), fileName });
   }
   render();
+}
+
+// ---------------------------------------------------------------------------
+// Comparativa de periodos — mismo export de campañas (Función 1) subido dos
+// veces, de dos rangos de fecha distintos, para ver tendencia en vez de
+// solo la foto de un momento.
+// ---------------------------------------------------------------------------
+
+function runCompareAnalysis(which, text, fileName) {
+  const slot = state.compare[which];
+  try {
+    const rowsRaw = engine.loadCampaignReport(text, null);
+    const rows = engine.computeMetrics(rowsRaw);
+    Object.assign(slot, { status: 'ready', error: null, rows, fileName });
+  } catch (err) {
+    Object.assign(slot, { status: 'error', error: err.message || String(err), fileName, rows: null });
+  }
+  render();
+}
+
+// mode: 'good_up' (subir es mejora, ej. conversiones/CTR/ROAS), 'good_down'
+// (bajar es mejora, ej. CPA), o 'neutral' (solo se informa la tendencia,
+// sin juicio de bueno/malo — ej. gasto, que puede subir a propósito).
+function deltaBadge(pct, mode) {
+  if (pct == null) return '<span class="delta-badge neutral">—</span>';
+  const arrow = pct > 0 ? '▲' : (pct < 0 ? '▼' : '—');
+  let cls = 'neutral';
+  if (mode === 'good_up') cls = pct > 0 ? 'good' : (pct < 0 ? 'bad' : 'neutral');
+  else if (mode === 'good_down') cls = pct < 0 ? 'good' : (pct > 0 ? 'bad' : 'neutral');
+  return `<span class="delta-badge ${cls}">${arrow} ${Math.abs(pct * 100).toFixed(0)}%</span>`;
+}
+
+function renderComparePage() {
+  const s = state.compare;
+  const bothReady = s.current.status === 'ready' && s.previous.status === 'ready';
+
+  const uploadPanel = `
+    <div class="card control-panel align-end">
+      <div class="field">
+        <label>Periodo actual (CSV o Excel)</label>
+        <input type="file" id="compare-current-file" accept=".csv,.xlsx,.xls" />
+        ${s.current.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.current.fileName)}</strong></div>` : ''}
+      </div>
+      <div class="field">
+        <label>Periodo anterior (CSV o Excel)</label>
+        <input type="file" id="compare-previous-file" accept=".csv,.xlsx,.xls" />
+        ${s.previous.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.previous.fileName)}</strong></div>` : ''}
+      </div>
+      <button class="btn-outline" data-action="compare-demo">Usar ejemplo (dos periodos)</button>
+    </div>`;
+
+  let errorHtml = '';
+  if (s.current.status === 'error') errorHtml += `<div class="error-panel"><strong>Periodo actual:</strong> ${escapeHtml(s.current.error)}</div>`;
+  if (s.previous.status === 'error') errorHtml += `<div class="error-panel"><strong>Periodo anterior:</strong> ${escapeHtml(s.previous.error)}</div>`;
+
+  if (!bothReady) {
+    return `
+      ${uploadPanel}
+      ${errorHtml}
+      <div class="card state-panel idle">
+        ${icon('git-compare', 30)}
+        <p>Sube el export del periodo actual y del periodo anterior (o usa el ejemplo) para ver la comparativa.</p>
+      </div>`;
+  }
+
+  const currentSummary = engine.summarize(s.current.rows);
+  const previousSummary = engine.summarize(s.previous.rows);
+  const deltas = engine.compareSummaries(currentSummary, previousSummary);
+  const { matched, onlyCurrent, onlyPrevious } = engine.compareCampaignPeriods(s.current.rows, s.previous.rows);
+  const trendRecs = engine.generateTrendRecommendations(matched);
+
+  const statGrid = `
+    <div class="stat-grid">
+      <div class="card stat-card">
+        <div class="stat-label">Gasto total</div>
+        <div class="stat-value">${fmtMoney(currentSummary.total_cost)}</div>
+        <div class="stat-sub">${deltaBadge(deltas.delta_cost, 'neutral')} vs. ${fmtMoney(previousSummary.total_cost)}</div>
+      </div>
+      <div class="card stat-card">
+        <div class="stat-label">Conversiones</div>
+        <div class="stat-value">${fmtInt(currentSummary.total_conversions)}</div>
+        <div class="stat-sub">${deltaBadge(deltas.delta_conversions, 'good_up')} vs. ${fmtInt(previousSummary.total_conversions)}</div>
+      </div>
+      <div class="card stat-card">
+        <div class="stat-label">CPA promedio (ponderado)</div>
+        <div class="stat-value">${currentSummary.avg_cpa_weighted != null ? fmtMoney(currentSummary.avg_cpa_weighted) : 'N/D'}</div>
+        <div class="stat-sub">${deltaBadge(deltas.delta_cpa, 'good_down')} vs. ${previousSummary.avg_cpa_weighted != null ? fmtMoney(previousSummary.avg_cpa_weighted) : 'N/D'}</div>
+      </div>
+      <div class="card stat-card">
+        <div class="stat-label">ROAS</div>
+        <div class="stat-value">${currentSummary.roas != null ? (currentSummary.roas * 100).toFixed(0) + '%' : 'N/D'}</div>
+        <div class="stat-sub">${deltaBadge(deltas.delta_roas, 'good_up')} vs. ${previousSummary.roas != null ? (previousSummary.roas * 100).toFixed(0) + '%' : 'N/D'}</div>
+      </div>
+    </div>`;
+
+  const recsHtml = trendRecs.length
+    ? `<div class="rec-list">${trendRecs.map((r) => {
+        const metaR = REC_CATEGORY_META[r.categoria] || { icon: 'bar-chart-2', tone: 'dark' };
+        const impactoPct = (r.impacto_gasto * 100).toFixed(0) + '%';
+        return `
+          <div class="card rec-card">
+            <div class="icon-tile tone-${metaR.tone}">${icon(metaR.icon, 18)}</div>
+            <div class="rec-body">
+              <div class="rec-head">
+                <span class="rec-campaign">${escapeHtml(r.campaign)}</span>
+                <span class="rec-cat">${escapeHtml(r.categoria)}</span>
+              </div>
+              <p class="rec-hallazgo">${escapeHtml(r.hallazgo)}</p>
+              <p class="rec-recomendacion">➜ ${escapeHtml(r.recomendacion)}</p>
+            </div>
+            <div class="rec-impact">
+              <div class="rec-impact-label">Impacto</div>
+              <div class="rec-impact-value">${impactoPct}</div>
+            </div>
+          </div>`;
+      }).join('')}</div>`
+    : `<div class="ok-panel">No se detectaron caídas ni subidas fuertes entre los dos periodos con los umbrales actuales.</div>`;
+
+  const tableRows = matched.map((m) => {
+    const cpaText = !Number.isNaN(m.current.cpa) ? fmtMoney(m.current.cpa) : 'N/D';
+    const ctrText = !Number.isNaN(m.current.ctr) ? (m.current.ctr * 100).toFixed(2) + '%' : 'N/D';
+    return `
+      <tr>
+        <td>${escapeHtml(m.campaign)}</td>
+        <td>${fmtMoney(m.current.cost)} ${deltaBadge(m.delta_cost, 'neutral')}</td>
+        <td>${cpaText} ${deltaBadge(m.delta_cpa, 'good_down')}</td>
+        <td>${ctrText} ${deltaBadge(m.delta_ctr, 'good_up')}</td>
+        <td>${fmtInt(m.current.conversions)} ${deltaBadge(m.delta_conversions, 'good_up')}</td>
+      </tr>`;
+  }).join('');
+
+  const onlyListsHtml = (onlyCurrent.length || onlyPrevious.length) ? `
+    <div class="dense-grid" style="margin-top:16px">
+      ${onlyCurrent.length ? `
+        <div class="card dense-panel">
+          <h3 class="dense-chart-title">Campañas nuevas en el periodo actual (${onlyCurrent.length})</h3>
+          ${onlyCurrent.map((r) => `<div class="dense-row"><span>${escapeHtml(r.campaign)}</span><strong>${fmtMoney(r.cost)}</strong></div>`).join('')}
+        </div>` : ''}
+      ${onlyPrevious.length ? `
+        <div class="card dense-panel">
+          <h3 class="dense-chart-title">Campañas que no aparecen en el periodo actual (${onlyPrevious.length})</h3>
+          ${onlyPrevious.map((r) => `<div class="dense-row"><span>${escapeHtml(r.campaign)}</span><strong>${fmtMoney(r.cost)}</strong></div>`).join('')}
+        </div>` : ''}
+    </div>` : '';
+
+  return `
+    ${uploadPanel}
+    ${statGrid}
+    <div>
+      <h2 class="section-title">Recomendaciones por tendencia (${trendRecs.length})</h2>
+      ${recsHtml}
+    </div>
+    <div class="card chart-card" style="margin-top:16px">
+      <h3 class="dense-chart-title">Campañas comparadas (${matched.length})</h3>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>Campaña</th><th>Gasto</th><th>CPA</th><th>CTR</th><th>Conversiones</th></tr></thead>
+          <tbody>${tableRows}</tbody>
+        </table>
+      </div>
+    </div>
+    ${onlyListsHtml}
+    <p class="footnote">
+      Las campañas se emparejan por nombre exacto entre los dos archivos — si una campaña se renombró entre periodos, va a aparecer como "nueva" en un lado y "ya no aparece" en el otro.
+      Los badges ▲/▼ comparan el periodo actual contra el anterior: verde es mejora, rojo es empeora. En Gasto no se juzga bueno/malo porque subir puede ser intencional.
+      Umbrales de la recomendación por tendencia: CPA +20%, CTR -20%, conversiones -20%, o gasto +30% sin que suban las conversiones.
+    </p>
+  `;
 }
 
 // ---------------------------------------------------------------------------
@@ -1111,6 +1289,26 @@ function bindEvents() {
     btn.addEventListener('click', () => { state.rend.chartTab = btn.dataset.rendTab; render(); });
   });
 
+  // Comparativa de periodos
+  const compareCurrentFile = document.getElementById('compare-current-file');
+  if (compareCurrentFile) compareCurrentFile.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    state.compare.current.status = 'loading'; state.compare.current.error = null; state.compare.current.fileName = file.name;
+    render();
+    readFileAsCsvText(file).then((text) => runCompareAnalysis('current', text, file.name))
+      .catch((err) => { state.compare.current.status = 'error'; state.compare.current.error = err.message || String(err); render(); });
+  });
+  const comparePreviousFile = document.getElementById('compare-previous-file');
+  if (comparePreviousFile) comparePreviousFile.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    state.compare.previous.status = 'loading'; state.compare.previous.error = null; state.compare.previous.fileName = file.name;
+    render();
+    readFileAsCsvText(file).then((text) => runCompareAnalysis('previous', text, file.name))
+      .catch((err) => { state.compare.previous.status = 'error'; state.compare.previous.error = err.message || String(err); render(); });
+  });
+
   // Negativización
   const negCoreInput = document.getElementById('neg-core');
   if (negCoreInput) negCoreInput.addEventListener('input', (e) => { state.neg.core = e.target.value; });
@@ -1178,6 +1376,17 @@ function handleAction(action) {
       state.rend.status = 'loading'; state.rend.error = null; state.rend.fileName = 'sample_data.csv';
       render();
       setTimeout(() => runRendAnalysis(engine.SAMPLE_CAMPAIGN_CSV, 'sample_data.csv'), 250);
+      break;
+    }
+
+    case 'compare-demo': {
+      state.compare.current.status = 'loading'; state.compare.current.error = null; state.compare.current.fileName = 'sample_data_actual.csv';
+      state.compare.previous.status = 'loading'; state.compare.previous.error = null; state.compare.previous.fileName = 'sample_data_anterior.csv';
+      render();
+      setTimeout(() => {
+        runCompareAnalysis('current', engine.SAMPLE_CAMPAIGN_CSV, 'sample_data_actual.csv');
+        runCompareAnalysis('previous', engine.SAMPLE_CAMPAIGN_CSV_PREVIOUS, 'sample_data_anterior.csv');
+      }, 250);
       break;
     }
 

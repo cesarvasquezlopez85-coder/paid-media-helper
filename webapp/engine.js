@@ -298,6 +298,116 @@ export function generateRecommendations(rows) {
 }
 
 // ---------------------------------------------------------------------------
+// Comparativa de periodos — mismo export de campañas (Función 1), pero de
+// dos rangos de fecha distintos, para ver tendencia en vez de solo la foto
+// de un momento.
+// ---------------------------------------------------------------------------
+
+const TREND_THRESHOLDS = {
+  cpa_up_pct: 0.20,
+  ctr_down_pct: -0.20,
+  conversions_down_pct: -0.20,
+  cost_up_no_conv_pct: 0.30,
+};
+
+function pctChange(before, after) {
+  if (before === null || before === undefined || Number.isNaN(before)) return null;
+  if (after === null || after === undefined || Number.isNaN(after)) return null;
+  if (before === 0) return null; // evita división por cero / % engañoso al partir de 0
+  return (after - before) / before;
+}
+
+// Empareja campañas por nombre entre los dos archivos. Campañas que solo
+// existen en uno de los dos periodos (nuevas, pausadas, renombradas) se
+// listan aparte en vez de forzarlas a una comparación sin sentido.
+export function compareCampaignPeriods(currentRows, previousRows) {
+  const prevByName = new Map(previousRows.map((r) => [r.campaign, r]));
+  const currByName = new Map(currentRows.map((r) => [r.campaign, r]));
+  const allNames = new Set([...prevByName.keys(), ...currByName.keys()]);
+  const matched = [];
+  const onlyCurrent = [];
+  const onlyPrevious = [];
+  for (const name of allNames) {
+    const curr = currByName.get(name);
+    const prev = prevByName.get(name);
+    if (curr && prev) {
+      matched.push({
+        campaign: name,
+        current: curr,
+        previous: prev,
+        delta_cost: pctChange(prev.cost, curr.cost),
+        delta_cpa: pctChange(prev.cpa, curr.cpa),
+        delta_ctr: pctChange(prev.ctr, curr.ctr),
+        delta_conversions: pctChange(prev.conversions, curr.conversions),
+        delta_roas: pctChange(prev.roas, curr.roas),
+      });
+    } else if (curr) {
+      onlyCurrent.push(curr);
+    } else if (prev) {
+      onlyPrevious.push(prev);
+    }
+  }
+  matched.sort((a, b) => (Number.isNaN(b.current.cost) ? 0 : b.current.cost) - (Number.isNaN(a.current.cost) ? 0 : a.current.cost));
+  return { matched, onlyCurrent, onlyPrevious };
+}
+
+// Comparación de los totales de cuenta entre ambos periodos (para las
+// tarjetas de resumen) — reusa summarize() de cada archivo por separado.
+export function compareSummaries(currentSummary, previousSummary) {
+  return {
+    delta_cost: pctChange(previousSummary.total_cost, currentSummary.total_cost),
+    delta_conversions: pctChange(previousSummary.total_conversions, currentSummary.total_conversions),
+    delta_cpa: pctChange(previousSummary.avg_cpa_weighted, currentSummary.avg_cpa_weighted),
+    delta_roas: pctChange(previousSummary.roas, currentSummary.roas),
+  };
+}
+
+// Recomendaciones basadas en tendencia (no en umbral fijo) — una campaña
+// puede seguir "sana" según los umbrales de la Función 1 y aun así estar
+// empeorando rápido; esto la detecta antes de que cruce ese umbral.
+export function generateTrendRecommendations(matched) {
+  const recs = [];
+  const totalCurrentCost = matched.reduce((s, m) => s + (Number.isNaN(m.current.cost) ? 0 : m.current.cost), 0);
+  for (const m of matched) {
+    const impacto = totalCurrentCost > 0 ? (Number.isNaN(m.current.cost) ? 0 : m.current.cost) / totalCurrentCost : 0;
+    if (m.delta_cpa != null && m.delta_cpa > TREND_THRESHOLDS.cpa_up_pct) {
+      recs.push({
+        campaign: m.campaign, categoria: "CPA",
+        hallazgo: `CPA subió ${(m.delta_cpa * 100).toFixed(0)}% vs. el periodo anterior ($${m.previous.cpa.toFixed(2)} → $${m.current.cpa.toFixed(2)}).`,
+        recomendacion: "Revisar qué cambió en esta campaña (pujas, presupuesto, competencia) antes de que se acumule más gasto ineficiente.",
+        impacto_gasto: impacto,
+      });
+    }
+    if (m.delta_ctr != null && m.delta_ctr < TREND_THRESHOLDS.ctr_down_pct) {
+      recs.push({
+        campaign: m.campaign, categoria: "Relevancia (CTR)",
+        hallazgo: `CTR bajó ${Math.abs(m.delta_ctr * 100).toFixed(0)}% vs. el periodo anterior (${(m.previous.ctr * 100).toFixed(2)}% → ${(m.current.ctr * 100).toFixed(2)}%).`,
+        recomendacion: "Revisar fatiga de anuncios — probar copy nuevo o refrescar creatividades.",
+        impacto_gasto: impacto,
+      });
+    }
+    if (m.delta_conversions != null && m.delta_conversions < TREND_THRESHOLDS.conversions_down_pct) {
+      recs.push({
+        campaign: m.campaign, categoria: "Conversiones",
+        hallazgo: `Conversiones cayeron ${Math.abs(m.delta_conversions * 100).toFixed(0)}% vs. el periodo anterior (${m.previous.conversions.toFixed(1)} → ${m.current.conversions.toFixed(1)}).`,
+        recomendacion: "Revisar si hubo un cambio en landing page, oferta o tracking de conversiones.",
+        impacto_gasto: impacto,
+      });
+    }
+    if (m.delta_cost != null && m.delta_cost > TREND_THRESHOLDS.cost_up_no_conv_pct && (m.delta_conversions == null || m.delta_conversions <= 0)) {
+      recs.push({
+        campaign: m.campaign, categoria: "Presupuesto",
+        hallazgo: `Gasto subió ${(m.delta_cost * 100).toFixed(0)}% vs. el periodo anterior sin que las conversiones acompañaran.`,
+        recomendacion: "Confirmar que el aumento de presupuesto está generando resultados proporcionales antes de seguir invirtiendo.",
+        impacto_gasto: impacto,
+      });
+    }
+  }
+  recs.sort((a, b) => b.impacto_gasto - a.impacto_gasto);
+  return recs;
+}
+
+// ---------------------------------------------------------------------------
 // Función 2 — Negativización de términos de búsqueda
 // ---------------------------------------------------------------------------
 
@@ -751,6 +861,24 @@ Search - Competidores Brand,Enabled,$35.00,5000,150,3.00%,$1.80,$270.00,3,$90.00
 Search - Bodas y Eventos,Enabled,$20.00,2000,60,3.00%,$0.50,$30.00,2,$15.00,3.33%,0.00%,1.00%
 Search - Corporativo,Paused,$25.00,1000,25,2.50%,$0.60,$15.00,1,$15.00,4.00%,0.00%,0.00%
 Total: all campaigns,--,,313000,3615,,,"$2,139.00",125,,,,`;
+
+// Mismas campañas que SAMPLE_CAMPAIGN_CSV pero de un periodo anterior, con
+// diferencias intencionales (CPA de marca subió, CTR de Todo Incluido bajó,
+// Performance Max perdió conversiones) — solo para demostrar la Comparativa
+// de periodos con un clic, sin depender de que el usuario tenga a mano dos
+// archivos reales.
+export const SAMPLE_CAMPAIGN_CSV_PREVIOUS = `Campaign,Campaign status,Budget,Impr.,Clicks,CTR,Avg. CPC,Cost,Conversions,Cost / conv.,Conv. rate,Search Lost IS (budget),Search Lost IS (rank)
+Search - Marca Estelar Manzanillo,Enabled,$50.00,11500,460,4.00%,$0.30,$138.00,25,$5.52,5.43%,1.00%,2.00%
+Search - Habitaciones Cartagena,Enabled,$80.00,8800,290,3.30%,$1.15,$333.50,7,$47.64,2.41%,4.00%,7.00%
+Search - Genérico Hoteles Caribe,Enabled,$60.00,14500,175,1.21%,$0.88,$154.00,9,$17.11,5.14%,3.00%,5.00%
+Display - Remarketing,Enabled,$30.00,195000,780,0.40%,$0.15,$117.00,15,$7.80,1.92%,0.00%,0.00%
+Search - Ofertas Fin de Semana,Enabled,$40.00,7800,315,4.04%,$0.44,$138.60,17,$8.15,5.40%,20.00%,3.00%
+Search - Todo Incluido,Enabled,$70.00,10800,470,4.35%,$0.49,$230.30,17,$13.55,3.62%,2.00%,20.00%
+Performance Max - Reservas,Enabled,$100.00,49000,890,1.82%,$0.68,$605.20,42,$14.41,4.72%,4.00%,3.00%
+Search - Competidores Brand,Enabled,$35.00,4900,148,3.02%,$1.75,$259.00,3,$86.33,2.03%,1.00%,2.00%
+Search - Bodas y Eventos,Enabled,$20.00,1950,58,2.97%,$0.49,$28.42,2,$14.21,3.45%,0.00%,1.00%
+Search - Corporativo,Paused,$25.00,980,24,2.45%,$0.58,$13.92,1,$13.92,4.17%,0.00%,0.00%
+Total: all campaigns,--,,305230,3610,,,"$2,017.94",138,,,,`;
 
 export const SAMPLE_SEARCH_TERMS_CSV = `Search term,Clicks,Impr.,Cost,Conversions
 estelar playa manzanillo,210,3400,240.10,18
