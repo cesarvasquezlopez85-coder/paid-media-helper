@@ -1382,6 +1382,59 @@ export function summarizeArrivalsByWeekday(rows) {
   }));
 }
 
+// Comparativa de periodos para Bookings — mismo criterio que
+// compareCampaignPeriods (Función 5): dos exports de reservas (periodo
+// actual y periodo anterior), comparados por mercado y a nivel de cuenta.
+// pctChange ya existe más arriba en este archivo (Comparativa de periodos
+// de campañas) y se reusa aquí tal cual.
+function bookingNights(r) {
+  return r.stayNights !== null && !Number.isNaN(r.stayNights) && r.stayNights >= 0 ? r.stayNights : 0;
+}
+
+export function compareBookingPeriods(currentRows, previousRows) {
+  const byMarketCurrent = summarizeBookingsByMarket(currentRows);
+  const byMarketPrevious = summarizeBookingsByMarket(previousRows);
+  const currMap = new Map(byMarketCurrent.map((m) => [m.mercado, m]));
+  const prevMap = new Map(byMarketPrevious.map((m) => [m.mercado, m]));
+  const allMarkets = new Set([...currMap.keys(), ...prevMap.keys()]);
+
+  const markets = [...allMarkets].map((mercado) => {
+    const curr = currMap.get(mercado) || { reservas: 0, noches: 0 };
+    const prev = prevMap.get(mercado) || { reservas: 0, noches: 0 };
+    return {
+      mercado,
+      current_reservas: curr.reservas,
+      current_noches: curr.noches,
+      previous_reservas: prev.reservas,
+      previous_noches: prev.noches,
+      delta_reservas: pctChange(prev.reservas, curr.reservas),
+      delta_noches: pctChange(prev.noches, curr.noches),
+    };
+  }).sort((a, b) => b.current_reservas - a.current_reservas);
+
+  const totalReservasCurrent = currentRows.length;
+  const totalReservasPrevious = previousRows.length;
+  const totalNochesCurrent = currentRows.reduce((s, r) => s + bookingNights(r), 0);
+  const totalNochesPrevious = previousRows.reduce((s, r) => s + bookingNights(r), 0);
+  const leadCurrent = summarizeLeadTime(currentRows);
+  const leadPrevious = summarizeLeadTime(previousRows);
+
+  return {
+    markets,
+    total_reservas_current: totalReservasCurrent,
+    total_reservas_previous: totalReservasPrevious,
+    delta_reservas: pctChange(totalReservasPrevious, totalReservasCurrent),
+    total_noches_current: totalNochesCurrent,
+    total_noches_previous: totalNochesPrevious,
+    delta_noches: pctChange(totalNochesPrevious, totalNochesCurrent),
+    avg_noches_current: totalReservasCurrent > 0 ? totalNochesCurrent / totalReservasCurrent : null,
+    avg_noches_previous: totalReservasPrevious > 0 ? totalNochesPrevious / totalReservasPrevious : null,
+    lead_avg_current: leadCurrent.promedio,
+    lead_avg_previous: leadPrevious.promedio,
+    delta_lead: pctChange(leadPrevious.promedio, leadCurrent.promedio),
+  };
+}
+
 // Datos de ejemplo — mezcla de fechas de alta/entrada pasadas y futuras
 // respecto a cuando se generó este archivo, para que el gráfico "a futuro"
 // siempre tenga datos que mostrar sin depender de subir un archivo real.
@@ -1416,3 +1469,23 @@ export const SAMPLE_BOOKINGS_CSV = `Alta,Hotel,Canal,Pais,Afiliado,Fecha entrada
 05/07/2026,Estelar Playa Manzanillo,Booking.com,México,N/D,25/08/2026,29/08/2026
 08/07/2026,Estelar Playa Manzanillo,Directo,Colombia,N/D,30/07/2026,02/08/2026
 10/07/2026,Estelar Playa Manzanillo,Agencia,Argentina,Agencia Sol,15/09/2026,19/09/2026`;
+
+// Mismo hotel, periodo anterior (menos reservas, mezcla de mercados algo
+// distinta) — solo para demostrar Comparar periodos de Bookings con un
+// clic, sin depender de que el usuario tenga dos archivos reales a mano.
+export const SAMPLE_BOOKINGS_CSV_PREVIOUS = `Alta,Hotel,Canal,Pais,Afiliado,Fecha entrada,Fecha salida
+03/10/2025,Estelar Playa Manzanillo,Booking.com,Colombia,N/D,20/11/2025,23/11/2025
+09/10/2025,Estelar Playa Manzanillo,Directo,Colombia,N/D,02/12/2025,05/12/2025
+15/10/2025,Estelar Playa Manzanillo,Expedia,Estados Unidos,N/D,10/12/2025,14/12/2025
+20/10/2025,Estelar Playa Manzanillo,Booking.com,Colombia,N/D,22/12/2025,27/12/2025
+28/10/2025,Estelar Playa Manzanillo,Directo,México,N/D,08/01/2026,11/01/2026
+02/11/2025,Estelar Playa Manzanillo,Booking.com,Colombia,N/D,15/01/2026,18/01/2026
+08/11/2025,Estelar Playa Manzanillo,Agencia,España,Agencia Sol,25/01/2026,29/01/2026
+14/11/2025,Estelar Playa Manzanillo,Directo,Colombia,N/D,03/02/2026,06/02/2026
+19/11/2025,Estelar Playa Manzanillo,Expedia,Argentina,N/D,14/02/2026,17/02/2026
+25/11/2025,Estelar Playa Manzanillo,Booking.com,Colombia,N/D,22/02/2026,25/02/2026
+01/12/2025,Estelar Playa Manzanillo,Directo,Colombia,N/D,05/03/2026,09/03/2026
+06/12/2025,Estelar Playa Manzanillo,Booking.com,Brasil,N/D,15/03/2026,18/03/2026
+12/12/2025,Estelar Playa Manzanillo,Agencia,Colombia,Agencia Sol,28/03/2026,31/03/2026
+18/12/2025,Estelar Playa Manzanillo,Directo,Estados Unidos,N/D,10/04/2026,14/04/2026
+23/12/2025,Estelar Playa Manzanillo,Expedia,México,N/D,20/04/2026,23/04/2026`;

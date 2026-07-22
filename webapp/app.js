@@ -30,6 +30,11 @@ const state = {
   book: {
     status: 'idle', error: null, fileName: null, rows: null, dateOrder: null,
     marketFilter: 'all', hotelFilter: 'all',
+    mode: 'single',
+    compare: {
+      current: { status: 'idle', error: null, fileName: null, rows: null },
+      previous: { status: 'idle', error: null, fileName: null, rows: null },
+    },
   },
 
   compare: {
@@ -1420,6 +1425,14 @@ function onCopyAnalyzeUrl() {
 function renderBookPage() {
   const s = state.book;
 
+  const modeToggle = `
+    <div class="seg-control" style="margin-bottom:16px">
+      <button class="seg-btn ${s.mode === 'single' ? 'active' : ''}" data-action="book-mode-single">Análisis único</button>
+      <button class="seg-btn ${s.mode === 'compare' ? 'active' : ''}" data-action="book-mode-compare">Comparar periodos</button>
+    </div>`;
+
+  if (s.mode === 'compare') return modeToggle + renderBookComparePage();
+
   let body = '';
   if (s.status === 'idle') {
     body = `
@@ -1440,6 +1453,7 @@ function renderBookPage() {
   }
 
   return `
+    ${modeToggle}
     <div class="card control-panel align-end">
       <div class="field">
         <label>Export de reservas (CSV o Excel)</label>
@@ -1449,6 +1463,118 @@ function renderBookPage() {
       ${s.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.fileName)}</strong></div>` : ''}
     </div>
     ${body}
+  `;
+}
+
+// ---------------------------------------------------------------------------
+// Bookings — Comparar periodos (mismo criterio que Función 5, campañas)
+// ---------------------------------------------------------------------------
+
+function runBookCompareAnalysisFromText(which, text, fileName) {
+  const slot = state.book.compare[which];
+  try {
+    const result = engine.loadBookings(text);
+    Object.assign(slot, { status: 'ready', error: null, rows: result.rows, fileName });
+  } catch (err) {
+    Object.assign(slot, { status: 'error', error: err.message || String(err), fileName, rows: null });
+  }
+  render();
+}
+
+function runBookCompareAnalysisFromRows(which, rows2D, fileName) {
+  const slot = state.book.compare[which];
+  try {
+    const result = engine.loadBookingsFromRows(rows2D);
+    Object.assign(slot, { status: 'ready', error: null, rows: result.rows, fileName });
+  } catch (err) {
+    Object.assign(slot, { status: 'error', error: err.message || String(err), fileName, rows: null });
+  }
+  render();
+}
+
+function renderBookComparePage() {
+  const s = state.book.compare;
+  const bothReady = s.current.status === 'ready' && s.previous.status === 'ready';
+
+  const uploadPanel = `
+    <div class="card control-panel align-end">
+      <div class="field">
+        <label>Periodo actual (CSV o Excel)</label>
+        <input type="file" id="book-compare-current-file" accept=".csv,.xlsx,.xls" />
+        ${s.current.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.current.fileName)}</strong></div>` : ''}
+      </div>
+      <div class="field">
+        <label>Periodo anterior (CSV o Excel)</label>
+        <input type="file" id="book-compare-previous-file" accept=".csv,.xlsx,.xls" />
+        ${s.previous.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.previous.fileName)}</strong></div>` : ''}
+      </div>
+      <button class="btn-outline" data-action="book-compare-demo">Usar ejemplo (dos periodos)</button>
+    </div>`;
+
+  let errorHtml = '';
+  if (s.current.status === 'error') errorHtml += `<div class="error-panel"><strong>Periodo actual:</strong> ${escapeHtml(s.current.error)}</div>`;
+  if (s.previous.status === 'error') errorHtml += `<div class="error-panel"><strong>Periodo anterior:</strong> ${escapeHtml(s.previous.error)}</div>`;
+
+  if (!bothReady) {
+    return `
+      ${uploadPanel}
+      ${errorHtml}
+      <div class="card state-panel idle">
+        ${icon('git-compare', 30)}
+        <p>Sube el export de reservas del periodo actual y del periodo anterior (o usa el ejemplo) para ver la comparativa.</p>
+      </div>`;
+  }
+
+  const cmp = engine.compareBookingPeriods(s.current.rows, s.previous.rows);
+
+  const statGrid = `
+    <div class="stat-grid">
+      <div class="card stat-card">
+        <div class="stat-label">Reservas totales</div>
+        <div class="stat-value">${fmtInt(cmp.total_reservas_current)}</div>
+        <div class="stat-sub">${deltaBadge(cmp.delta_reservas, 'good_up')} vs. ${fmtInt(cmp.total_reservas_previous)}</div>
+      </div>
+      <div class="card stat-card">
+        <div class="stat-label">Noches de habitación</div>
+        <div class="stat-value">${fmtInt(cmp.total_noches_current)}</div>
+        <div class="stat-sub">${deltaBadge(cmp.delta_noches, 'good_up')} vs. ${fmtInt(cmp.total_noches_previous)}</div>
+      </div>
+      <div class="card stat-card">
+        <div class="stat-label">Promedio noches/reserva</div>
+        <div class="stat-value">${cmp.avg_noches_current != null ? cmp.avg_noches_current.toFixed(1) : 'N/D'}</div>
+        <div class="stat-sub">vs. ${cmp.avg_noches_previous != null ? cmp.avg_noches_previous.toFixed(1) : 'N/D'}</div>
+      </div>
+      <div class="card stat-card">
+        <div class="stat-label">Antelación promedio</div>
+        <div class="stat-value">${cmp.lead_avg_current != null ? fmtInt(cmp.lead_avg_current) + ' días' : 'N/D'}</div>
+        <div class="stat-sub">${deltaBadge(cmp.delta_lead, 'neutral')} vs. ${cmp.lead_avg_previous != null ? fmtInt(cmp.lead_avg_previous) + ' días' : 'N/D'}</div>
+      </div>
+    </div>`;
+
+  const tableRows = cmp.markets.map((m) => `
+    <tr>
+      <td>${escapeHtml(m.mercado)}</td>
+      <td>${fmtInt(m.current_reservas)} ${deltaBadge(m.delta_reservas, 'good_up')}</td>
+      <td>${fmtInt(m.current_noches)} ${deltaBadge(m.delta_noches, 'good_up')}</td>
+      <td>${fmtInt(m.previous_reservas)}</td>
+      <td>${fmtInt(m.previous_noches)}</td>
+    </tr>`).join('');
+
+  return `
+    ${uploadPanel}
+    ${statGrid}
+    <div class="card chart-card">
+      <h3 class="dense-chart-title">Reservas por mercado — periodo actual vs. anterior</h3>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>Mercado</th><th>Reservas (actual)</th><th>Noches (actual)</th><th>Reservas (anterior)</th><th>Noches (anterior)</th></tr></thead>
+          <tbody>${tableRows}</tbody>
+        </table>
+      </div>
+    </div>
+    <p class="footnote">
+      Las reservas se agrupan por mercado (país). Los badges ▲/▼ comparan el periodo actual contra el anterior en reservas y noches — más es mejor en ambas.
+    </p>
   `;
 }
 
@@ -1836,6 +1962,25 @@ function bindEvents() {
     state.book.hotelFilter = e.target.value;
     render();
   });
+
+  ['current', 'previous'].forEach((which) => {
+    const input = document.getElementById(`book-compare-${which}-file`);
+    if (!input) return;
+    input.addEventListener('change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const slot = state.book.compare[which];
+      slot.status = 'loading'; slot.error = null; slot.fileName = file.name;
+      render();
+      const isExcel = /\.(xlsx|xls)$/i.test(file.name);
+      const onError = (err) => { slot.status = 'error'; slot.error = err.message || String(err); render(); };
+      if (isExcel) {
+        readExcelRows(file).then((rows2D) => runBookCompareAnalysisFromRows(which, rows2D, file.name)).catch(onError);
+      } else {
+        readFileAsCsvText(file).then((text) => runBookCompareAnalysisFromText(which, text, file.name)).catch(onError);
+      }
+    });
+  });
   // Acciones (data-action)
   root.querySelectorAll('[data-action]').forEach((el) => {
     el.addEventListener('click', () => handleAction(el.dataset.action));
@@ -1930,6 +2075,20 @@ function handleAction(action) {
       state.book.status = 'loading'; state.book.error = null; state.book.fileName = 'reservas_ejemplo.csv';
       render();
       setTimeout(() => runBookAnalysisFromText(engine.SAMPLE_BOOKINGS_CSV, 'reservas_ejemplo.csv'), 250);
+      break;
+    }
+
+    case 'book-mode-single': state.book.mode = 'single'; render(); break;
+    case 'book-mode-compare': state.book.mode = 'compare'; render(); break;
+
+    case 'book-compare-demo': {
+      state.book.compare.current.status = 'loading'; state.book.compare.current.error = null; state.book.compare.current.fileName = 'reservas_actual.csv';
+      state.book.compare.previous.status = 'loading'; state.book.compare.previous.error = null; state.book.compare.previous.fileName = 'reservas_anterior.csv';
+      render();
+      setTimeout(() => {
+        runBookCompareAnalysisFromText('current', engine.SAMPLE_BOOKINGS_CSV, 'reservas_actual.csv');
+        runBookCompareAnalysisFromText('previous', engine.SAMPLE_BOOKINGS_CSV_PREVIOUS, 'reservas_anterior.csv');
+      }, 250);
       break;
     }
   }
