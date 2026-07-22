@@ -42,6 +42,7 @@ const state = {
     brandKeywords: 'marca, brand, branded, brnd',
     status: 'idle', error: null, fileName: null,
     rows: null, campaignFilter: 'all', excludeBrand: true,
+    sortBy: 'revenue_lost', sortDir: 'desc',
   },
 };
 
@@ -931,6 +932,26 @@ function renderImprShareChart(rows) {
     </div>`;
 }
 
+// Columnas ordenables de la tabla de acción — click en el encabezado
+// ordena por esa métrica, un segundo click invierte el orden.
+const OPP_SORT_KEYS = {
+  campaign: (o) => o.campaign.toLowerCase(),
+  bid_strategy: (o) => (o.bid_strategy || '').toLowerCase(),
+  campaign_roas: (o) => o.campaign_roas ?? -Infinity,
+  impr_share: (o) => o.impr_share ?? -Infinity,
+  lost_is_rank: (o) => o.lost_is_rank ?? -Infinity,
+  lost_is_budget: (o) => o.lost_is_budget ?? -Infinity,
+  revenue_lost: (o) => o.revenue_lost,
+  cost: (o) => o.cost ?? -Infinity,
+  conversions: (o) => o.conversions ?? -Infinity,
+  conversions_lost: (o) => o.conversions_lost,
+};
+function oppSortTh(label, key, s) {
+  const active = s.sortBy === key;
+  const arrow = active ? (s.sortDir === 'desc' ? ' ▼' : ' ▲') : '';
+  return `<th data-opp-sort="${key}" style="cursor:pointer;user-select:none${active ? ';color:var(--color-text-heading)' : ''}">${escapeHtml(label)}${arrow}</th>`;
+}
+
 function renderOpportunityReady() {
   const s = state.opportunity;
   const allCampaignNames = [...new Set((s.rows || []).map((r) => r.campaign))].sort((a, b) => a.localeCompare(b));
@@ -986,7 +1007,14 @@ function renderOpportunityReady() {
       </div>
     </div>`;
 
-  const tableRows = summary.opportunities.filter((o) => o.has_data).map((o) => `
+  const sortKeyFn = OPP_SORT_KEYS[s.sortBy] || OPP_SORT_KEYS.revenue_lost;
+  const sortedOpportunities = summary.opportunities.filter((o) => o.has_data).sort((a, b) => {
+    const va = sortKeyFn(a), vb = sortKeyFn(b);
+    const cmp = typeof va === 'string' ? va.localeCompare(vb) : (va - vb);
+    return s.sortDir === 'asc' ? cmp : -cmp;
+  });
+
+  const tableRows = sortedOpportunities.map((o) => `
     <tr>
       <td>${escapeHtml(o.campaign)}</td>
       <td>${escapeHtml(o.bid_strategy || 'N/D')}</td>
@@ -1009,10 +1037,21 @@ function renderOpportunityReady() {
     ${renderImprShareChart(withData)}
     <div class="card chart-card">
       <h3 class="dense-chart-title">Campañas con mayor oportunidad de presupuesto sin límite</h3>
-      <p style="font-size:12.5px;color:var(--color-text-muted);margin-bottom:12px">Ordenadas de mayor a menor ingreso perdido. IS = Impression Share, LR = % perdido por ranking, LB = % perdido por presupuesto.</p>
+      <p style="font-size:12.5px;color:var(--color-text-muted);margin-bottom:12px">Haz clic en cualquier columna para ordenar por esa métrica. IS = Impression Share, LR = % perdido por ranking, LB = % perdido por presupuesto.</p>
       <div style="overflow-x:auto">
         <table>
-          <thead><tr><th>Campaña</th><th>Estrategia</th><th>ROAS</th><th>IS</th><th>LR</th><th>LB</th><th>Ingresos perdidos</th><th>Gasto</th><th>Conversiones</th><th>Conv. perdidas</th></tr></thead>
+          <thead><tr>
+            ${oppSortTh('Campaña', 'campaign', s)}
+            ${oppSortTh('Estrategia', 'bid_strategy', s)}
+            ${oppSortTh('ROAS', 'campaign_roas', s)}
+            ${oppSortTh('IS', 'impr_share', s)}
+            ${oppSortTh('LR', 'lost_is_rank', s)}
+            ${oppSortTh('LB', 'lost_is_budget', s)}
+            ${oppSortTh('Ingresos perdidos', 'revenue_lost', s)}
+            ${oppSortTh('Gasto', 'cost', s)}
+            ${oppSortTh('Conversiones', 'conversions', s)}
+            ${oppSortTh('Conv. perdidas', 'conversions_lost', s)}
+          </tr></thead>
           <tbody>${tableRows}</tbody>
         </table>
       </div>
@@ -1702,6 +1741,16 @@ function bindEvents() {
   if (oppCampaignFilter) oppCampaignFilter.addEventListener('change', (e) => {
     state.opportunity.campaignFilter = e.target.value;
     render();
+  });
+
+  document.querySelectorAll('[data-opp-sort]').forEach((th) => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.oppSort;
+      const s = state.opportunity;
+      if (s.sortBy === key) s.sortDir = s.sortDir === 'desc' ? 'asc' : 'desc';
+      else { s.sortBy = key; s.sortDir = 'desc'; }
+      render();
+    });
   });
 
   // Negativización
