@@ -41,7 +41,7 @@ const state = {
   opportunity: {
     brandKeywords: 'marca, brand, branded, brnd',
     status: 'idle', error: null, fileName: null,
-    rows: null, campaignFilter: 'all', excludeBrand: true,
+    rows: null, campaignFilter: 'all', excludeBrand: true, hotelFilter: 'all',
     sortBy: 'revenue_lost', sortDir: 'desc',
   },
 };
@@ -723,16 +723,27 @@ function runOpportunityAnalysis(text, fileName) {
     const brandKeywords = s.brandKeywords.split(',').map((v) => v.trim()).filter(Boolean);
     const rowsRaw = engine.loadCampaignReport(text, brandKeywords);
     const rows = engine.computeMetrics(rowsRaw);
-    Object.assign(s, { status: 'ready', error: null, rows, fileName, campaignFilter: 'all' });
+    Object.assign(s, { status: 'ready', error: null, rows, fileName, campaignFilter: 'all', hotelFilter: 'all' });
   } catch (err) {
     Object.assign(s, { status: 'error', error: err.message || String(err), fileName, rows: null });
   }
   render();
 }
 
+// El export de Google Ads no trae una columna de hotel/propiedad — se
+// deriva del nombre de campaña, tomando lo que hay antes del primer
+// " - " (así vienen nombradas las cuentas reales, ej. "Estelar Hoteles -
+// CO:es - PMAX Corpo" → hotel "Estelar Hoteles"). Si el nombre no tiene
+// ese separador, se usa el nombre completo.
+function deriveHotelName(campaign) {
+  const idx = campaign.indexOf(' - ');
+  return idx > -1 ? campaign.slice(0, idx).trim() : campaign.trim();
+}
+
 function getOpportunityFilteredRows() {
   const s = state.opportunity;
-  const rows = s.rows || [];
+  let rows = s.rows || [];
+  if (s.hotelFilter !== 'all') rows = rows.filter((r) => deriveHotelName(r.campaign) === s.hotelFilter);
   // Elegir una campaña específica es una decisión explícita del usuario —
   // se muestra igual aunque sea de marca, no la tapa el checkbox de excluir.
   if (s.campaignFilter !== 'all') return rows.filter((r) => r.campaign === s.campaignFilter);
@@ -954,7 +965,19 @@ function oppSortTh(label, key, s) {
 
 function renderOpportunityReady() {
   const s = state.opportunity;
-  const allCampaignNames = [...new Set((s.rows || []).map((r) => r.campaign))].sort((a, b) => a.localeCompare(b));
+  const allRows = s.rows || [];
+  const allHotels = [...new Set(allRows.map((r) => deriveHotelName(r.campaign)))].sort((a, b) => a.localeCompare(b));
+  const hotelFilteredRows = s.hotelFilter === 'all' ? allRows : allRows.filter((r) => deriveHotelName(r.campaign) === s.hotelFilter);
+  const allCampaignNames = [...new Set(hotelFilteredRows.map((r) => r.campaign))].sort((a, b) => a.localeCompare(b));
+
+  const hotelFieldHtml = allHotels.length > 1 ? `
+      <div class="field">
+        <label>Hotel</label>
+        <select id="opp-hotel-filter" style="width:220px">
+          <option value="all" ${s.hotelFilter === 'all' ? 'selected' : ''}>Todos los hoteles</option>
+          ${allHotels.map((h) => `<option value="${escapeHtml(h)}" ${s.hotelFilter === h ? 'selected' : ''}>${escapeHtml(h)}</option>`).join('')}
+        </select>
+      </div>` : '';
 
   const filterPanel = `
     <div class="card control-panel align-end">
@@ -964,6 +987,7 @@ function renderOpportunityReady() {
           Excluir campañas de marca (recomendado para un ROAS realista)
         </label>
       </div>
+      ${hotelFieldHtml}
       <div class="field">
         <label>Ver solo esta campaña</label>
         <select id="opp-campaign-filter" style="width:320px">
@@ -1733,6 +1757,13 @@ function bindEvents() {
   const oppExcludeBrand = document.getElementById('opp-exclude-brand');
   if (oppExcludeBrand) oppExcludeBrand.addEventListener('change', (e) => {
     state.opportunity.excludeBrand = e.target.checked;
+    state.opportunity.campaignFilter = 'all';
+    render();
+  });
+
+  const oppHotelFilter = document.getElementById('opp-hotel-filter');
+  if (oppHotelFilter) oppHotelFilter.addEventListener('change', (e) => {
+    state.opportunity.hotelFilter = e.target.value;
     state.opportunity.campaignFilter = 'all';
     render();
   });
