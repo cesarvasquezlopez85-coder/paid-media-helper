@@ -857,6 +857,12 @@ function renderOpportunityFunnel(f) {
     <div class="card chart-card">
       <h3 class="dense-chart-title">De dónde venimos, a dónde podríamos llegar</h3>
       <p style="font-size:12.5px;color:var(--color-text-muted);margin-bottom:14px">Mismo Ad Auction Win Rate y misma tasa de conversión en ambos escenarios — la diferencia es solo no perder búsquedas por presupuesto. Sigue la línea de cada columna de arriba hacia abajo.</p>
+      <div style="background:var(--gray-50);border:1px solid var(--color-border);border-radius:10px;padding:14px 16px;margin-bottom:18px;font-size:12.5px;color:var(--color-text-body);line-height:1.5">
+        <strong style="color:var(--color-text-heading)">¿De dónde salen "Total de búsquedas" y "Búsquedas disponibles"?</strong>
+        Google Ads no entrega el total de búsquedas directamente — se reconstruye a partir de datos reales: si tuviste 296,000 impresiones y eso fue el 89% de las búsquedas posibles (Impression Share), el total era 296,000 ÷ 0,89 ≈ 332,600 (<strong>Total de búsquedas = Impresiones ÷ Impression Share</strong>).
+        De ese total, una parte no llegó ni a competir porque el presupuesto diario ya se había agotado — eso es el "% perdido por presupuesto". El resto sí compitió: esas son las <strong>Búsquedas disponibles = Total de búsquedas × (1 − % perdido por presupuesto)</strong>.
+        De ahí sale la Tasa de victoria en subasta (Impresiones ÷ Búsquedas disponibles) — el número clave que se asume igual en el escenario sin límite de presupuesto.
+      </div>
       <div class="two-col">
         ${left}
         ${right}
