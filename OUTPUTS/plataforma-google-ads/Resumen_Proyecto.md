@@ -2,13 +2,13 @@
 
 ## Qué es
 
-Una herramienta interna para que cualquier persona del equipo suba archivos de una cuenta de Google Ads y reciba sin intervención manual: (1) gráficas de rendimiento y recomendaciones de optimización, (2) comparación de rendimiento entre dos periodos con recomendaciones por tendencia, (3) una lista de candidatos a palabra clave negativa, y (4) análisis de reservas reales para cuentas de hotel. Pensada para cubrir 100+ cuentas de forma self-serve.
+Una herramienta interna para que cualquier persona del equipo suba archivos de una cuenta de Google Ads y reciba sin intervención manual: (1) gráficas de rendimiento y recomendaciones de optimización, (2) comparación de rendimiento entre dos periodos con recomendaciones por tendencia, (3) una lista de candidatos a palabra clave negativa, (4) análisis de reservas reales para cuentas de hotel (con modo de comparación entre dos periodos), y (5) una estimación de ingresos adicionales perdidos por campañas limitadas por presupuesto. Pensada para cubrir 100+ cuentas de forma self-serve.
 
 Hay una función más ya construida — generador de copys de anuncio desde una URL — pero **está oculta del menú a pedido de cesar**: tras probarla con cuentas reales, el resultado no lo convenció lo suficiente para quedar en v1. Queda pendiente para v2 (ver "Función 3" más abajo y `roadmap.md`).
 
 Ya no es solo un prototipo de Streamlit, y ya no corre solo local: existe una implementación web completa (`webapp/`, HTML/CSS/JS + un servidor Python sin dependencias externas) con login por usuario/contraseña, que reproduce el diseño hecho en Claude Design. **Vive en producción en [Railway](https://railway.app)**, en `https://paid-media-helper.up.railway.app`, con auto-deploy desde la rama `main` del repo de GitHub — cualquier cambio que se suba se despliega solo, sin pasos manuales. También se puede correr local con `python3 webapp/server.py` → `http://localhost:8642` — ver "Cómo corre la plataforma" más abajo.
 
-## Estado: cinco funciones construidas, cuatro activas en el menú (la quinta — Función 3, copys — en pausa para v2)
+## Estado: seis funciones construidas, cinco activas en el menú (Función 3, copys, en pausa para v2)
 
 ### Función 1 — Análisis de rendimiento
 
@@ -73,17 +73,37 @@ Se validó con un export real de reservas de la cuenta Click Clack (columnas `Al
 1. **Formato de celda con año de 2 dígitos (`DD-MM-YY`).** La app convertía la fecha a texto antes de leerla, y ese formato no calzaba en ningún patrón reconocido — resultado, noches por reserva de cientos de días en vez de 1-4 reales. Corregido leyendo el número de serie real de Excel (el valor interno de la celda, días desde 1900) en vez de su texto formateado — así ya no importa si la celda se ve como "16-03-26", con hora incluida, o cualquier otro formato de visualización.
 2. **Orden día/mes decidido por archivo completo, no por reserva.** Si dos fechas de la misma reserva tenían ambas día ≤12, podían interpretarse con el día y el mes invertidos entre sí. Corregido: el orden se detecta primero con la propia evidencia de cada reserva (su fecha de alta/entrada/salida), y solo si esa reserva no trae ninguna pista propia se usa un orden de respaldo calculado con todo el archivo. La interfaz avisa si detecta que el archivo mezcla formatos entre filas.
 
-Pendiente: seguir validando con más cuentas de hotel reales.
+**Comparar periodos (agregado 2026-07-14):** toggle "Análisis único" / "Comparar periodos" arriba de los filtros, mismo patrón visual que la Función 1. En este modo se suben dos exports de reservas (periodo actual y periodo anterior) y la app muestra, uno junto al otro: reservas totales, noches, promedio de noches por reserva y antelación promedio (con el cambio %), la tabla por mercado, la tabla de antelación por rangos, y dos heatmaps y dos distribuciones por día de semana — uno por periodo, reutilizando exactamente las mismas piezas visuales del modo único. Los filtros por mercado y hotel se aplican a ambos archivos antes de comparar. El modo "Análisis único" no cambió.
+
+Pendiente: seguir validando el modo único con más cuentas de hotel reales, y probar el modo "Comparar periodos" con dos exports reales del mismo hotel (por ahora solo se probó con datos sintéticos).
 
 ### Función 5 — Comparar periodos (nueva, 2026-07-14)
 
-Sección para ver tendencia, no solo la foto de un momento. Se suben dos exports de campañas (mismo formato de la Función 1) — periodo actual y periodo anterior, cualquier rango de fechas que el usuario quiera — y la app empareja las campañas por nombre exacto, mostrando el cambio % en gasto, CPA, CTR, conversiones y ROAS, tanto por campaña como a nivel de cuenta.
+Sección para ver tendencia, no solo la foto de un momento. Se suben dos exports de campañas (mismo formato de la Función 1) — periodo actual y periodo anterior, cualquier rango de fechas que el usuario quiera — y la app empareja las campañas por nombre exacto, mostrando el cambio % en gasto, CPA, CTR, conversiones, ROAS y valor de conversión, tanto por campaña como a nivel de cuenta.
 
 Incluye recomendaciones por tendencia (distintas de las de umbral fijo de la Función 1): CPA subió más de 20%, CTR bajó más de 20%, conversiones cayeron más de 20%, o el gasto subió más de 30% sin que las conversiones acompañaran — pensadas para detectar una campaña que está empeorando rápido, antes de que cruce el umbral fijo de "CPA alto".
 
 Campañas que solo existen en uno de los dos periodos (nuevas, pausadas, renombradas) se listan aparte en vez de forzar una comparación sin sentido. Se movió a segundo lugar en el menú, justo después de Rendimiento. También tiene **filtro por campaña** ("Ver solo esta campaña", 2026-07-14) — mismo patrón que el de Rendimiento — para ver el resumen, las recomendaciones y la tabla de una sola campaña sin volver a subir los archivos.
 
 Verificada con datos sintéticos de dos periodos (botón "Usar ejemplo"). Pendiente: probarla con dos exports reales del mismo cliente.
+
+### Función 6 — Oportunidad de ingresos (nueva, 2026-07-14)
+
+Sección para responder una pregunta concreta que cesar necesitaba llevar a la empresa: ¿cuántos ingresos adicionales se habrían generado si las campañas limitadas por presupuesto no lo hubieran estado? Es un análisis retrospectivo (no una predicción) — asume, para cada campaña, el mismo Ad Auction Win Rate y la misma tasa de conversión que ya tiene, y calcula qué habría pasado con impresiones/clics/conversiones/ingresos sin el límite de presupuesto.
+
+La metodología viene de una referencia externa que trajo cesar (infografía "The Catalyst Tool", en Looker Studio) — antes de programar nada, se verificó fórmula por fórmula contra el ejemplo numérico de esa referencia (inversión $110.62M → $210M de ingresos perdidos / $33M de inversión extra necesaria / ROAS 632%), y el motor reproduce esos mismos números dentro del margen de redondeo del ejemplo.
+
+Incluye:
+- **Checkbox "Excluir campañas de marca"** (activado por defecto): el presupuesto extra a invertir se calcula con el ROAS promedio del conjunto de campañas seleccionado, no el de cada campaña por separado — y el ROAS de marca suele ser artificialmente alto, así que dejarlo adentro distorsiona el promedio de todo el cálculo.
+- **Filtro por campaña** ("Ver solo esta campaña") y **filtro por hotel** — este último derivado del nombre de la campaña (el export de Google Ads no trae una columna de hotel), tomando el texto antes del primer " - "; solo aparece si el archivo trae más de un hotel.
+- Tarjeta con el titular: ingresos perdidos, inversión extra necesaria, ROAS, y conversiones perdidas.
+- Diagrama de embudo "de dónde venimos, a dónde podríamos llegar", comparando el escenario actual contra el escenario sin límite de presupuesto con los números reales de la cuenta.
+- Gráfica de Impression Share por campaña (Impr. Share actual, % perdido por ranking, % perdido por presupuesto), ordenada de mayor a menor oportunidad.
+- Tabla de acción ordenable por cualquier columna, con las columnas de Impression Share / % perdido por ranking / % perdido por presupuesto coloreadas como mapa de calor para ver de un vistazo dónde está la oportunidad más grande.
+
+El parser de campañas (Función 1) ahora reconoce dos columnas nuevas del export de Google Ads: "Search Impr. Share" y "Bid Strategy Type" (esta última solo informativa, no entra en ningún cálculo).
+
+Verificada con datos sintéticos y con el archivo real de Estelar: en ese archivo, solo las campañas Performance Max (que sí traen Search Impr. Share y Search Lost IS) entran al cálculo — la campaña Demand Gen, que no trae esas columnas, queda correctamente excluida en vez de mostrar un número inventado. Pendiente: probar con más cuentas reales, especialmente con más de una campaña limitada por presupuesto a la vez y con más de un hotel.
 
 ## Por qué ninguna de las funciones de Google Ads usa un modelo de lenguaje por análisis
 
@@ -111,27 +131,29 @@ En ambos casos, la app pide iniciar sesión o crear cuenta antes de dejar entrar
 - "Estelar" como término núcleo (Función 2) es amplio — es una cadena con varias propiedades en Colombia, puede retener búsquedas de otro hotel Estelar.
 - La Función 3 no ejecuta JavaScript: páginas que cargan su contenido dinámicamente van a dar poco texto real y el resultado se apoya más en plantillas genéricas.
 - La Función 3 no valida las políticas de contenido de Google Ads (mayúsculas, superlativos, marcas de terceros) — solo longitud de caracteres.
-- Ninguna de las cinco funciones valida que el archivo/URL subido sea reciente ni de la cuenta correcta.
+- Ninguna de las seis funciones valida que el archivo/URL subido sea reciente ni de la cuenta correcta.
 - **Control de acceso y despliegue: ya no están pendientes** (ver "Cómo corre la plataforma, y el login" arriba) — HTTPS resuelto por Railway; sigue pendiente decidir si el registro abierto continúa así ahora que la app es alcanzable por internet.
-- No hay persistencia de historial entre cargas todavía para ninguna función (Fase 2) — la base de datos que ya existe solo guarda cuentas de usuario, no resultados de análisis. La Función 5 (Comparar periodos) cubre parte de esta necesidad hoy, pero de forma manual (subiendo dos archivos cada vez).
+- No hay persistencia de historial entre cargas todavía para ninguna función (Fase 2) — la base de datos que ya existe solo guarda cuentas de usuario, no resultados de análisis. Las Funciones 4 (modo Comparar periodos) y 5 cubren parte de esta necesidad hoy, pero de forma manual (subiendo dos archivos cada vez).
 - Falta comprar y conectar un dominio propio — hoy la app vive en el dominio genérico de Railway (`paid-media-helper.up.railway.app`).
-- La Función 5 (Comparar periodos) solo se probó con datos sintéticos — falta validarla con dos exports reales del mismo cliente.
+- La Función 5 (Comparar periodos) solo se probó con datos sintéticos — falta validarla con dos exports reales del mismo cliente. Lo mismo aplica al modo "Comparar periodos" de la Función 4 (Bookings).
+- La Función 6 (Oportunidad de ingresos) calcula el presupuesto extra necesario con el ROAS promedio del conjunto de campañas seleccionado — un promedio distorsionado (por ejemplo, por no excluir marca) cambia ese número; el checkbox "Excluir campañas de marca" mitiga esto pero depende de que el usuario lo revise.
 
 ## Próximos pasos
 
 1. Repetir la carga de Función 1 con Click Clack Bogotá y con Estelar (ya corregidos los bugs de encabezado, UTF-16, filas "Total:" y columnas no reconocidas) y seguir con el resto de las 3-5 cuentas reales objetivo, comparando las recomendaciones contra el criterio de cesar como estratega.
 2. Revisar a mano los 14 términos en "revisar" y los que solo contienen "estelar" antes de subir cualquier negativo real a la cuenta.
 3. Función 3 en pausa: decidir para v2 si se retoma mejorando aún más las plantillas o si se cambia a generación real vía Claude API (con costo por llamada) — el enfoque de reglas ya recibió varias rondas de mejora y cesar decidió que el resultado no alcanza el estándar que necesita para v1.
-4. Seguir validando la Función 4 (Bookings) con más cuentas de hotel reales.
+4. Seguir validando la Función 4 (Bookings) con más cuentas de hotel reales, en ambos modos (único y Comparar periodos).
 5. Probar la Función 5 (Comparar periodos) con dos exports reales del mismo cliente.
-6. Decidir si el registro de usuarios sigue abierto o pasa a altas manuales, ahora que la app es alcanzable por internet.
-7. Comprar y conectar un dominio propio para reemplazar el de Railway.
+6. Probar la Función 6 (Oportunidad de ingresos) con más cuentas reales — ya validada con Estelar, falta confirmar con cuentas de más de una campaña limitada por presupuesto y más de un hotel.
+7. Decidir si el registro de usuarios sigue abierto o pasa a altas manuales, ahora que la app es alcanzable por internet.
+8. Comprar y conectar un dominio propio para reemplazar el de Railway.
 
 ## Archivos del proyecto
 
 | Archivo | Para qué sirve |
 |---|---|
-| `webapp/` | Implementación web completa (HTML/CSS/JS + servidor Python + `Dockerfile`), con login y las cinco funciones — en producción en Railway, o local con `python3 webapp/server.py`. Ver `webapp/README.md` |
+| `webapp/` | Implementación web completa (HTML/CSS/JS + servidor Python + `Dockerfile`), con login y las seis funciones (cinco activas en el menú) — en producción en Railway, o local con `python3 webapp/server.py`. Ver `webapp/README.md` |
 | `Especificacion_v1_Plataforma_Google_Ads.docx` | Especificación completa de las tres funciones originales de Google Ads: alcance, formato de archivo, mecanismo, arquitectura, riesgos |
 | `app.py` | Interfaz Streamlit con las tres funciones (correr con `streamlit run app.py`) |
 | `analysis.py` | Lógica de la Función 1 (rendimiento), reusable sin la interfaz |
