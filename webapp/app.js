@@ -772,6 +772,78 @@ function renderOpportunityPage() {
   return `${controlPanel}${body}`;
 }
 
+function funnelNode(label, value, last) {
+  return `
+    <div style="text-align:center">
+      <div style="font-size:10.5px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:.03em">${escapeHtml(label)}</div>
+      <div style="font-size:16px;font-weight:700;color:var(--color-text-heading)">${value}</div>
+    </div>
+    ${last ? '' : '<div style="width:1px;height:14px;background:var(--color-border);margin:4px auto"></div>'}`;
+}
+
+// Diagrama "de dónde venimos, a dónde podríamos llegar": mismo embudo de
+// la referencia que trajo cesar, con los números reales de las campañas
+// seleccionadas — escenario actual (con límite de presupuesto) a la
+// izquierda, escenario sin límite a la derecha, con la misma tasa de
+// victoria en subasta y la misma tasa de conversión en ambos.
+function renderOpportunityFunnel(f) {
+  if (!f.has_data) return '';
+  const pct = (v) => (v * 100).toFixed(0) + '%';
+
+  const left = `
+    <div style="border:1.5px solid var(--danger-border);border-radius:12px;padding:18px;background:var(--danger-bg)">
+      <div style="text-align:center;font-weight:700;color:var(--danger);text-transform:uppercase;font-size:11.5px;letter-spacing:.04em;margin-bottom:14px">Escenario actual · con límite de presupuesto</div>
+      ${funnelNode('Inversión', fmtMoney(f.investment))}
+      ${funnelNode('Total de búsquedas', fmtInt(f.totalQueries))}
+      ${funnelNode('Perdido por presupuesto', pct(f.lostIsBudgetPct))}
+      ${funnelNode('Búsquedas disponibles', fmtInt(f.availableQueries))}
+      ${funnelNode('Impression Share', pct(f.imprSharePct))}
+      ${funnelNode('Impresiones', fmtInt(f.impressions))}
+      ${funnelNode('Clics', fmtInt(f.clicks))}
+      ${funnelNode('Conversiones', fmtInt(f.conversions))}
+      ${funnelNode('Valor de conversión', fmtMoney(f.convValue), true)}
+    </div>`;
+
+  const right = `
+    <div style="border:1.5px solid var(--ok-border);border-radius:12px;padding:18px;background:var(--ok-bg)">
+      <div style="text-align:center;font-weight:700;color:var(--ok-text);text-transform:uppercase;font-size:11.5px;letter-spacing:.04em;margin-bottom:14px">Sin límite de presupuesto</div>
+      ${funnelNode('Inversión estimada', f.extraBudget != null ? fmtMoney(f.investmentUnconstrained) : 'N/D')}
+      ${funnelNode('Total de búsquedas', fmtInt(f.totalQueries))}
+      ${funnelNode('Perdido por presupuesto', '0%')}
+      ${funnelNode('Búsquedas disponibles', fmtInt(f.totalQueries))}
+      ${funnelNode('Impression Share potencial', pct(f.potentialImprSharePct))}
+      ${funnelNode('Impresiones potenciales', fmtInt(f.potentialImpressions))}
+      ${funnelNode('Clics potenciales', fmtInt(f.potentialClicks))}
+      ${funnelNode('Conversiones potenciales', fmtInt(f.potentialConversions))}
+      ${funnelNode('Valor de conversión potencial', fmtMoney(f.potentialConvValue), true)}
+    </div>`;
+
+  return `
+    <div class="card chart-card">
+      <h3 class="dense-chart-title">De dónde venimos, a dónde podríamos llegar</h3>
+      <p style="font-size:12.5px;color:var(--color-text-muted);margin-bottom:14px">Mismo Ad Auction Win Rate y misma tasa de conversión en ambos escenarios — la diferencia es solo no perder búsquedas por presupuesto.</p>
+      <div class="two-col">
+        ${left}
+        ${right}
+      </div>
+      <div style="display:flex;justify-content:center;margin:16px 0">
+        <div style="border:2px solid var(--navy-800);border-radius:999px;padding:8px 20px;font-weight:700;color:var(--navy-800);background:#fff;font-size:13px">
+          Tasa de victoria en subasta: ${pct(f.adAuctionWinRate)} (igual en los dos escenarios)
+        </div>
+      </div>
+      <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap">
+        <div style="background:var(--gold-500);color:var(--navy-900);padding:14px 22px;border-radius:10px;text-align:center;min-width:190px">
+          <div style="font-size:11px;text-transform:uppercase;font-weight:600">Conversiones perdidas por presupuesto</div>
+          <div style="font-size:24px;font-weight:700;margin-top:4px">${fmtInt(f.conversionsLost)}</div>
+        </div>
+        <div style="background:var(--gold-600);color:#fff;padding:14px 22px;border-radius:10px;text-align:center;min-width:190px">
+          <div style="font-size:11px;text-transform:uppercase;font-weight:600">Ingresos perdidos por presupuesto</div>
+          <div style="font-size:24px;font-weight:700;margin-top:4px">${fmtMoney(f.revenueLost)}</div>
+        </div>
+      </div>
+    </div>`;
+}
+
 // Gráfica de Impression Share por campaña: Impr. Share vs. % perdido por
 // ranking vs. % perdido por presupuesto — la campaña con el rojo más alto
 // es donde está la oportunidad de subir presupuesto (mismo criterio que
@@ -877,9 +949,12 @@ function renderOpportunityReady() {
       <td>${fmtInt(o.conversions_lost)}</td>
     </tr>`).join('');
 
+  const funnel = engine.buildOpportunityFunnel(summary.opportunities);
+
   return `
     ${filterPanel}
     ${headline}
+    ${renderOpportunityFunnel(funnel)}
     ${renderImprShareChart(withData)}
     <div class="card chart-card">
       <h3 class="dense-chart-title">Campañas con mayor oportunidad de presupuesto sin límite</h3>

@@ -466,11 +466,15 @@ export function computeRevenueOpportunity(row) {
   return {
     ...base,
     has_data: true,
+    impressions,
+    conv_value: validConvValue,
     total_queries: totalQueries,
     available_queries: availableQueries,
     ad_auction_win_rate: adAuctionWinRate,
+    potential_impressions: potentialImpressions,
     potential_impr_share: potentialImprShare,
     new_lost_is_rank: newLostIsRank,
+    potential_clicks: potentialClicks,
     potential_conversions: potentialConversions,
     conversions_lost: conversionsLost,
     potential_conv_value: potentialConvValue,
@@ -507,6 +511,51 @@ export function summarizeRevenueOpportunity(rows) {
     conversions_lost: totalConversionsLost,
     extra_budget: extraBudget,
     opportunities,
+  };
+}
+
+// Agrega el embudo completo (escenario actual vs. sin límite de
+// presupuesto) sobre el conjunto de campañas ya filtrado — para el
+// diagrama "de dónde venimos, a dónde podríamos llegar". Se suman las
+// cantidades (impresiones, clics, conversiones, etc.) y las tasas
+// (Impression Share, CTR, etc.) se derivan de esas sumas, no se promedian
+// directamente — mismo criterio que usa la referencia externa para
+// agregar varias campañas en un solo embudo.
+export function buildOpportunityFunnel(opportunities) {
+  const valid = opportunities.filter((o) => o.has_data);
+  const sum = (key) => valid.reduce((s, o) => s + (Number.isNaN(o[key]) ? 0 : (o[key] || 0)), 0);
+
+  const investment = sum("cost");
+  const totalQueries = sum("total_queries");
+  const availableQueries = sum("available_queries");
+  const impressions = sum("impressions");
+  const clicks = sum("clicks");
+  const conversions = sum("conversions");
+  const convValue = sum("conv_value");
+  const potentialImpressions = sum("potential_impressions");
+  const potentialClicks = sum("potential_clicks");
+  const potentialConversions = sum("potential_conversions");
+  const potentialConvValue = sum("potential_conv_value");
+  const conversionsLost = sum("conversions_lost");
+  const revenueLost = sum("revenue_lost");
+
+  const lostIsBudgetPct = totalQueries > 0 ? 1 - availableQueries / totalQueries : 0;
+  const imprSharePct = totalQueries > 0 ? impressions / totalQueries : 0;
+  const lostIsRankPct = Math.max(0, 1 - imprSharePct - lostIsBudgetPct);
+  const adAuctionWinRate = availableQueries > 0 ? impressions / availableQueries : 0;
+  const potentialImprSharePct = totalQueries > 0 ? potentialImpressions / totalQueries : 0;
+  const newLostIsRankPct = Math.max(0, 1 - potentialImprSharePct);
+
+  const roas = investment > 0 ? convValue / investment : null;
+  const extraBudget = roas && roas > 0 ? revenueLost / roas : null;
+
+  return {
+    has_data: valid.length > 0,
+    investment, totalQueries, availableQueries, lostIsBudgetPct, lostIsRankPct, imprSharePct, adAuctionWinRate,
+    impressions, clicks, conversions, convValue,
+    potentialImpressions, potentialImprSharePct, newLostIsRankPct, potentialClicks, potentialConversions, potentialConvValue,
+    conversionsLost, revenueLost, extraBudget,
+    investmentUnconstrained: investment + (extraBudget || 0),
   };
 }
 
