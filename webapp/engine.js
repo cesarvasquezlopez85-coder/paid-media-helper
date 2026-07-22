@@ -161,8 +161,27 @@ function refineSearchType(name, brandKeywords) {
   return "search_generic";
 }
 
-export function loadCampaignReport(text, brandKeywords) {
+export const CAMPAIGN_NUMERIC_FIELDS = ["budget", "impressions", "clicks", "ctr", "avg_cpc", "cost", "conversions", "cost_per_conv", "conv_rate", "lost_is_budget", "lost_is_rank", "cpa_file_pct", "conv_value", "impr_share"];
+
+// Campos que en el export CSV nativo de Google Ads vienen como porcentaje
+// ("8.5%") y hay que pasar a fracción (0.085) — ver toNumber(). Los mismos
+// campos, cuando vienen de la API directa (google_ads_client.py), ya llegan
+// como fracción, así que loadCampaignReportFromApi no repite esta división.
+const PERCENT_FIELDS = ["ctr", "conv_rate", "lost_is_budget", "lost_is_rank", "cpa_file_pct", "impr_share"];
+
+// Clasifica una campaña en search_brand / search_generic / display /
+// performance_max a partir del tipo crudo (columna "Campaign type" del CSV,
+// o el advertising_channel_type que devuelve la API) y el nombre — mismo
+// criterio para ambas fuentes de datos, para que el resto del análisis
+// (umbrales de CTR, recomendaciones) se comporte igual sin importar de
+// dónde vino la fila.
+export function deriveCampaignType(rawType, campaignName, brandKeywords) {
   const bk = brandKeywords && brandKeywords.length ? brandKeywords : DEFAULT_BRAND_KEYWORDS;
+  const base = rawType ? normalizeBaseType(rawType) : DEFAULT_BASE_TYPE;
+  return base === "search" ? refineSearchType(campaignName, bk) : base;
+}
+
+export function loadCampaignReport(text, brandKeywords) {
   // El export nativo de campañas de Google Ads trae 2-3 líneas de título
   // (nombre del informe, cuenta, rango de fechas) antes del encabezado real
   // — igual que el export de "Términos de búsqueda". Se busca esa fila entre
@@ -189,28 +208,46 @@ export function loadCampaignReport(text, brandKeywords) {
     return v !== undefined && v !== "" && v !== "--" && !isTotalRow(r);
   });
 
-  const numericFields = ["budget", "impressions", "clicks", "ctr", "avg_cpc", "cost", "conversions", "cost_per_conv", "conv_rate", "lost_is_budget", "lost_is_rank", "cpa_file_pct", "conv_value", "impr_share"];
   const typeCol = findColumn(headers, COLUMN_ALIASES.campaign_type);
   const statusCol = findColumn(headers, COLUMN_ALIASES.status);
   const bidStrategyCol = findColumn(headers, COLUMN_ALIASES.bid_strategy);
 
   const rows = filtered.map((r) => {
     const row = { campaign: String(r[campaignCol]) };
-    for (const field of numericFields) {
+    for (const field of CAMPAIGN_NUMERIC_FIELDS) {
       const col = findColumn(headers, COLUMN_ALIASES[field]);
       let v = col ? toNumber(r[col]) : NaN;
-      if (["ctr", "conv_rate", "lost_is_budget", "lost_is_rank", "cpa_file_pct", "impr_share"].includes(field) && !Number.isNaN(v)) v = v / 100;
+      if (PERCENT_FIELDS.includes(field) && !Number.isNaN(v)) v = v / 100;
       row[field] = v;
     }
     row.status = statusCol ? String(r[statusCol]) : "N/D";
     row.bid_strategy = bidStrategyCol ? String(r[bidStrategyCol]) : "N/D";
-    const base = typeCol ? normalizeBaseType(r[typeCol]) : DEFAULT_BASE_TYPE;
-    row.campaign_type = base === "search" ? refineSearchType(row.campaign, bk) : base;
+    row.campaign_type = deriveCampaignType(typeCol ? r[typeCol] : null, row.campaign, brandKeywords);
     row.has_type_column = !!typeCol;
     return row;
   });
 
   return rows;
+}
+
+// Misma forma de fila que loadCampaignReport, pero a partir de filas que ya
+// vienen estructuradas de la API de Google Ads (server.py → /api/google-ads/
+// campaigns), en vez de parsear texto CSV. Los valores de porcentaje/ratio
+// ya llegan como fracción (0-1) desde la API, así que no se dividen por 100
+// aquí — a diferencia del CSV, que los trae como "8.5%".
+export function loadCampaignReportFromApi(apiRows, brandKeywords) {
+  return (apiRows || []).map((r) => {
+    const row = { campaign: String(r.campaign || "(sin nombre)") };
+    for (const field of CAMPAIGN_NUMERIC_FIELDS) {
+      const v = r[field];
+      row[field] = (v === null || v === undefined) ? NaN : Number(v);
+    }
+    row.status = r.status || "N/D";
+    row.bid_strategy = r.bid_strategy || "N/D";
+    row.campaign_type = deriveCampaignType(r.channel_type_raw, row.campaign, brandKeywords);
+    row.has_type_column = true;
+    return row;
+  });
 }
 
 export function computeMetrics(rows) {

@@ -13,6 +13,13 @@ const state = {
     status: 'idle', error: null, fileName: null,
     rows: null, resumen: null, recs: null,
     chartTab: 'gasto', campaignFilter: 'all',
+    source: 'file', // 'file' | 'api'
+    api: {
+      statusChecked: false, configured: false,
+      accountsStatus: 'idle', accounts: [], accountId: '',
+      dateFrom: '', dateTo: '',
+      simulated: false, error: null,
+    },
   },
 
   neg: {
@@ -221,15 +228,83 @@ function renderRendPage() {
         <label>Palabras que identifican una campaña de marca (separadas por coma)</label>
         <input type="text" id="rend-brand-keywords" value="${escapeHtml(s.brandKeywords)}" style="width:320px" />
       </div>
-      <div class="field">
-        <label>Export de campañas (CSV o Excel)</label>
-        <input type="file" id="rend-file" accept=".csv,.xlsx,.xls" />
+      <div class="seg-control">
+        <button class="seg-btn ${s.source === 'file' ? 'active' : ''}" data-action="rend-source-file">Subir archivo</button>
+        <button class="seg-btn ${s.source === 'api' ? 'active' : ''}" data-action="rend-source-api">Conectar Google Ads</button>
       </div>
-      <button class="btn-outline" data-action="rend-demo">Usar sample_data.csv de ejemplo</button>
-      ${s.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.fileName)}</strong></div>` : ''}
+      ${s.source === 'file' ? `
+        <div class="field">
+          <label>Export de campañas (CSV o Excel)</label>
+          <input type="file" id="rend-file" accept=".csv,.xlsx,.xls" />
+        </div>
+        <button class="btn-outline" data-action="rend-demo">Usar sample_data.csv de ejemplo</button>
+        ${s.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.fileName)}</strong></div>` : ''}
+      ` : renderRendApiPanel()}
       ${campaignFilterHtml}
     </div>
     ${body}
+  `;
+}
+
+// ---------------------------------------------------------------------------
+// Fuente de datos: API de Google Ads (en vez de subir archivo) — V2, en
+// construcción. Mientras GOOGLE_ADS_* no esté configurado en el servidor
+// (developer token pendiente de aprobación de Google), /api/google-ads/*
+// sirve cuentas y campañas simuladas, marcadas como tal, para poder probar
+// todo el flujo (cuenta → rango de fechas → tabla) desde ya.
+function renderRendApiPanel() {
+  const a = state.rend.api;
+
+  if (!a.statusChecked) {
+    return `<div class="field"><p class="footnote">Consultando la conexión con Google Ads…</p></div>`;
+  }
+
+  const simulatedNotice = a.simulated ? `
+    <div class="ok-panel" style="margin:10px 0">
+      <strong>Modo simulado.</strong> La API de Google Ads todavía no está configurada en el servidor
+      (falta la aprobación del developer token de Google) — estos son datos de ejemplo, no de una cuenta real.
+      El flujo (selector de cuenta, rango de fechas, tabla) es el mismo que va a usar la conexión real.
+    </div>` : '';
+
+  if (a.accountsStatus === 'idle') {
+    return `
+      <div class="field">
+        <p class="footnote">${a.configured ? 'Conectado a la API de Google Ads.' : 'La API de Google Ads aún no está configurada — se usarán datos simulados para probar el flujo.'}</p>
+        <button class="btn-outline" data-action="rend-api-load-accounts">Ver cuentas disponibles</button>
+      </div>`;
+  }
+
+  if (a.accountsStatus === 'loading') {
+    return `<div class="field"><p class="footnote">Cargando cuentas…</p></div>`;
+  }
+
+  if (a.accountsStatus === 'error') {
+    return `
+      <div class="error-panel">
+        <strong>No se pudieron cargar las cuentas.</strong> ${escapeHtml(a.error)}
+      </div>`;
+  }
+
+  const accountOptions = ['<option value="">Elige una cuenta…</option>']
+    .concat(a.accounts.map((acc) => `<option value="${escapeHtml(acc.id)}" ${a.accountId === acc.id ? 'selected' : ''}>${escapeHtml(acc.name)} (${escapeHtml(acc.id)})</option>`))
+    .join('');
+
+  return `
+    ${simulatedNotice}
+    <div class="field">
+      <label>Cuenta</label>
+      <select id="rend-api-account" style="width:320px">${accountOptions}</select>
+    </div>
+    <div class="field">
+      <label>Desde</label>
+      <input type="date" id="rend-api-date-from" value="${escapeHtml(a.dateFrom)}" />
+    </div>
+    <div class="field">
+      <label>Hasta</label>
+      <input type="date" id="rend-api-date-to" value="${escapeHtml(a.dateTo)}" />
+    </div>
+    <button class="btn-accent" data-action="rend-api-fetch">Traer datos de Google Ads</button>
+    ${a.error ? `<div class="error-panel" style="margin-top:10px"><strong>No se pudo traer el reporte.</strong> ${escapeHtml(a.error)}</div>` : ''}
   `;
 }
 
@@ -518,6 +593,88 @@ function runRendAnalysis(text, fileName) {
     Object.assign(s, { status: 'error', error: err.message || String(err), fileName });
   }
   render();
+}
+
+// Misma salida que runRendAnalysis, pero a partir de filas que ya llegaron
+// estructuradas desde /api/google-ads/campaigns (server.py), en vez de
+// texto CSV — se salta engine.loadCampaignReport y usa
+// engine.loadCampaignReportFromApi, que arma la misma forma de fila.
+function runRendAnalysisFromApiRows(apiRows, fileName) {
+  const s = state.rend;
+  try {
+    const brandKeywords = s.brandKeywords.split(',').map((v) => v.trim()).filter(Boolean);
+    const rowsRaw = engine.loadCampaignReportFromApi(apiRows, brandKeywords);
+    const rows = engine.computeMetrics(rowsRaw);
+    const resumen = engine.summarize(rows);
+    const recs = engine.generateRecommendations(rows);
+    Object.assign(s, { status: 'ready', rows, resumen, recs, fileName, campaignFilter: 'all' });
+  } catch (err) {
+    Object.assign(s, { status: 'error', error: err.message || String(err), fileName });
+  }
+  render();
+}
+
+function ensureGoogleAdsStatusLoaded() {
+  const a = state.rend.api;
+  if (a.statusChecked) return;
+  fetch('/api/google-ads/status')
+    .then((r) => r.json())
+    .then((data) => { a.statusChecked = true; a.configured = !!data.configured; render(); })
+    .catch(() => { a.statusChecked = true; a.configured = false; render(); });
+}
+
+function loadGoogleAdsAccounts() {
+  const a = state.rend.api;
+  a.accountsStatus = 'loading'; a.error = null;
+  render();
+  fetch('/api/google-ads/accounts')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.accounts = data.accounts || [];
+      a.simulated = !!data.simulated;
+      if (!a.dateFrom || !a.dateTo) {
+        const today = new Date();
+        const monthAgo = new Date(today);
+        monthAgo.setDate(monthAgo.getDate() - 30);
+        a.dateTo = today.toISOString().slice(0, 10);
+        a.dateFrom = monthAgo.toISOString().slice(0, 10);
+      }
+      a.accountsStatus = 'ready';
+      render();
+    })
+    .catch((err) => {
+      a.accountsStatus = 'error'; a.error = err.message || String(err);
+      render();
+    });
+}
+
+function fetchGoogleAdsCampaigns() {
+  const a = state.rend.api;
+  if (!a.accountId && !a.simulated) { a.error = 'Elige una cuenta primero.'; render(); return; }
+  if (!a.dateFrom || !a.dateTo) { a.error = 'Elige el rango de fechas primero.'; render(); return; }
+
+  a.error = null;
+  state.rend.status = 'loading'; state.rend.error = null;
+  render();
+
+  const params = new URLSearchParams({ customer_id: a.accountId || '', date_from: a.dateFrom, date_to: a.dateTo });
+  fetch(`/api/google-ads/campaigns?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.simulated = !!data.simulated;
+      const account = a.accounts.find((acc) => acc.id === a.accountId);
+      const label = a.simulated
+        ? `Google Ads (simulado) — ${a.dateFrom} a ${a.dateTo}`
+        : `Google Ads — ${account ? account.name : a.accountId} — ${a.dateFrom} a ${a.dateTo}`;
+      runRendAnalysisFromApiRows(data.rows || [], label);
+    })
+    .catch((err) => {
+      a.error = err.message || String(err);
+      state.rend.status = 'idle';
+      render();
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1902,6 +2059,13 @@ function bindEvents() {
     render();
   });
 
+  const rendApiAccount = document.getElementById('rend-api-account');
+  if (rendApiAccount) rendApiAccount.addEventListener('change', (e) => { state.rend.api.accountId = e.target.value; });
+  const rendApiDateFrom = document.getElementById('rend-api-date-from');
+  if (rendApiDateFrom) rendApiDateFrom.addEventListener('change', (e) => { state.rend.api.dateFrom = e.target.value; });
+  const rendApiDateTo = document.getElementById('rend-api-date-to');
+  if (rendApiDateTo) rendApiDateTo.addEventListener('change', (e) => { state.rend.api.dateTo = e.target.value; });
+
   document.querySelectorAll('[data-rend-tab]').forEach((btn) => {
     btn.addEventListener('click', () => { state.rend.chartTab = btn.dataset.rendTab; render(); });
   });
@@ -2073,6 +2237,16 @@ function handleAction(action) {
       setTimeout(() => runRendAnalysis(engine.SAMPLE_CAMPAIGN_CSV, 'sample_data.csv'), 250);
       break;
     }
+
+    case 'rend-source-file': state.rend.source = 'file'; render(); break;
+    case 'rend-source-api': {
+      state.rend.source = 'api';
+      ensureGoogleAdsStatusLoaded();
+      render();
+      break;
+    }
+    case 'rend-api-load-accounts': loadGoogleAdsAccounts(); break;
+    case 'rend-api-fetch': fetchGoogleAdsCampaigns(); break;
 
     case 'compare-demo': {
       state.compare.current.status = 'loading'; state.compare.current.error = null; state.compare.current.fileName = 'sample_data_actual.csv';

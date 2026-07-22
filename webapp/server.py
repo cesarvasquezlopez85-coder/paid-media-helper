@@ -27,6 +27,7 @@ import hashlib
 import http.cookies
 import json
 import os
+import re
 import secrets
 import sqlite3
 import time
@@ -34,6 +35,8 @@ import urllib.error
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+
+import google_ads_client
 
 PORT = int(os.environ.get("PORT", 8642))
 TIMEOUT_SECONDS = 15
@@ -144,6 +147,24 @@ class Handler(SimpleHTTPRequestHandler):
 
         if path == "/api/me":
             self._handle_me()
+            return
+
+        if path == "/api/google-ads/status":
+            if not self._require_auth_json():
+                return
+            self._send_json(200, {"configured": google_ads_client.is_configured()})
+            return
+
+        if path == "/api/google-ads/accounts":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_accounts()
+            return
+
+        if path == "/api/google-ads/campaigns":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_campaigns(parse_qs(parsed.query))
             return
 
         filename = STATIC_FILES.get(path)
@@ -330,6 +351,45 @@ class Handler(SimpleHTTPRequestHandler):
             {"ok": True, "username": username},
             extra_headers=[("Set-Cookie", jar[SESSION_COOKIE].OutputString())],
         )
+
+    # ------------------------------------------------------ API Google Ads ---
+    # Mientras GOOGLE_ADS_* no esté configurado en el entorno (developer
+    # token pendiente de aprobación de Google), estos endpoints sirven datos
+    # simulados en vez de fallar — así se puede construir y probar todo el
+    # flujo (selector de cuenta, rango de fechas, tabla) desde ya. La
+    # respuesta siempre incluye "simulated" para que la interfaz avise.
+    def _handle_google_ads_accounts(self):
+        if not google_ads_client.is_configured():
+            self._send_json(200, {"accounts": google_ads_client.SIMULATED_ACCOUNTS, "simulated": True})
+            return
+        try:
+            accounts = google_ads_client.list_client_accounts()
+            self._send_json(200, {"accounts": accounts, "simulated": False})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_json(502, {"error": str(e)})
+
+    def _handle_google_ads_campaigns(self, query):
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        date_from = (query.get("date_from") or [""])[0].strip()
+        date_to = (query.get("date_to") or [""])[0].strip()
+        date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, {"rows": google_ads_client.simulated_campaign_rows(), "simulated": True})
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not date_pattern.match(date_from) or not date_pattern.match(date_to):
+            self._send_json(400, {"error": "date_from y date_to deben tener formato AAAA-MM-DD."})
+            return
+
+        try:
+            rows = google_ads_client.fetch_campaign_rows(customer_id, date_from, date_to)
+            self._send_json(200, {"rows": rows, "simulated": False})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_json(502, {"error": str(e)})
 
     # ------------------------------------------------- Generador de copys ---
     def _handle_fetch(self, query):
