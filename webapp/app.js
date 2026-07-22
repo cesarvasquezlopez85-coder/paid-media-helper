@@ -97,6 +97,14 @@ function fmtInt(n) {
   if (n === null || n === undefined || Number.isNaN(n)) return '0';
   return Math.round(n).toLocaleString('en-US');
 }
+// Fondo tipo mapa de calor para una celda de tabla — más intenso mientras
+// más alto el valor (0-1). scale amplifica valores típicamente bajos
+// (ej. % perdido) para que el color se note sin tener que llegar a 100%.
+function heatCell(value, rgb, scale) {
+  if (Number.isNaN(value)) return '';
+  const alpha = Math.max(0, Math.min(0.55, value * (scale || 1.4)));
+  return `background:rgba(${rgb},${alpha.toFixed(2)});font-weight:600`;
+}
 function pctWidth(v, max) {
   if (!max || Number.isNaN(v)) return 2;
   return Math.max(2, Math.min(100, (v / max) * 100));
@@ -983,9 +991,9 @@ function renderOpportunityReady() {
       <td>${escapeHtml(o.campaign)}</td>
       <td>${escapeHtml(o.bid_strategy || 'N/D')}</td>
       <td>${o.campaign_roas != null ? (o.campaign_roas * 100).toFixed(0) + '%' : 'N/D'}</td>
-      <td>${(o.impr_share * 100).toFixed(0)}%</td>
-      <td>${(o.lost_is_rank * 100).toFixed(0)}%</td>
-      <td>${(o.lost_is_budget * 100).toFixed(0)}%</td>
+      <td style="${heatCell(o.impr_share, '59,130,246', 0.6)}">${(o.impr_share * 100).toFixed(0)}%</td>
+      <td style="${heatCell(o.lost_is_rank, '245,158,11')}">${(o.lost_is_rank * 100).toFixed(0)}%</td>
+      <td style="${heatCell(o.lost_is_budget, '179,53,43')}">${(o.lost_is_budget * 100).toFixed(0)}%</td>
       <td>${fmtMoney(o.revenue_lost)}</td>
       <td>${fmtMoney(o.cost)}</td>
       <td>${fmtInt(o.conversions)}</td>
