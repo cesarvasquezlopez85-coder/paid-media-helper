@@ -772,64 +772,101 @@ function renderOpportunityPage() {
   return `${controlPanel}${body}`;
 }
 
-function funnelNode(label, value, last) {
+// Nodo tipo "píldora" con borde punteado — para tasas/porcentajes (Search
+// Lost IS, Impression Share), igual que en la referencia.
+function funnelPill(label, value, color) {
   return `
-    <div style="text-align:center">
-      <div style="font-size:10.5px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:.03em">${escapeHtml(label)}</div>
-      <div style="font-size:16px;font-weight:700;color:var(--color-text-heading)">${value}</div>
-    </div>
-    ${last ? '' : '<div style="width:1px;height:14px;background:var(--color-border);margin:4px auto"></div>'}`;
+    <div style="background:#fff;border:2px dashed ${color};border-radius:999px;padding:6px 16px;text-align:center;min-width:130px">
+      <div style="font-size:9.5px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:.03em;line-height:1.2">${escapeHtml(label)}</div>
+      <div style="font-size:15px;font-weight:700;color:${color}">${value}</div>
+    </div>`;
+}
+// Nodo tipo caja sólida — para cantidades y montos (búsquedas, impresiones,
+// clics, conversiones, valor de conversión).
+function funnelBox(label, value, big) {
+  return `
+    <div style="background:#fff;border:1px solid var(--color-border);border-radius:10px;padding:${big ? '10px 18px' : '6px 16px'};text-align:center;min-width:130px">
+      <div style="font-size:9.5px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:.03em;line-height:1.2">${escapeHtml(label)}</div>
+      <div style="font-size:${big ? '18px' : '15px'};font-weight:700;color:var(--color-text-heading)">${value}</div>
+    </div>`;
+}
+// Une los nodos con una línea vertical continua detrás (una "columna
+// vertebral"), para que el flujo se lea de un vistazo en vez de ser solo
+// texto apilado.
+function funnelColumn(nodesHtml, lineColor) {
+  return `
+    <div style="position:relative">
+      <div style="position:absolute;left:50%;top:4px;bottom:4px;width:2px;background:${lineColor};opacity:.45;transform:translateX(-50%)"></div>
+      <div style="position:relative;display:flex;flex-direction:column;align-items:center;gap:14px">
+        ${nodesHtml}
+      </div>
+    </div>`;
+}
+function funnelConnector(height) {
+  return `<div style="width:2px;height:${height || 16}px;background:var(--color-border)"></div>`;
 }
 
 // Diagrama "de dónde venimos, a dónde podríamos llegar": mismo embudo de
 // la referencia que trajo cesar, con los números reales de las campañas
 // seleccionadas — escenario actual (con límite de presupuesto) a la
 // izquierda, escenario sin límite a la derecha, con la misma tasa de
-// victoria en subasta y la misma tasa de conversión en ambos.
+// victoria en subasta y la misma tasa de conversión en ambos. Los nodos
+// van conectados por una línea continua para que se lea como un flujo,
+// no como una lista de números sueltos.
 function renderOpportunityFunnel(f) {
   if (!f.has_data) return '';
   const pct = (v) => (v * 100).toFixed(0) + '%';
 
+  const leftNodes = [
+    funnelBox('Inversión', fmtMoney(f.investment)),
+    funnelBox('Total de búsquedas', fmtInt(f.totalQueries)),
+    funnelPill('Perdido por presupuesto', pct(f.lostIsBudgetPct), 'var(--danger)'),
+    funnelBox('Búsquedas disponibles', fmtInt(f.availableQueries)),
+    funnelPill('Impression Share', pct(f.imprSharePct), 'var(--danger)'),
+    funnelBox('Impresiones', fmtInt(f.impressions)),
+    funnelBox('Clics', fmtInt(f.clicks)),
+    funnelBox('Conversiones', fmtInt(f.conversions)),
+    funnelBox('Valor de conversión', fmtMoney(f.convValue), true),
+  ].join('');
+
+  const rightNodes = [
+    funnelBox('Inversión estimada', f.extraBudget != null ? fmtMoney(f.investmentUnconstrained) : 'N/D'),
+    funnelBox('Total de búsquedas', fmtInt(f.totalQueries)),
+    funnelPill('Perdido por presupuesto', '0%', 'var(--ok-text)'),
+    funnelBox('Búsquedas disponibles', fmtInt(f.totalQueries)),
+    funnelPill('Impression Share potencial', pct(f.potentialImprSharePct), 'var(--ok-text)'),
+    funnelBox('Impresiones potenciales', fmtInt(f.potentialImpressions)),
+    funnelBox('Clics potenciales', fmtInt(f.potentialClicks)),
+    funnelBox('Conversiones potenciales', fmtInt(f.potentialConversions)),
+    funnelBox('Valor de conversión potencial', fmtMoney(f.potentialConvValue), true),
+  ].join('');
+
   const left = `
     <div style="border:1.5px solid var(--danger-border);border-radius:12px;padding:18px;background:var(--danger-bg)">
-      <div style="text-align:center;font-weight:700;color:var(--danger);text-transform:uppercase;font-size:11.5px;letter-spacing:.04em;margin-bottom:14px">Escenario actual · con límite de presupuesto</div>
-      ${funnelNode('Inversión', fmtMoney(f.investment))}
-      ${funnelNode('Total de búsquedas', fmtInt(f.totalQueries))}
-      ${funnelNode('Perdido por presupuesto', pct(f.lostIsBudgetPct))}
-      ${funnelNode('Búsquedas disponibles', fmtInt(f.availableQueries))}
-      ${funnelNode('Impression Share', pct(f.imprSharePct))}
-      ${funnelNode('Impresiones', fmtInt(f.impressions))}
-      ${funnelNode('Clics', fmtInt(f.clicks))}
-      ${funnelNode('Conversiones', fmtInt(f.conversions))}
-      ${funnelNode('Valor de conversión', fmtMoney(f.convValue), true)}
+      <div style="text-align:center;font-weight:700;color:var(--danger);text-transform:uppercase;font-size:11.5px;letter-spacing:.04em;margin-bottom:16px">Escenario actual · con límite de presupuesto</div>
+      ${funnelColumn(leftNodes, 'var(--danger)')}
     </div>`;
 
   const right = `
     <div style="border:1.5px solid var(--ok-border);border-radius:12px;padding:18px;background:var(--ok-bg)">
-      <div style="text-align:center;font-weight:700;color:var(--ok-text);text-transform:uppercase;font-size:11.5px;letter-spacing:.04em;margin-bottom:14px">Sin límite de presupuesto</div>
-      ${funnelNode('Inversión estimada', f.extraBudget != null ? fmtMoney(f.investmentUnconstrained) : 'N/D')}
-      ${funnelNode('Total de búsquedas', fmtInt(f.totalQueries))}
-      ${funnelNode('Perdido por presupuesto', '0%')}
-      ${funnelNode('Búsquedas disponibles', fmtInt(f.totalQueries))}
-      ${funnelNode('Impression Share potencial', pct(f.potentialImprSharePct))}
-      ${funnelNode('Impresiones potenciales', fmtInt(f.potentialImpressions))}
-      ${funnelNode('Clics potenciales', fmtInt(f.potentialClicks))}
-      ${funnelNode('Conversiones potenciales', fmtInt(f.potentialConversions))}
-      ${funnelNode('Valor de conversión potencial', fmtMoney(f.potentialConvValue), true)}
+      <div style="text-align:center;font-weight:700;color:var(--ok-text);text-transform:uppercase;font-size:11.5px;letter-spacing:.04em;margin-bottom:16px">Sin límite de presupuesto</div>
+      ${funnelColumn(rightNodes, 'var(--ok-text)')}
     </div>`;
 
   return `
     <div class="card chart-card">
       <h3 class="dense-chart-title">De dónde venimos, a dónde podríamos llegar</h3>
-      <p style="font-size:12.5px;color:var(--color-text-muted);margin-bottom:14px">Mismo Ad Auction Win Rate y misma tasa de conversión en ambos escenarios — la diferencia es solo no perder búsquedas por presupuesto.</p>
+      <p style="font-size:12.5px;color:var(--color-text-muted);margin-bottom:14px">Mismo Ad Auction Win Rate y misma tasa de conversión en ambos escenarios — la diferencia es solo no perder búsquedas por presupuesto. Sigue la línea de cada columna de arriba hacia abajo.</p>
       <div class="two-col">
         ${left}
         ${right}
       </div>
-      <div style="display:flex;justify-content:center;margin:16px 0">
+      <div style="display:flex;flex-direction:column;align-items:center">
+        ${funnelConnector(18)}
         <div style="border:2px solid var(--navy-800);border-radius:999px;padding:8px 20px;font-weight:700;color:var(--navy-800);background:#fff;font-size:13px">
           Tasa de victoria en subasta: ${pct(f.adAuctionWinRate)} (igual en los dos escenarios)
         </div>
+        ${funnelConnector(18)}
       </div>
       <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap">
         <div style="background:var(--gold-500);color:var(--navy-900);padding:14px 22px;border-radius:10px;text-align:center;min-width:190px">
