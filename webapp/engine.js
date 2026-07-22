@@ -106,6 +106,7 @@ const COLUMN_ALIASES = {
   conv_value: ["Conv. value", "Valor de conv.", "Conversion value", "Total conv. value"],
   lost_is_budget: ["Search Lost IS (budget)", "IS perdido por presupuesto (búsqueda)", "Search lost IS (budget)", "% impr. perdidas de la Búsqueda (presupuesto)"],
   lost_is_rank: ["Search Lost IS (rank)", "IS perdido por ranking (búsqueda)", "Search lost IS (rank)", "% impr. perdidas de la Búsqueda (ranking)"],
+  impr_share: ["Search Impr. Share", "Impr. Share", "Porcentaje de impr. de búsqueda"],
   campaign_type: ["Campaign type", "Tipo de campaña"],
   // Columna "CPA" del export nativo: en los reportes con métricas de
   // adquisición de clientes nuevos, Google Ads la trae en % (no en $) —
@@ -113,6 +114,7 @@ const COLUMN_ALIASES = {
   // usa el CPA en dólares que ya calcula la app. Se muestra aparte, tal
   // cual viene en el archivo, sin reemplazar el CPA en $.
   cpa_file_pct: ["CPA"],
+  bid_strategy: ["Bid Strategy Type", "Bid Strategy", "Tipo de estrategia de oferta"],
 };
 
 export const CTR_THRESHOLDS_BY_TYPE = {
@@ -187,19 +189,21 @@ export function loadCampaignReport(text, brandKeywords) {
     return v !== undefined && v !== "" && v !== "--" && !isTotalRow(r);
   });
 
-  const numericFields = ["budget", "impressions", "clicks", "ctr", "avg_cpc", "cost", "conversions", "cost_per_conv", "conv_rate", "lost_is_budget", "lost_is_rank", "cpa_file_pct", "conv_value"];
+  const numericFields = ["budget", "impressions", "clicks", "ctr", "avg_cpc", "cost", "conversions", "cost_per_conv", "conv_rate", "lost_is_budget", "lost_is_rank", "cpa_file_pct", "conv_value", "impr_share"];
   const typeCol = findColumn(headers, COLUMN_ALIASES.campaign_type);
   const statusCol = findColumn(headers, COLUMN_ALIASES.status);
+  const bidStrategyCol = findColumn(headers, COLUMN_ALIASES.bid_strategy);
 
   const rows = filtered.map((r) => {
     const row = { campaign: String(r[campaignCol]) };
     for (const field of numericFields) {
       const col = findColumn(headers, COLUMN_ALIASES[field]);
       let v = col ? toNumber(r[col]) : NaN;
-      if (["ctr", "conv_rate", "lost_is_budget", "lost_is_rank", "cpa_file_pct"].includes(field) && !Number.isNaN(v)) v = v / 100;
+      if (["ctr", "conv_rate", "lost_is_budget", "lost_is_rank", "cpa_file_pct", "impr_share"].includes(field) && !Number.isNaN(v)) v = v / 100;
       row[field] = v;
     }
     row.status = statusCol ? String(r[statusCol]) : "N/D";
+    row.bid_strategy = bidStrategyCol ? String(r[bidStrategyCol]) : "N/D";
     const base = typeCol ? normalizeBaseType(r[typeCol]) : DEFAULT_BASE_TYPE;
     row.campaign_type = base === "search" ? refineSearchType(row.campaign, bk) : base;
     row.has_type_column = !!typeCol;
@@ -406,6 +410,104 @@ export function generateTrendRecommendations(matched) {
   }
   recs.sort((a, b) => b.impacto_gasto - a.impacto_gasto);
   return recs;
+}
+
+// ---------------------------------------------------------------------------
+// Oportunidad de ingresos — mismo export de campañas (Función 1). Estima
+// cuántos ingresos adicionales se habrían generado en las campañas
+// limitadas por presupuesto si no lo hubieran estado, asumiendo la misma
+// tasa de conversión y el mismo Ad Auction Win Rate que ya tiene cada
+// campaña — no es una predicción, es un análisis retrospectivo.
+//
+// Metodología tomada de una referencia externa que trajo cesar (infografía
+// "The Catalyst Tool"), verificada número por número contra su ejemplo:
+// Total Queries = Impresiones / Search Impr. Share
+// Available Queries = Total Queries × (1 − Search Lost IS Budget)
+// Ad Auction Win Rate = Impresiones / Available Queries
+// Escenario sin límite de presupuesto (Search Lost IS Budget = 0%):
+//   Potential Impressions = Ad Auction Win Rate × Total Queries
+//   Potential Clicks = Potential Impressions × CTR (mismo CTR real)
+//   Potential Conversions = Potential Clicks × Conv. rate (mismo real)
+//   Avg. Basket Size = Valor de conv. ÷ Conversiones (real)
+//   Potential Conv. Value = Potential Conversions × Avg. Basket Size
+// Ingresos perdidos = Potential Conv. Value − Valor de conv. real
+// Presupuesto extra a invertir = Ingresos perdidos ÷ ROAS promedio del
+// conjunto de campañas seleccionado (no el ROAS de cada campaña individual).
+// ---------------------------------------------------------------------------
+
+export function computeRevenueOpportunity(row) {
+  const { impressions, clicks, conversions, conv_value, lost_is_budget, impr_share } = row;
+  const base = { campaign: row.campaign, campaign_type: row.campaign_type, bid_strategy: row.bid_strategy };
+
+  if (Number.isNaN(impr_share) || impr_share <= 0 || Number.isNaN(lost_is_budget) || Number.isNaN(impressions) || impressions <= 0) {
+    return { ...base, has_data: false, revenue_lost: 0, conversions_lost: 0 };
+  }
+
+  const totalQueries = impressions / impr_share;
+  const availableQueries = totalQueries * (1 - lost_is_budget);
+  const adAuctionWinRate = availableQueries > 0 ? impressions / availableQueries : 0;
+
+  const potentialImpressions = adAuctionWinRate * totalQueries;
+  const potentialImprShare = totalQueries > 0 ? potentialImpressions / totalQueries : 0;
+  const newLostIsRank = Math.max(0, 1 - potentialImprShare);
+
+  const ctr = !Number.isNaN(row.ctr) ? row.ctr : (impressions > 0 ? clicks / impressions : 0);
+  const convRate = !Number.isNaN(row.conv_rate) ? row.conv_rate : (clicks > 0 ? conversions / clicks : 0);
+  const validConvValue = !Number.isNaN(conv_value) ? conv_value : 0;
+  const avgBasketSize = conversions > 0 ? validConvValue / conversions : 0;
+
+  const potentialClicks = potentialImpressions * ctr;
+  const potentialConversions = potentialClicks * convRate;
+  const potentialConvValue = potentialConversions * avgBasketSize;
+
+  const conversionsLost = Math.max(0, potentialConversions - (Number.isNaN(conversions) ? 0 : conversions));
+  const revenueLost = Math.max(0, potentialConvValue - validConvValue);
+
+  return {
+    ...base,
+    has_data: true,
+    total_queries: totalQueries,
+    available_queries: availableQueries,
+    ad_auction_win_rate: adAuctionWinRate,
+    potential_impr_share: potentialImprShare,
+    new_lost_is_rank: newLostIsRank,
+    potential_conversions: potentialConversions,
+    conversions_lost: conversionsLost,
+    potential_conv_value: potentialConvValue,
+    revenue_lost: revenueLost,
+  };
+}
+
+export function summarizeRevenueOpportunity(rows) {
+  const totalCost = rows.reduce((s, r) => s + (Number.isNaN(r.cost) ? 0 : r.cost), 0);
+  const totalConvValue = rows.reduce((s, r) => s + (Number.isNaN(r.conv_value) ? 0 : r.conv_value), 0);
+  const roas = totalCost > 0 ? totalConvValue / totalCost : null;
+
+  const opportunities = rows.map((r) => {
+    const opp = computeRevenueOpportunity(r);
+    return {
+      ...opp,
+      cost: r.cost, conversions: r.conversions, clicks: r.clicks,
+      impr_share: r.impr_share, lost_is_budget: r.lost_is_budget, lost_is_rank: r.lost_is_rank,
+      campaign_roas: !Number.isNaN(r.cost) && r.cost > 0 && !Number.isNaN(r.conv_value) ? r.conv_value / r.cost : null,
+    };
+  });
+
+  const totalRevenueLost = opportunities.reduce((s, o) => s + o.revenue_lost, 0);
+  const totalConversionsLost = opportunities.reduce((s, o) => s + o.conversions_lost, 0);
+  const extraBudget = roas && roas > 0 ? totalRevenueLost / roas : null;
+
+  opportunities.sort((a, b) => b.revenue_lost - a.revenue_lost);
+
+  return {
+    roas,
+    total_cost: totalCost,
+    total_conv_value: totalConvValue,
+    revenue_lost: totalRevenueLost,
+    conversions_lost: totalConversionsLost,
+    extra_budget: extraBudget,
+    opportunities,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -880,6 +982,22 @@ Search - Competidores Brand,Enabled,$35.00,4900,148,3.02%,$1.75,$259.00,3,$86.33
 Search - Bodas y Eventos,Enabled,$20.00,1950,58,2.97%,$0.49,$28.42,2,$14.21,3.45%,0.00%,1.00%
 Search - Corporativo,Paused,$25.00,980,24,2.45%,$0.58,$13.92,1,$13.92,4.17%,0.00%,0.00%
 Total: all campaigns,--,,305230,3610,,,"$2,017.94",138,,,,`;
+
+// Mismas 10 campañas, con las columnas que necesita Oportunidad de
+// ingresos (Search Impr. Share, Conv. value, Bid Strategy) — solo para
+// demostrar esa sección con un clic.
+export const SAMPLE_CAMPAIGN_CSV_OPPORTUNITY = `Campaign,Campaign status,Budget,Impr.,Clicks,CTR,Avg. CPC,Cost,Conversions,Cost / conv.,Conv. rate,Search Lost IS (budget),Search Lost IS (rank),Search Impr. Share,Conv. value,Bid Strategy Type
+Search - Marca Estelar Manzanillo,Enabled,$50.00,12000,480,4.00%,$0.35,$168.00,22,$7.64,4.58%,2.00%,3.00%,90.00%,6600.00,Target ROAS
+Search - Habitaciones Cartagena,Enabled,$80.00,9000,300,3.33%,$1.20,$360.00,6,$60.00,2.00%,5.00%,8.00%,80.00%,1500.00,Maximize Conversions
+Search - Genérico Hoteles Caribe,Enabled,$60.00,15000,180,1.20%,$0.90,$162.00,9,$18.00,5.00%,4.00%,6.00%,75.00%,1980.00,Maximize Conversions
+Display - Remarketing,Enabled,$30.00,200000,800,0.40%,$0.15,$120.00,15,$8.00,1.88%,0.00%,0.00%,95.00%,2700.00,Maximize Conversion Value
+Search - Ofertas Fin de Semana,Enabled,$40.00,8000,320,4.00%,$0.45,$144.00,18,$8.00,5.63%,22.00%,3.00%,55.00%,3600.00,Maximize Conversions
+Search - Todo Incluido,Enabled,$70.00,11000,400,3.64%,$0.60,$240.00,14,$17.14,3.50%,2.00%,25.00%,70.00%,3920.00,Maximize Conversion Value
+Performance Max - Reservas,Enabled,$100.00,50000,900,1.80%,$0.70,$630.00,35,$18.00,3.89%,5.00%,4.00%,85.00%,9100.00,Maximize Conversion Value
+Search - Competidores Brand,Enabled,$35.00,5000,150,3.00%,$1.80,$270.00,3,$90.00,2.00%,1.00%,2.00%,92.00%,450.00,Target ROAS
+Search - Bodas y Eventos,Enabled,$20.00,2000,60,3.00%,$0.50,$30.00,2,$15.00,3.33%,0.00%,1.00%,88.00%,800.00,Maximize Conversions
+Search - Corporativo,Paused,$25.00,1000,25,2.50%,$0.60,$15.00,1,$15.00,4.00%,0.00%,0.00%,90.00%,300.00,Maximize Conversions
+Total: all campaigns,--,,313000,3615,,,"$2,139.00",125,,,,,,`;
 
 export const SAMPLE_SEARCH_TERMS_CSV = `Search term,Clicks,Impr.,Cost,Conversions
 estelar playa manzanillo,210,3400,240.10,18

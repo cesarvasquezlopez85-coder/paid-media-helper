@@ -37,6 +37,12 @@ const state = {
     previous: { status: 'idle', error: null, fileName: null, rows: null },
     campaignFilter: 'all',
   },
+
+  opportunity: {
+    brandKeywords: 'marca, brand, branded, brnd',
+    status: 'idle', error: null, fileName: null,
+    rows: null, campaignFilter: 'all', excludeBrand: true,
+  },
 };
 
 const PAGE_META = {
@@ -59,6 +65,10 @@ const PAGE_META = {
   comparativa: {
     title: 'Comparar periodos',
     caption: 'Sube el export de campañas de dos periodos distintos y obtén qué campañas mejoraron o empeoraron, con recomendaciones basadas en la tendencia.',
+  },
+  oportunidad: {
+    title: 'Oportunidad de ingresos',
+    caption: 'Sube un export de campañas y estima cuántos ingresos adicionales se habrían generado en las campañas limitadas por presupuesto si no lo hubieran estado — análisis retrospectivo, no una predicción.',
   },
 };
 
@@ -121,6 +131,7 @@ function render() {
   else if (state.page === 'negativizacion') pageHtml = renderNegPage();
   else if (state.page === 'copys') pageHtml = renderCopyPage();
   else if (state.page === 'comparativa') pageHtml = renderComparePage();
+  else if (state.page === 'oportunidad') pageHtml = renderOpportunityPage();
   else pageHtml = renderBookPage();
 
   root.innerHTML = `
@@ -689,6 +700,163 @@ function renderComparePage() {
       Las campañas se emparejan por nombre exacto entre los dos archivos — si una campaña se renombró entre periodos, va a aparecer como "nueva" en un lado y "ya no aparece" en el otro.
       Los badges ▲/▼ comparan el periodo actual contra el anterior: verde es mejora, rojo es empeora. En Gasto no se juzga bueno/malo porque subir puede ser intencional.
       Umbrales de la recomendación por tendencia: CPA +20%, CTR -20%, conversiones -20%, o gasto +30% sin que suban las conversiones.
+    </p>
+  `;
+}
+
+// ---------------------------------------------------------------------------
+// Oportunidad de ingresos — mismo export de campañas (Función 1)
+// ---------------------------------------------------------------------------
+
+function runOpportunityAnalysis(text, fileName) {
+  const s = state.opportunity;
+  try {
+    const brandKeywords = s.brandKeywords.split(',').map((v) => v.trim()).filter(Boolean);
+    const rowsRaw = engine.loadCampaignReport(text, brandKeywords);
+    const rows = engine.computeMetrics(rowsRaw);
+    Object.assign(s, { status: 'ready', error: null, rows, fileName, campaignFilter: 'all' });
+  } catch (err) {
+    Object.assign(s, { status: 'error', error: err.message || String(err), fileName, rows: null });
+  }
+  render();
+}
+
+function getOpportunityFilteredRows() {
+  const s = state.opportunity;
+  const rows = s.rows || [];
+  // Elegir una campaña específica es una decisión explícita del usuario —
+  // se muestra igual aunque sea de marca, no la tapa el checkbox de excluir.
+  if (s.campaignFilter !== 'all') return rows.filter((r) => r.campaign === s.campaignFilter);
+  return s.excludeBrand ? rows.filter((r) => r.campaign_type !== 'search_brand') : rows;
+}
+
+function renderOpportunityPage() {
+  const s = state.opportunity;
+
+  const controlPanel = `
+    <div class="card control-panel align-end">
+      <div class="field">
+        <label>Palabras que identifican una campaña de marca (separadas por coma)</label>
+        <input type="text" id="opp-brand-keywords" value="${escapeHtml(s.brandKeywords)}" style="width:320px" />
+      </div>
+      <div class="field">
+        <label>Export de campañas (CSV o Excel)</label>
+        <input type="file" id="opp-file" accept=".csv,.xlsx,.xls" />
+      </div>
+      <button class="btn-outline" data-action="opp-demo">Usar ejemplo</button>
+      ${s.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.fileName)}</strong></div>` : ''}
+    </div>`;
+
+  let body = '';
+  if (s.status === 'idle') {
+    body = `
+      <div class="card state-panel idle">
+        ${icon('trending-up', 30)}
+        <p>Esperando un archivo. Además de las columnas habituales de Rendimiento, necesita "Search Impr. Share" y "Valor de conv." para poder calcular la oportunidad.</p>
+      </div>`;
+  } else if (s.status === 'loading') {
+    body = `
+      <div class="card state-panel loading">
+        <div class="spinner"></div>
+        <p>Analizando archivo…</p>
+      </div>`;
+  } else if (s.status === 'error') {
+    body = `
+      <div class="error-panel">
+        <strong>No se pudo leer el archivo.</strong> ${escapeHtml(s.error)}
+      </div>`;
+  } else if (s.status === 'ready') {
+    body = renderOpportunityReady();
+  }
+
+  return `${controlPanel}${body}`;
+}
+
+function renderOpportunityReady() {
+  const s = state.opportunity;
+  const allCampaignNames = [...new Set((s.rows || []).map((r) => r.campaign))].sort((a, b) => a.localeCompare(b));
+
+  const filterPanel = `
+    <div class="card control-panel align-end">
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:8px;font-weight:400">
+          <input type="checkbox" id="opp-exclude-brand" ${s.excludeBrand ? 'checked' : ''} />
+          Excluir campañas de marca (recomendado para un ROAS realista)
+        </label>
+      </div>
+      <div class="field">
+        <label>Ver solo esta campaña</label>
+        <select id="opp-campaign-filter" style="width:320px">
+          <option value="all" ${s.campaignFilter === 'all' ? 'selected' : ''}>Todas las campañas seleccionadas</option>
+          ${allCampaignNames.map((c) => `<option value="${escapeHtml(c)}" ${s.campaignFilter === c ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}
+        </select>
+      </div>
+    </div>`;
+
+  const rows = getOpportunityFilteredRows();
+  const withData = rows.filter((r) => !Number.isNaN(r.impr_share) && r.impr_share > 0 && !Number.isNaN(r.lost_is_budget));
+  if (!withData.length) {
+    return `
+      ${filterPanel}
+      <div class="error-panel">
+        Ninguna de las campañas seleccionadas trae las columnas "Search Impr. Share" y "Search Lost IS (budget)" con datos válidos — sin esas columnas no se puede calcular la oportunidad de ingresos. Revisa que el export de Google Ads las incluya, o prueba con "Usar ejemplo".
+      </div>`;
+  }
+
+  const summary = engine.summarizeRevenueOpportunity(rows);
+
+  const headline = `
+    <div class="card" style="padding:28px 32px;text-align:center;margin-bottom:20px">
+      <div style="font-size:13px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">Podrías haber incrementado tus ingresos en</div>
+      <div style="font-family:var(--font-display);font-size:40px;font-weight:700;color:var(--ok-text)">${fmtMoney(summary.revenue_lost)}</div>
+      <div style="display:flex;gap:32px;justify-content:center;margin-top:18px;flex-wrap:wrap">
+        <div>
+          <div style="font-size:12px;color:var(--color-text-muted)">Si hubieras invertido</div>
+          <div style="font-size:22px;font-weight:700;color:var(--danger)">${summary.extra_budget != null ? fmtMoney(summary.extra_budget) : 'N/D'}</div>
+          <div style="font-size:11px;color:var(--color-text-muted)">adicional</div>
+        </div>
+        <div>
+          <div style="font-size:12px;color:var(--color-text-muted)">Asumiendo un ROAS de</div>
+          <div style="font-size:22px;font-weight:700;color:var(--color-accent-strong)">${summary.roas != null ? (summary.roas * 100).toFixed(0) + '%' : 'N/D'}</div>
+          <div style="font-size:11px;color:var(--color-text-muted)">promedio de las campañas seleccionadas</div>
+        </div>
+        <div>
+          <div style="font-size:12px;color:var(--color-text-muted)">Conversiones perdidas</div>
+          <div style="font-size:22px;font-weight:700;color:var(--navy-800)">${fmtInt(summary.conversions_lost)}</div>
+        </div>
+      </div>
+    </div>`;
+
+  const tableRows = summary.opportunities.filter((o) => o.has_data).map((o) => `
+    <tr>
+      <td>${escapeHtml(o.campaign)}</td>
+      <td>${escapeHtml(o.bid_strategy || 'N/D')}</td>
+      <td>${o.campaign_roas != null ? (o.campaign_roas * 100).toFixed(0) + '%' : 'N/D'}</td>
+      <td>${(o.impr_share * 100).toFixed(0)}%</td>
+      <td>${(o.lost_is_rank * 100).toFixed(0)}%</td>
+      <td>${(o.lost_is_budget * 100).toFixed(0)}%</td>
+      <td>${fmtMoney(o.revenue_lost)}</td>
+      <td>${fmtMoney(o.cost)}</td>
+      <td>${fmtInt(o.conversions)}</td>
+      <td>${fmtInt(o.conversions_lost)}</td>
+    </tr>`).join('');
+
+  return `
+    ${filterPanel}
+    ${headline}
+    <div class="card chart-card">
+      <h3 class="dense-chart-title">Campañas con mayor oportunidad de presupuesto sin límite</h3>
+      <p style="font-size:12.5px;color:var(--color-text-muted);margin-bottom:12px">Ordenadas de mayor a menor ingreso perdido. IS = Impression Share, LR = % perdido por ranking, LB = % perdido por presupuesto.</p>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>Campaña</th><th>Estrategia</th><th>ROAS</th><th>IS</th><th>LR</th><th>LB</th><th>Ingresos perdidos</th><th>Gasto</th><th>Conversiones</th><th>Conv. perdidas</th></tr></thead>
+          <tbody>${tableRows}</tbody>
+        </table>
+      </div>
+    </div>
+    <p class="footnote">
+      Análisis retrospectivo, no una predicción: asume que, sin límite de presupuesto, cada campaña habría mantenido la misma tasa de conversión y el mismo Ad Auction Win Rate que ya tiene. El presupuesto extra a invertir se calcula con el ROAS promedio del conjunto de campañas seleccionado (no el de cada campaña individual) — por eso se recomienda excluir campañas de marca, que suelen tener un ROAS artificialmente alto y distorsionan el promedio.
+      Metodología: Total de búsquedas = Impresiones ÷ Impression Share. Búsquedas disponibles = Total × (1 − % perdido por presupuesto). Tasa de victoria en subasta = Impresiones ÷ Búsquedas disponibles. Sin límite de presupuesto, Impresiones potenciales = Tasa de victoria × Total de búsquedas — de ahí se proyectan clics, conversiones y valor de conversión con las mismas tasas reales de la campaña.
     </p>
   `;
 }
@@ -1346,6 +1514,33 @@ function bindEvents() {
     render();
   });
 
+  // Oportunidad de ingresos
+  const oppBrandInput = document.getElementById('opp-brand-keywords');
+  if (oppBrandInput) oppBrandInput.addEventListener('input', (e) => { state.opportunity.brandKeywords = e.target.value; });
+
+  const oppFileInput = document.getElementById('opp-file');
+  if (oppFileInput) oppFileInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    state.opportunity.status = 'loading'; state.opportunity.error = null; state.opportunity.fileName = file.name;
+    render();
+    readFileAsCsvText(file).then((text) => runOpportunityAnalysis(text, file.name))
+      .catch((err) => { state.opportunity.status = 'error'; state.opportunity.error = err.message || String(err); render(); });
+  });
+
+  const oppExcludeBrand = document.getElementById('opp-exclude-brand');
+  if (oppExcludeBrand) oppExcludeBrand.addEventListener('change', (e) => {
+    state.opportunity.excludeBrand = e.target.checked;
+    state.opportunity.campaignFilter = 'all';
+    render();
+  });
+
+  const oppCampaignFilter = document.getElementById('opp-campaign-filter');
+  if (oppCampaignFilter) oppCampaignFilter.addEventListener('change', (e) => {
+    state.opportunity.campaignFilter = e.target.value;
+    render();
+  });
+
   // Negativización
   const negCoreInput = document.getElementById('neg-core');
   if (negCoreInput) negCoreInput.addEventListener('input', (e) => { state.neg.core = e.target.value; });
@@ -1424,6 +1619,13 @@ function handleAction(action) {
         runCompareAnalysis('current', engine.SAMPLE_CAMPAIGN_CSV, 'sample_data_actual.csv');
         runCompareAnalysis('previous', engine.SAMPLE_CAMPAIGN_CSV_PREVIOUS, 'sample_data_anterior.csv');
       }, 250);
+      break;
+    }
+
+    case 'opp-demo': {
+      state.opportunity.status = 'loading'; state.opportunity.error = null; state.opportunity.fileName = 'sample_data_oportunidad.csv';
+      render();
+      setTimeout(() => runOpportunityAnalysis(engine.SAMPLE_CAMPAIGN_CSV_OPPORTUNITY, 'sample_data_oportunidad.csv'), 250);
       break;
     }
 
