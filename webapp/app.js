@@ -772,6 +772,42 @@ function renderOpportunityPage() {
   return `${controlPanel}${body}`;
 }
 
+// Gráfica de Impression Share por campaña: Impr. Share vs. % perdido por
+// ranking vs. % perdido por presupuesto — la campaña con el rojo más alto
+// es donde está la oportunidad de subir presupuesto (mismo criterio que
+// la gráfica 3 de la referencia que trajo cesar). Se ordena de mayor a
+// menor "perdido por presupuesto" para identificarla rápido.
+function renderImprShareChart(rows) {
+  const withShare = rows.filter((r) => !Number.isNaN(r.impr_share));
+  if (!withShare.length) return '';
+  const sorted = [...withShare].sort((a, b) => (b.lost_is_budget || 0) - (a.lost_is_budget || 0));
+  const groups = sorted.map((r) => {
+    const bars = [
+      { label: 'Impr. Share', value: r.impr_share || 0, color: 'var(--gray-300)' },
+      { label: 'Perdido por ranking', value: r.lost_is_rank || 0, color: '#3b82f6' },
+      { label: 'Perdido por presupuesto', value: r.lost_is_budget || 0, color: 'var(--danger)' },
+    ];
+    const barsHtml = bars.map((b) => `
+      <div class="bar-row">
+        <div class="bar-label">${escapeHtml(b.label)}</div>
+        <div class="bar-track"><div class="bar-fill" style="width:${(b.value * 100).toFixed(1)}%;background:${b.color}"></div></div>
+        <div class="bar-value">${(b.value * 100).toFixed(0)}%</div>
+      </div>`).join('');
+    return `
+      <div style="margin-bottom:18px">
+        <div style="font-weight:600;font-size:13px;color:var(--color-text-heading);margin-bottom:6px">${escapeHtml(r.campaign)}</div>
+        <div class="bar-rows compact">${barsHtml}</div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="card chart-card">
+      <h3 class="dense-chart-title">Impression Share: presupuesto vs. ranking</h3>
+      <p style="font-size:12.5px;color:var(--color-text-muted);margin-bottom:12px">Ordenado de mayor a menor % perdido por presupuesto — ahí está la oportunidad de subir presupuesto.</p>
+      ${groups}
+    </div>`;
+}
+
 function renderOpportunityReady() {
   const s = state.opportunity;
   const allCampaignNames = [...new Set((s.rows || []).map((r) => r.campaign))].sort((a, b) => a.localeCompare(b));
@@ -844,6 +880,7 @@ function renderOpportunityReady() {
   return `
     ${filterPanel}
     ${headline}
+    ${renderImprShareChart(withData)}
     <div class="card chart-card">
       <h3 class="dense-chart-title">Campañas con mayor oportunidad de presupuesto sin límite</h3>
       <p style="font-size:12.5px;color:var(--color-text-muted);margin-bottom:12px">Ordenadas de mayor a menor ingreso perdido. IS = Impression Share, LR = % perdido por ranking, LB = % perdido por presupuesto.</p>
