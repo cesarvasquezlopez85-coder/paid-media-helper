@@ -1418,9 +1418,20 @@ export function compareBookingPeriods(currentRows, previousRows) {
   const totalNochesPrevious = previousRows.reduce((s, r) => s + bookingNights(r), 0);
   const leadCurrent = summarizeLeadTime(currentRows);
   const leadPrevious = summarizeLeadTime(previousRows);
+  const leadPrevMap = new Map(leadPrevious.buckets.map((b) => [b.label, b]));
+  const leadBuckets = leadCurrent.buckets.map((b) => {
+    const prev = leadPrevMap.get(b.label) || { reservas: 0 };
+    return {
+      label: b.label,
+      current_reservas: b.reservas,
+      previous_reservas: prev.reservas,
+      delta: pctChange(prev.reservas, b.reservas),
+    };
+  });
 
   return {
     markets,
+    lead_buckets: leadBuckets,
     total_reservas_current: totalReservasCurrent,
     total_reservas_previous: totalReservasPrevious,
     delta_reservas: pctChange(totalReservasPrevious, totalReservasCurrent),

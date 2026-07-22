@@ -34,6 +34,7 @@ const state = {
     compare: {
       current: { status: 'idle', error: null, fileName: null, rows: null },
       previous: { status: 'idle', error: null, fileName: null, rows: null },
+      marketFilter: 'all', hotelFilter: 'all',
     },
   },
 
@@ -1475,6 +1476,7 @@ function runBookCompareAnalysisFromText(which, text, fileName) {
   try {
     const result = engine.loadBookings(text);
     Object.assign(slot, { status: 'ready', error: null, rows: result.rows, fileName });
+    state.book.compare.marketFilter = 'all'; state.book.compare.hotelFilter = 'all';
   } catch (err) {
     Object.assign(slot, { status: 'error', error: err.message || String(err), fileName, rows: null });
   }
@@ -1486,6 +1488,7 @@ function runBookCompareAnalysisFromRows(which, rows2D, fileName) {
   try {
     const result = engine.loadBookingsFromRows(rows2D);
     Object.assign(slot, { status: 'ready', error: null, rows: result.rows, fileName });
+    state.book.compare.marketFilter = 'all'; state.book.compare.hotelFilter = 'all';
   } catch (err) {
     Object.assign(slot, { status: 'error', error: err.message || String(err), fileName, rows: null });
   }
@@ -1525,7 +1528,32 @@ function renderBookComparePage() {
       </div>`;
   }
 
-  const cmp = engine.compareBookingPeriods(s.current.rows, s.previous.rows);
+  const allMarkets = [...new Set([...engine.listBookingMarkets(s.current.rows), ...engine.listBookingMarkets(s.previous.rows)])].sort((a, b) => a.localeCompare(b, 'es'));
+  const allHotels = [...new Set([...engine.listBookingHotels(s.current.rows), ...engine.listBookingHotels(s.previous.rows)])].sort((a, b) => a.localeCompare(b, 'es'));
+
+  const filterPanel = `
+    <div class="card" style="padding:16px 20px;margin-bottom:20px;display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <label style="font-size:12px;font-weight:600;color:var(--color-text-heading)">Filtrar por mercado</label>
+      <select id="book-compare-market-filter">
+        <option value="all" ${s.marketFilter === 'all' ? 'selected' : ''}>Todos los mercados</option>
+        ${allMarkets.map((m) => `<option value="${escapeHtml(m)}" ${s.marketFilter === m ? 'selected' : ''}>${escapeHtml(m)}</option>`).join('')}
+      </select>
+      ${allHotels.length > 1 ? `
+        <label style="font-size:12px;font-weight:600;color:var(--color-text-heading)">Filtrar por hotel</label>
+        <select id="book-compare-hotel-filter">
+          <option value="all" ${s.hotelFilter === 'all' ? 'selected' : ''}>Todos los hoteles</option>
+          ${allHotels.map((h) => `<option value="${escapeHtml(h)}" ${s.hotelFilter === h ? 'selected' : ''}>${escapeHtml(h)}</option>`).join('')}
+        </select>` : ''}
+    </div>`;
+
+  const currentRows = s.current.rows
+    .filter((r) => s.marketFilter === 'all' || r.pais === s.marketFilter)
+    .filter((r) => s.hotelFilter === 'all' || r.hotel === s.hotelFilter);
+  const previousRows = s.previous.rows
+    .filter((r) => s.marketFilter === 'all' || r.pais === s.marketFilter)
+    .filter((r) => s.hotelFilter === 'all' || r.hotel === s.hotelFilter);
+
+  const cmp = engine.compareBookingPeriods(currentRows, previousRows);
 
   const statGrid = `
     <div class="stat-grid">
@@ -1560,8 +1588,16 @@ function renderBookComparePage() {
       <td>${fmtInt(m.previous_noches)}</td>
     </tr>`).join('');
 
+  const leadTableRows = cmp.lead_buckets.map((b) => `
+    <tr>
+      <td>${escapeHtml(b.label)}</td>
+      <td>${fmtInt(b.current_reservas)} ${deltaBadge(b.delta, 'neutral')}</td>
+      <td>${fmtInt(b.previous_reservas)}</td>
+    </tr>`).join('');
+
   return `
     ${uploadPanel}
+    ${filterPanel}
     ${statGrid}
     <div class="card chart-card">
       <h3 class="dense-chart-title">Reservas por mercado — periodo actual vs. anterior</h3>
@@ -1572,8 +1608,37 @@ function renderBookComparePage() {
         </table>
       </div>
     </div>
+    <div class="card chart-card">
+      <h3 class="dense-chart-title">Días de antelación (reserva → estadía) — actual vs. anterior</h3>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>Antelación</th><th>Reservas (actual)</th><th>Reservas (anterior)</th></tr></thead>
+          <tbody>${leadTableRows}</tbody>
+        </table>
+      </div>
+    </div>
+    <div class="two-col">
+      <div class="card chart-card">
+        <h3 class="dense-chart-title">Periodo actual — reservas, noches y prom. de noches por mercado</h3>
+        ${renderBookingsHeatmap(currentRows)}
+      </div>
+      <div class="card chart-card">
+        <h3 class="dense-chart-title">Periodo anterior — reservas, noches y prom. de noches por mercado</h3>
+        ${renderBookingsHeatmap(previousRows)}
+      </div>
+    </div>
+    <div class="two-col">
+      <div class="card chart-card">
+        <h3 class="dense-chart-title">Periodo actual — llegadas por día de semana</h3>
+        ${renderArrivalsByWeekday(currentRows)}
+      </div>
+      <div class="card chart-card">
+        <h3 class="dense-chart-title">Periodo anterior — llegadas por día de semana</h3>
+        ${renderArrivalsByWeekday(previousRows)}
+      </div>
+    </div>
     <p class="footnote">
-      Las reservas se agrupan por mercado (país). Los badges ▲/▼ comparan el periodo actual contra el anterior en reservas y noches — más es mejor en ambas.
+      Las reservas se agrupan por mercado (país). Los badges ▲/▼ comparan el periodo actual contra el anterior — más es mejor en reservas, noches y conversiones; en antelación solo se informa la tendencia, sin juicio de bueno/malo.
     </p>
   `;
 }
@@ -1980,6 +2045,16 @@ function bindEvents() {
         readFileAsCsvText(file).then((text) => runBookCompareAnalysisFromText(which, text, file.name)).catch(onError);
       }
     });
+  });
+  const bookCompareMarketFilter = document.getElementById('book-compare-market-filter');
+  if (bookCompareMarketFilter) bookCompareMarketFilter.addEventListener('change', (e) => {
+    state.book.compare.marketFilter = e.target.value;
+    render();
+  });
+  const bookCompareHotelFilter = document.getElementById('book-compare-hotel-filter');
+  if (bookCompareHotelFilter) bookCompareHotelFilter.addEventListener('change', (e) => {
+    state.book.compare.hotelFilter = e.target.value;
+    render();
   });
   // Acciones (data-action)
   root.querySelectorAll('[data-action]').forEach((el) => {
