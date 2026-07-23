@@ -39,7 +39,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-API_VERSION = "v18"
+API_VERSION = "v25"
 BASE_URL = f"https://googleads.googleapis.com/{API_VERSION}"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 TIMEOUT_SECONDS = 20
