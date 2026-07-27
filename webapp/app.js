@@ -26,6 +26,7 @@ const state = {
     core: 'estelar\nmanzanillo',
     exceptions: 'manzanillo del mar',
     status: 'idle', error: null, fileName: null, rows: null,
+    sortBy: 'cost', sortDir: 'desc',
   },
 
   copy: {
@@ -1301,8 +1302,24 @@ function renderNegPage() {
   `;
 }
 
+// Columnas ordenables de "Candidatos a negativo" — mismo patrón que la
+// tabla de acción de Oportunidad de ingresos (oppSortTh/OPP_SORT_KEYS).
+const NEG_SORT_KEYS = {
+  term: (r) => r.term.toLowerCase(),
+  clicks: (r) => r.clicks,
+  impr: (r) => r.impr,
+  cost: (r) => r.cost,
+  conversions: (r) => r.conversions || 0,
+};
+function negSortTh(label, key, s) {
+  const active = s.sortBy === key;
+  const arrow = active ? (s.sortDir === 'desc' ? ' ▼' : ' ▲') : '';
+  return `<th data-neg-sort="${key}" style="cursor:pointer;user-select:none${active ? ';color:var(--color-text-heading)' : ''}">${escapeHtml(label)}${arrow}</th>`;
+}
+
 function renderNegReady() {
-  const rows = state.neg.rows;
+  const s = state.neg;
+  const rows = s.rows;
   const summary = engine.summarizeClassification(rows);
   const maxCost = Math.max(1, summary.mantener.costo, summary.revisar.costo, summary.negativizar.costo);
 
@@ -1312,7 +1329,10 @@ function renderNegReady() {
     { campaign: 'Negativizar', valueLabel: fmtMoney(summary.negativizar.costo), width: pctWidth(summary.negativizar.costo, maxCost), color: 'var(--danger)' },
   ];
 
-  const negativizarAll = rows.filter((r) => r.clasificacion === 'negativizar').sort((a, b) => b.cost - a.cost);
+  const sortKeyFn = NEG_SORT_KEYS[s.sortBy] || NEG_SORT_KEYS.cost;
+  const sortDirMul = s.sortDir === 'asc' ? 1 : -1;
+  const negativizarAll = rows.filter((r) => r.clasificacion === 'negativizar')
+    .sort((a, b) => (sortKeyFn(a) > sortKeyFn(b) ? 1 : sortKeyFn(a) < sortKeyFn(b) ? -1 : 0) * sortDirMul);
   const revisarAll = rows.filter((r) => r.clasificacion === 'revisar').sort((a, b) => b.cost - a.cost);
 
   const termRowHtml = (r) => `
@@ -1321,6 +1341,7 @@ function renderNegReady() {
       <td>${fmtInt(r.clicks)}</td>
       <td>${fmtInt(r.impr)}</td>
       <td>${fmtMoney(r.cost)}</td>
+      <td>${fmtInt(r.conversions || 0)}</td>
     </tr>`;
 
   const candidatosCaption = negativizarAll.length > 50 ? `mostrando 50 de ${negativizarAll.length}` : `${negativizarAll.length} términos`;
@@ -1382,7 +1403,13 @@ function renderNegReady() {
       </div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Término</th><th>Clics</th><th>Impr.</th><th>Costo</th></tr></thead>
+          <thead><tr>
+            ${negSortTh('Término', 'term', s)}
+            ${negSortTh('Clics', 'clicks', s)}
+            ${negSortTh('Impr.', 'impr', s)}
+            ${negSortTh('Costo', 'cost', s)}
+            ${negSortTh('Conversiones', 'conversions', s)}
+          </tr></thead>
           <tbody>${negativizarAll.slice(0, 50).map(termRowHtml).join('')}</tbody>
         </table>
       </div>
@@ -1396,7 +1423,7 @@ function renderNegReady() {
       <p style="margin:0 0 12px;font-size:12.5px;color:var(--color-text-muted)">Contienen un término núcleo pero también una excepción conocida — no se clasifican solos.</p>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Término</th><th>Clics</th><th>Impr.</th><th>Costo</th></tr></thead>
+          <thead><tr><th>Término</th><th>Clics</th><th>Impr.</th><th>Costo</th><th>Conversiones</th></tr></thead>
           <tbody>${revisarAll.slice(0, 50).map(termRowHtml).join('')}</tbody>
         </table>
       </div>
@@ -2139,6 +2166,16 @@ function bindEvents() {
     });
   });
 
+  document.querySelectorAll('[data-neg-sort]').forEach((th) => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.negSort;
+      const s = state.neg;
+      if (s.sortBy === key) s.sortDir = s.sortDir === 'desc' ? 'asc' : 'desc';
+      else { s.sortBy = key; s.sortDir = key === 'term' ? 'asc' : 'desc'; }
+      render();
+    });
+  });
+
   // Negativización
   const negCoreInput = document.getElementById('neg-core');
   if (negCoreInput) negCoreInput.addEventListener('input', (e) => { state.neg.core = e.target.value; });
@@ -2274,13 +2311,13 @@ function handleAction(action) {
     }
     case 'download-neg-candidatos': {
       const rows = state.neg.rows.filter((r) => r.clasificacion === 'negativizar').sort((a, b) => b.cost - a.cost);
-      const data = [['Término', 'Clics', 'Impresiones', 'Costo'], ...rows.map((r) => [r.term, r.clicks, r.impr, r.cost.toFixed(2)])];
+      const data = [['Término', 'Clics', 'Impresiones', 'Costo', 'Conversiones'], ...rows.map((r) => [r.term, r.clicks, r.impr, r.cost.toFixed(2), r.conversions || 0])];
       engine.downloadCsv('negativos_candidatos.csv', data);
       break;
     }
     case 'download-neg-revisar': {
       const rows = state.neg.rows.filter((r) => r.clasificacion === 'revisar').sort((a, b) => b.cost - a.cost);
-      const data = [['Término', 'Clics', 'Impresiones', 'Costo'], ...rows.map((r) => [r.term, r.clicks, r.impr, r.cost.toFixed(2)])];
+      const data = [['Término', 'Clics', 'Impresiones', 'Costo', 'Conversiones'], ...rows.map((r) => [r.term, r.clicks, r.impr, r.cost.toFixed(2), r.conversions || 0])];
       engine.downloadCsv('negativos_revisar.csv', data);
       break;
     }
