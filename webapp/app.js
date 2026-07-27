@@ -23,8 +23,8 @@ const state = {
   },
 
   neg: {
-    core: 'estelar\nmanzanillo',
-    exceptions: 'manzanillo del mar',
+    core: '',
+    exceptions: '',
     status: 'idle', error: null, fileName: null, rows: null,
     sortBy: 'cost', sortDir: 'desc',
   },
@@ -1281,12 +1281,12 @@ function renderNegPage() {
     <div class="card control-panel">
       <div class="field" style="flex:1;min-width:240px">
         <label>Terminos de la campaña (lo que si debe ir)</label>
-        <textarea id="neg-core" rows="3" style="width:100%;resize:vertical">${escapeHtml(s.core)}</textarea>
+        <textarea id="neg-core" rows="3" style="width:100%;resize:vertical" placeholder="ej. estelar&#10;manzanillo">${escapeHtml(s.core)}</textarea>
         <p class="field-hint">Una palabra o frase corta por línea, no la frase completa. Un término de búsqueda se mantiene si contiene <em>alguna</em> de estas líneas — mientras más corta la línea, más variantes reales captura (ej. usa <code>click clack</code> en vez de <code>click clack bogota</code>, si no cada búsqueda tendría que traer las tres palabras juntas y en ese orden para calzar).</p>
       </div>
       <div class="field" style="flex:1;min-width:240px">
         <label>Define los terminos de busqueda que no deben ir (Opcional)</label>
-        <textarea id="neg-exceptions" rows="3" style="width:100%;resize:vertical">${escapeHtml(s.exceptions)}</textarea>
+        <textarea id="neg-exceptions" rows="3" style="width:100%;resize:vertical" placeholder="ej. manzanillo del mar">${escapeHtml(s.exceptions)}</textarea>
         <p class="field-hint">Para términos que coinciden con una línea de arriba pero sabes que no aplican (ej. otra sede de la marca, otra ciudad) — en vez de mantenerse solos, pasan a "revisar" para que los decidas a mano.</p>
       </div>
     </div>
@@ -2305,6 +2305,11 @@ function handleAction(action) {
 
     case 'neg-demo': {
       state.neg.status = 'loading'; state.neg.error = null; state.neg.fileName = 'negativos_ejemplo.csv';
+      // Los cuadros de términos núcleo/excepciones empiezan en blanco (para
+      // no arrastrar los de Estelar a otras cuentas) — el botón de ejemplo
+      // los rellena con los términos que corresponden a ese dataset de ejemplo.
+      if (!state.neg.core.trim()) state.neg.core = 'estelar\nmanzanillo';
+      if (!state.neg.exceptions.trim()) state.neg.exceptions = 'manzanillo del mar';
       render();
       setTimeout(() => runNegAnalysis(engine.SAMPLE_SEARCH_TERMS_CSV, 'negativos_ejemplo.csv'), 250);
       break;
