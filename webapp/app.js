@@ -1484,11 +1484,19 @@ function renderForecastReady() {
 // mismo criterio del resto de la plataforma de no depender de un paquete
 // de gráficas externo.
 function renderForecastChart(history, forecast) {
-  const W = 680, H = 230, ML = 56, MR = 16, MT = 16, MB = 26;
-  const plotW = W - ML - MR, plotH = H - MT - MB;
-
   const allPoints = [...history.map((h) => ({ t: h.t, values: [h.revenue, h.fitted] })),
     ...forecast.map((f) => ({ t: f.t, values: [f.value, f.low, f.high] }))];
+
+  // Ancho variable según cuántos meses hay que mostrar — para poder etiquetar
+  // todos los meses en el eje X sin amontonarlos, en vez de saltarse
+  // etiquetas. Con muchos meses (ej. histórico de 24+ más 12 de proyección)
+  // el gráfico queda más ancho que la tarjeta y se desplaza horizontalmente.
+  const POINT_SPACING = 34;
+  const H = 230, ML = 56, MR = 16, MT = 16, MB = 26;
+  const plotW = Math.max(560, allPoints.length * POINT_SPACING);
+  const W = ML + MR + plotW;
+  const plotH = H - MT - MB;
+
   const tMax = Math.max(1, allPoints[allPoints.length - 1].t);
   const yMax = Math.max(1, ...allPoints.flatMap((p) => p.values)) * 1.08;
 
@@ -1512,23 +1520,26 @@ function renderForecastChart(history, forecast) {
       <text x="${ML - 8}" y="${(yy + 3).toFixed(1)}" font-size="10" fill="var(--color-text-muted)" text-anchor="end">${fmtMoneyShort(val)}</text>`;
   }).join('');
 
-  const labelEvery = Math.max(1, Math.ceil(allPoints.length / 9));
-  const xLabels = allPoints.filter((_, i) => i % labelEvery === 0).map((p) => {
+  // Una etiqueta por cada mes (histórico y proyectado), sin saltarse
+  // ninguno — el ancho variable de arriba es justamente para que quepan.
+  const xLabels = allPoints.map((p) => {
     const src = p.t <= lastHist.t ? history.find((h) => h.t === p.t) : forecast.find((f) => f.t === p.t);
     if (!src) return '';
     return `<text x="${x(p.t).toFixed(1)}" y="${H - 6}" font-size="10" fill="var(--color-text-muted)" text-anchor="middle">${shortPeriodLabel(src.year, src.month)}</text>`;
   }).join('');
 
   return `
-    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;max-height:260px" xmlns="http://www.w3.org/2000/svg">
-      ${gridLines}
-      <path d="${bandPath}" fill="var(--gold-600)" fill-opacity="0.15" stroke="none" />
-      <path d="${fittedPath}" fill="none" stroke="var(--color-text-muted)" stroke-width="1.5" stroke-dasharray="4 3" />
-      <path d="${forecastPath}" fill="none" stroke="var(--gold-600)" stroke-width="2.5" />
-      <path d="${actualPath}" fill="none" stroke="var(--navy-800)" stroke-width="2.5" />
-      <line x1="${x(lastHist.t).toFixed(1)}" y1="${MT}" x2="${x(lastHist.t).toFixed(1)}" y2="${H - MB}" stroke="var(--color-border)" stroke-width="1" stroke-dasharray="2 3" />
-      ${xLabels}
-    </svg>`;
+    <div style="overflow-x:auto">
+      <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="display:block;max-width:none" xmlns="http://www.w3.org/2000/svg">
+        ${gridLines}
+        <path d="${bandPath}" fill="var(--gold-600)" fill-opacity="0.15" stroke="none" />
+        <path d="${fittedPath}" fill="none" stroke="var(--color-text-muted)" stroke-width="1.5" stroke-dasharray="4 3" />
+        <path d="${forecastPath}" fill="none" stroke="var(--gold-600)" stroke-width="2.5" />
+        <path d="${actualPath}" fill="none" stroke="var(--navy-800)" stroke-width="2.5" />
+        <line x1="${x(lastHist.t).toFixed(1)}" y1="${MT}" x2="${x(lastHist.t).toFixed(1)}" y2="${H - MB}" stroke="var(--color-border)" stroke-width="1" stroke-dasharray="2 3" />
+        ${xLabels}
+      </svg>
+    </div>`;
 }
 
 function runForecastAnalysis(text, fileName) {
