@@ -62,6 +62,7 @@ const state = {
   forecast: {
     status: 'idle', error: null, fileName: null,
     rows: null, hotelFilter: 'all', monthsAhead: 6,
+    investmentRows: null, investmentFileName: null, investmentError: null,
   },
 };
 
@@ -1338,8 +1339,28 @@ function renderForecastPage() {
         <button class="seg-btn ${s.monthsAhead === 6 ? 'active' : ''}" data-action="forecast-horizon-6">Proyectar 6 meses</button>
       </div>
     </div>
+    ${s.status === 'ready' ? renderForecastInvestmentPanel() : ''}
     ${body}
   `;
+}
+
+// Panel opcional: histórico de inversión pagada (todos los canales, no solo
+// Google Ads — a pedido de cesar) para calcular un ROAS combinado y traducir
+// la venta proyectada en inversión necesaria. Solo aparece una vez hay una
+// proyección de ventas lista, porque es lo que se necesita para calcularlo.
+function renderForecastInvestmentPanel() {
+  const s = state.forecast;
+  return `
+    <div class="card control-panel align-end" style="margin-top:-8px">
+      <div class="field">
+        <label>Histórico mensual de inversión pagada — todos los canales (opcional)</label>
+        <input type="file" id="forecast-investment-file" accept=".csv,.xlsx,.xls" />
+        <p class="field-hint">Mismo formato que el de ingresos: una fila por mes, columna de mes e "Inversión" (suma Google Ads + cualquier otro canal pagado). Columna "Canal" opcional, se suma automáticamente. Con esto se calcula un ROAS combinado histórico y la inversión necesaria para llegar a la venta proyectada.</p>
+      </div>
+      <button class="btn-outline" data-action="forecast-investment-demo">Usar datos de ejemplo</button>
+      ${s.investmentFileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.investmentFileName)}</strong></div>` : ''}
+      ${s.investmentError ? `<div class="error-panel" style="margin-top:8px">${escapeHtml(s.investmentError)}</div>` : ''}
+    </div>`;
 }
 
 function renderForecastReady() {
@@ -1360,6 +1381,17 @@ function renderForecastReady() {
   const growthPerYearPct = trendAt0 > 0 ? (12 * result.slope / trendAt0) * 100 : null;
   const first = result.history[0], last = result.history[result.history.length - 1];
   const totalForecast = result.forecast.reduce((s2, f) => s2 + f.value, 0);
+
+  let investment = null;
+  let investmentError = null;
+  if (s.investmentRows && s.investmentRows.length) {
+    try {
+      investment = engine.computeRequiredInvestment(result.history, s.investmentRows, result.forecast);
+    } catch (err) {
+      investmentError = err.message || String(err);
+    }
+  }
+  const investmentByPeriod = investment ? new Map(investment.forecastWithInvestment.map((f) => [f.period, f.investmentNeeded])) : null;
 
   const lowDataWarning = (result.monthsOfHistory < 24 || result.monthsWithLowSample.length) ? `
     <div class="error-panel" style="margin-bottom:16px">
@@ -1391,7 +1423,20 @@ function renderForecastReady() {
         <div class="stat-value lg">${fmtMoneyShort(totalForecast)}</div>
         <div class="stat-sub">suma de los ${s.monthsAhead} meses proyectados</div>
       </div>
+      ${investment ? `
+      <div class="card stat-card">
+        <div class="stat-label">ROAS combinado histórico</div>
+        <div class="stat-value lg">${(investment.blendedRoas * 100).toFixed(0)}%</div>
+        <div class="stat-sub">todos los canales pagados · ${investment.overlapMonths} meses en común</div>
+      </div>
+      <div class="card stat-card accent">
+        <div class="stat-label">Inversión necesaria (${s.monthsAhead} meses)</div>
+        <div class="stat-value lg">${fmtMoneyShort(investment.totalInvestmentNeeded)}</div>
+        <div class="stat-sub">para sostener la venta proyectada, al ROAS histórico</div>
+      </div>` : ''}
     </div>
+
+    ${investmentError ? `<div class="error-panel" style="margin-bottom:16px"><strong>No se pudo calcular la inversión necesaria.</strong> ${escapeHtml(investmentError)}</div>` : ''}
 
     ${lowDataWarning}
 
@@ -1413,13 +1458,14 @@ function renderForecastReady() {
       </div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Mes</th><th>Proyección</th><th>Rango bajo</th><th>Rango alto</th></tr></thead>
+          <thead><tr><th>Mes</th><th>Proyección</th><th>Rango bajo</th><th>Rango alto</th>${investment ? '<th>Inversión necesaria</th>' : ''}</tr></thead>
           <tbody>${result.forecast.map((f) => `
             <tr>
               <td>${shortPeriodLabel(f.year, f.month)}</td>
               <td>${fmtMoney(f.value)}</td>
               <td>${fmtMoney(f.low)}</td>
               <td>${fmtMoney(f.high)}</td>
+              ${investment ? `<td>${fmtMoney(investmentByPeriod.get(f.period))}</td>` : ''}
             </tr>`).join('')}</tbody>
         </table>
       </div>
@@ -1428,6 +1474,7 @@ function renderForecastReady() {
     <p class="footnote">
       Método: regresión lineal de ingresos contra el tiempo para la tendencia, más un índice de temporada por mes calendario (promedio de cuánto se desvía cada mes de la tendencia en el histórico) — no es un modelo estadístico de caja negra, y no reemplaza el criterio de quien conoce la operación del hotel.
       El rango bajo/alto se calcula con el error histórico del modelo (±1 desviación estándar de los residuos) — es una referencia de incertidumbre, no un intervalo de confianza estadístico riguroso.
+      ${investment ? ' La inversión necesaria usa un ROAS combinado (todo lo pagado vs. todo el ingreso del hotel en los meses donde hay ambos datos) — no distingue canal de inversión ni canal de venta, y asume que esa eficiencia histórica se mantiene igual hacia adelante; no considera rendimientos decrecientes.' : ''}
     </p>
   `;
 }
@@ -1491,6 +1538,18 @@ function runForecastAnalysis(text, fileName) {
     Object.assign(s, { status: 'ready', rows, fileName, hotelFilter: 'all' });
   } catch (err) {
     Object.assign(s, { status: 'error', error: err.message || String(err), fileName });
+  }
+  render();
+}
+
+function runForecastInvestmentAnalysis(text, fileName) {
+  const s = state.forecast;
+  try {
+    const investmentRows = engine.loadInvestmentHistory(text);
+    if (!investmentRows.length) throw new Error('No se encontraron filas válidas — revisa el formato de las columnas de mes e inversión.');
+    Object.assign(s, { investmentRows, investmentFileName: fileName, investmentError: null });
+  } catch (err) {
+    Object.assign(s, { investmentRows: null, investmentFileName: fileName, investmentError: err.message || String(err) });
   }
   render();
 }
@@ -2437,6 +2496,14 @@ function bindEvents() {
     render();
   });
 
+  const forecastInvestmentFileInput = document.getElementById('forecast-investment-file');
+  if (forecastInvestmentFileInput) forecastInvestmentFileInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    readFileAsCsvText(file).then((text) => runForecastInvestmentAnalysis(text, file.name))
+      .catch((err) => { state.forecast.investmentError = err.message || String(err); render(); });
+  });
+
   // Negativización
   const negCoreInput = document.getElementById('neg-core');
   if (negCoreInput) negCoreInput.addEventListener('input', (e) => { state.neg.core = e.target.value; });
@@ -2572,13 +2639,25 @@ function handleAction(action) {
     }
     case 'forecast-horizon-3': state.forecast.monthsAhead = 3; render(); break;
     case 'forecast-horizon-6': state.forecast.monthsAhead = 6; render(); break;
+    case 'forecast-investment-demo': runForecastInvestmentAnalysis(engine.SAMPLE_INVESTMENT_CSV, 'inversion_ejemplo.csv'); break;
     case 'download-forecast': {
       const s = state.forecast;
       const source = s.hotelFilter === 'all' ? aggregateRevenueByPeriod(s.rows || []) : (s.rows || []).filter((r) => r.hotel === s.hotelFilter);
       const rows = source.slice().sort((a, b) => (a.year - b.year) || (a.month - b.month));
       rows.forEach((r, i) => { r.t = i; });
       const result = engine.computeSeasonalForecast(rows, s.monthsAhead);
-      const data = [['Mes', 'Proyección', 'Rango bajo', 'Rango alto'], ...result.forecast.map((f) => [f.period, f.value.toFixed(2), f.low.toFixed(2), f.high.toFixed(2)])];
+      let investment = null;
+      if (s.investmentRows && s.investmentRows.length) {
+        try { investment = engine.computeRequiredInvestment(result.history, s.investmentRows, result.forecast); } catch (err) { /* se omite la columna si no se puede calcular */ }
+      }
+      const header = ['Mes', 'Proyección', 'Rango bajo', 'Rango alto'];
+      if (investment) header.push('Inversión necesaria');
+      const investmentByPeriod = investment ? new Map(investment.forecastWithInvestment.map((f) => [f.period, f.investmentNeeded])) : null;
+      const data = [header, ...result.forecast.map((f) => {
+        const row = [f.period, f.value.toFixed(2), f.low.toFixed(2), f.high.toFixed(2)];
+        if (investment) row.push((investmentByPeriod.get(f.period) || 0).toFixed(2));
+        return row;
+      })];
       engine.downloadCsv('proyeccion_ventas.csv', data);
       break;
     }

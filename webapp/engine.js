@@ -1758,3 +1758,114 @@ export const SAMPLE_REVENUE_CSV = `Mes,Hotel,Ingresos
 2025-04,Estelar Playa Manzanillo,202310000
 2025-05,Estelar Playa Manzanillo,164119000
 2025-06,Estelar Playa Manzanillo,192923000`;
+
+// ---------------------------------------------------------------------------
+// Inversión necesaria para la venta proyectada (extensión de Función 7)
+//
+// cesar aclaró dos cosas antes de construir esto: (1) la inversión no es
+// solo Google Ads, hay más canales pagados; (2) los ingresos tampoco vienen
+// de un solo canal de venta. Por eso este cálculo no intenta atribuir
+// ingresos a un canal específico — usa un ROAS histórico "combinado" (toda
+// la inversión pagada vs. todo el ingreso del hotel en los meses donde hay
+// ambos datos) y lo aplica a la venta proyectada. Es una simplificación
+// deliberada (confirmada con cesar como el método preferido, frente a un
+// modelo de rendimientos decrecientes) — asume que la eficiencia histórica
+// se mantiene igual hacia adelante.
+// ---------------------------------------------------------------------------
+
+const INVESTMENT_COLUMN_ALIASES = {
+  period: ["Mes", "Periodo", "Período", "Fecha", "Month", "Period", "Date"],
+  channel: ["Canal", "Channel"],
+  investment: ["Inversión", "Inversion", "Gasto", "Investment", "Spend", "Costo"],
+};
+
+// Filas { period: 'YYYY-MM', year, month, investment }, sumando todos los
+// canales de un mismo mes (el cálculo de ROAS combinado no necesita el
+// desglose por canal, solo el total pagado de ese mes).
+export function loadInvestmentHistory(text) {
+  let parsed = locateHeaderAndParse(text, INVESTMENT_COLUMN_ALIASES.period);
+  if (!parsed) parsed = textToTable(text);
+  const { headers, records } = parsed;
+  const periodCol = findColumn(headers, INVESTMENT_COLUMN_ALIASES.period);
+  const investmentCol = findColumn(headers, INVESTMENT_COLUMN_ALIASES.investment);
+  if (!periodCol || !investmentCol) {
+    throw new Error('No se encontraron las columnas de periodo/inversión. Revisa que el archivo tenga una columna de mes (ej. "Mes") y una de inversión (ej. "Inversión" o "Gasto").');
+  }
+
+  const byPeriod = new Map();
+  for (const r of records) {
+    const parsedPeriod = parseMonthPeriod(r[periodCol]);
+    if (!parsedPeriod || parsedPeriod.month < 1 || parsedPeriod.month > 12) continue;
+    const investment = toNumber(r[investmentCol]);
+    if (Number.isNaN(investment)) continue;
+    const period = `${parsedPeriod.year}-${String(parsedPeriod.month).padStart(2, '0')}`;
+    const existing = byPeriod.get(period);
+    if (existing) existing.investment += investment;
+    else byPeriod.set(period, { period, year: parsedPeriod.year, month: parsedPeriod.month, investment });
+  }
+  return [...byPeriod.values()].sort((a, b) => (a.year - b.year) || (a.month - b.month));
+}
+
+export const MIN_MONTHS_OVERLAP_FOR_ROAS = 3;
+
+// revenueHistory: `history` de computeSeasonalForecast (o cualquier arreglo
+// con period/revenue). investmentRows: salida de loadInvestmentHistory.
+// forecastRows: `forecast` de computeSeasonalForecast.
+export function computeRequiredInvestment(revenueHistory, investmentRows, forecastRows) {
+  const investByPeriod = new Map(investmentRows.map((r) => [r.period, r.investment]));
+  const overlap = revenueHistory
+    .filter((r) => investByPeriod.has(r.period) && investByPeriod.get(r.period) > 0)
+    .map((r) => ({ period: r.period, revenue: r.revenue, investment: investByPeriod.get(r.period) }));
+
+  if (overlap.length < MIN_MONTHS_OVERLAP_FOR_ROAS) {
+    throw new Error(`Se necesitan al menos ${MIN_MONTHS_OVERLAP_FOR_ROAS} meses en común entre el histórico de ingresos y el de inversión para calcular un ROAS combinado — hay ${overlap.length}.`);
+  }
+
+  const totalRevenue = overlap.reduce((s, o) => s + o.revenue, 0);
+  const totalInvestment = overlap.reduce((s, o) => s + o.investment, 0);
+  const blendedRoas = totalInvestment > 0 ? totalRevenue / totalInvestment : null;
+
+  const forecastWithInvestment = forecastRows.map((f) => ({
+    ...f,
+    investmentNeeded: blendedRoas ? f.value / blendedRoas : null,
+  }));
+  const totalInvestmentNeeded = forecastWithInvestment.reduce((s, f) => s + (f.investmentNeeded || 0), 0);
+
+  return { blendedRoas, overlapMonths: overlap.length, forecastWithInvestment, totalInvestmentNeeded };
+}
+
+// Mismos 30 meses del ejemplo de ingresos, con una inversión mensual
+// sintética en torno a un ROAS combinado ~510% (con algo de ruido propio,
+// no perfectamente correlacionado con la estacionalidad de ingresos, para
+// que sea un dataset de ejemplo realista y no una copia escalada).
+export const SAMPLE_INVESTMENT_CSV = `Mes,Inversión
+2023-01,46132000
+2023-02,45715000
+2023-03,40323000
+2023-04,35498000
+2023-05,25820000
+2023-06,31369000
+2023-07,40418000
+2023-08,40011000
+2023-09,24500000
+2023-10,25491000
+2023-11,30856000
+2023-12,52808000
+2024-01,54429000
+2024-02,44513000
+2024-03,47016000
+2024-04,35750000
+2024-05,31686000
+2024-06,31115000
+2024-07,44458000
+2024-08,43144000
+2024-09,26587000
+2024-10,27133000
+2024-11,33241000
+2024-12,57419000
+2025-01,59170000
+2025-02,49918000
+2025-03,50129000
+2025-04,40859000
+2025-05,30571000
+2025-06,38585000`;
