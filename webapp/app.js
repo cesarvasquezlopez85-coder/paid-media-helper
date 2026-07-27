@@ -1337,6 +1337,7 @@ function renderForecastPage() {
       <div class="seg-control">
         <button class="seg-btn ${s.monthsAhead === 3 ? 'active' : ''}" data-action="forecast-horizon-3">Proyectar 3 meses</button>
         <button class="seg-btn ${s.monthsAhead === 6 ? 'active' : ''}" data-action="forecast-horizon-6">Proyectar 6 meses</button>
+        <button class="seg-btn ${s.monthsAhead === 12 ? 'active' : ''}" data-action="forecast-horizon-12">Proyectar 12 meses</button>
       </div>
     </div>
     ${s.status === 'ready' ? renderForecastInvestmentPanel() : ''}
@@ -2639,6 +2640,7 @@ function handleAction(action) {
     }
     case 'forecast-horizon-3': state.forecast.monthsAhead = 3; render(); break;
     case 'forecast-horizon-6': state.forecast.monthsAhead = 6; render(); break;
+    case 'forecast-horizon-12': state.forecast.monthsAhead = 12; render(); break;
     case 'forecast-investment-demo': runForecastInvestmentAnalysis(engine.SAMPLE_INVESTMENT_CSV, 'inversion_ejemplo.csv'); break;
     case 'download-forecast': {
       const s = state.forecast;
