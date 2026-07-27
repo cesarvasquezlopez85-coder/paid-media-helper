@@ -2,13 +2,13 @@
 
 ## Qué es
 
-Una herramienta interna para que cualquier persona del equipo suba archivos de una cuenta de Google Ads y reciba sin intervención manual: (1) gráficas de rendimiento y recomendaciones de optimización, (2) comparación de rendimiento entre dos periodos con recomendaciones por tendencia, (3) una lista de candidatos a palabra clave negativa, (4) análisis de reservas reales para cuentas de hotel (con modo de comparación entre dos periodos), y (5) una estimación de ingresos adicionales perdidos por campañas limitadas por presupuesto. Pensada para cubrir 100+ cuentas de forma self-serve.
+Una herramienta interna para que cualquier persona del equipo suba archivos de una cuenta de Google Ads (o del PMS del hotel) y reciba sin intervención manual: (1) gráficas de rendimiento y recomendaciones de optimización, (2) comparación de rendimiento entre dos periodos con recomendaciones por tendencia, (3) una lista de candidatos a palabra clave negativa, (4) análisis de reservas reales para cuentas de hotel (con modo de comparación entre dos periodos), (5) una estimación de ingresos adicionales perdidos por campañas limitadas por presupuesto, y (6) una proyección de ventas futuras combinando tendencia y temporada alta/baja. Pensada para cubrir 100+ cuentas de forma self-serve.
 
 Hay una función más ya construida — generador de copys de anuncio desde una URL — pero **está oculta del menú a pedido de cesar**: tras probarla con cuentas reales, el resultado no lo convenció lo suficiente para quedar en v1. Queda pendiente para v2 (ver "Función 3" más abajo y `roadmap.md`).
 
 Ya no es solo un prototipo de Streamlit, y ya no corre solo local: existe una implementación web completa (`webapp/`, HTML/CSS/JS + un servidor Python sin dependencias externas) con login por usuario/contraseña, que reproduce el diseño hecho en Claude Design. **Vive en producción en [Railway](https://railway.app)**, en `https://paid-media-helper.up.railway.app`, con auto-deploy desde la rama `main` del repo de GitHub — cualquier cambio que se suba se despliega solo, sin pasos manuales. También se puede correr local con `python3 webapp/server.py` → `http://localhost:8642` — ver "Cómo corre la plataforma" más abajo.
 
-## Estado: seis funciones construidas, cinco activas en el menú (Función 3, copys, en pausa para v2)
+## Estado: siete funciones construidas, seis activas en el menú (Función 3, copys, en pausa para v2)
 
 ### Función 1 — Análisis de rendimiento
 
@@ -105,6 +105,25 @@ El parser de campañas (Función 1) ahora reconoce dos columnas nuevas del expor
 
 Verificada con datos sintéticos y con el archivo real de Estelar: en ese archivo, solo las campañas Performance Max (que sí traen Search Impr. Share y Search Lost IS) entran al cálculo — la campaña Demand Gen, que no trae esas columnas, queda correctamente excluida en vez de mostrar un número inventado. Pendiente: probar con más cuentas reales, especialmente con más de una campaña limitada por presupuesto a la vez y con más de un hotel.
 
+### Función 7 — Proyección de ventas (nueva, 2026-07-27)
+
+Sección para proyectar ingresos futuros del hotel, a pedido de cesar. A diferencia de las otras seis funciones, no parte de un export de Google Ads — necesita un histórico mensual de ingresos reales del hotel (típicamente del PMS/sistema de reservas), con mínimo 12 meses y, idealmente, 24+.
+
+Antes de construirla se le preguntó a cesar qué método prefería: una regresión lineal simple es fácil de explicar pero ignora la temporada alta/baja, que en hotelería suele pesar más que la tendencia. Se acordó **descomposición clásica multiplicativa** (tendencia + estacionalidad), sin depender de una librería de series de tiempo:
+1. Regresión lineal (mínimos cuadrados) de ingresos contra el índice de tiempo → tendencia.
+2. Para cada mes real, se calcula cuánto se desvía de la tendencia (ingreso real ÷ tendencia en ese punto).
+3. Se promedian esas desviaciones por mes calendario (enero, febrero...) → índice de temporada de cada mes, normalizado para que el promedio de los 12 sea 1.
+4. Proyección = tendencia extendida hacia adelante × índice de temporada del mes correspondiente.
+
+Incluye:
+- **Filtro por hotel** (si el archivo trae más de uno, con opción de sumarlos todos) y **selector de horizonte** (3 o 6 meses).
+- Tarjetas de histórico analizado (cuántos meses y qué rango de fechas), tendencia estimada por año, calidad del ajuste (MAPE — error promedio mes a mes — y R²), y el total proyectado para el horizonte elegido.
+- Un gráfico de líneas hecho en SVG puro (sin librería externa, mismo criterio del resto de la plataforma): ingreso real, ajuste del modelo (línea punteada, para validar visualmente qué tan bien el modelo explica el histórico), proyección futura y una banda de rango estimado.
+- Tabla de proyección mensual (proyección, rango bajo, rango alto) descargable en CSV.
+- Aviso automático cuando el histórico tiene menos de 24 meses o algún mes calendario tiene muy pocas observaciones, para no presentar el número como más preciso de lo que realmente es.
+
+Verificada con un dataset sintético de 30 meses con estacionalidad marcada (temporada alta diciembre-marzo, baja septiembre-octubre, ~8-9% de crecimiento anual): el gráfico reprodujo visualmente la forma estacional y el ajuste dio MAPE 2.2% / R² 0.99 contra ese histórico sintético. Pendiente: probar con histórico real de un hotel, donde los datos rara vez son tan limpios como el sintético.
+
 ## Por qué ninguna de las funciones de Google Ads usa un modelo de lenguaje por análisis
 
 A 100+ cuentas, llamar a una API por cada archivo o URL tiene costo y latencia reales, y en el caso de negativización y copys implicaría que cada persona del equipo tenga su propia clave de API. Por eso la Función 2 compara contra términos núcleo/excepciones definidas por el usuario, y la Función 3 combina extracción real de la página con plantillas de copywriting de conversión. El costo de esta decisión: ninguna de las dos "entiende" el contenido como lo haría un modelo — solo detectan lo que ya se les definió o lo que literalmente está escrito en la página. Por eso ambas funciones piden revisión humana antes de publicar nada.
@@ -131,12 +150,13 @@ En ambos casos, la app pide iniciar sesión o crear cuenta antes de dejar entrar
 - "Estelar" como término núcleo (Función 2) es amplio — es una cadena con varias propiedades en Colombia, puede retener búsquedas de otro hotel Estelar.
 - La Función 3 no ejecuta JavaScript: páginas que cargan su contenido dinámicamente van a dar poco texto real y el resultado se apoya más en plantillas genéricas.
 - La Función 3 no valida las políticas de contenido de Google Ads (mayúsculas, superlativos, marcas de terceros) — solo longitud de caracteres.
-- Ninguna de las seis funciones valida que el archivo/URL subido sea reciente ni de la cuenta correcta.
+- Ninguna de las siete funciones valida que el archivo/URL subido sea reciente ni de la cuenta correcta.
 - **Control de acceso y despliegue: ya no están pendientes** (ver "Cómo corre la plataforma, y el login" arriba) — HTTPS resuelto por Railway; sigue pendiente decidir si el registro abierto continúa así ahora que la app es alcanzable por internet.
 - No hay persistencia de historial entre cargas todavía para ninguna función (Fase 2) — la base de datos que ya existe solo guarda cuentas de usuario, no resultados de análisis. Las Funciones 4 (modo Comparar periodos) y 5 cubren parte de esta necesidad hoy, pero de forma manual (subiendo dos archivos cada vez).
 - Falta comprar y conectar un dominio propio — hoy la app vive en el dominio genérico de Railway (`paid-media-helper.up.railway.app`).
 - La Función 5 (Comparar periodos) solo se probó con datos sintéticos — falta validarla con dos exports reales del mismo cliente. Lo mismo aplica al modo "Comparar periodos" de la Función 4 (Bookings).
 - La Función 6 (Oportunidad de ingresos) calcula el presupuesto extra necesario con el ROAS promedio del conjunto de campañas seleccionado — un promedio distorsionado (por ejemplo, por no excluir marca) cambia ese número; el checkbox "Excluir campañas de marca" mitiga esto pero depende de que el usuario lo revise.
+- La Función 7 (Proyección de ventas) solo se probó con un dataset sintético — el índice de temporada se calcula sobre los datos que traiga el archivo, así que con menos de 24 meses de histórico real (o con meses atípicos, ej. una remodelación o un evento puntual) la proyección puede ser menos confiable de lo que sugiere el MAPE del ajuste histórico. No es un modelo estadístico riguroso (no es ARIMA/Holt-Winters) — es tendencia + estacionalidad simple, elegido a propósito por ser explicable.
 
 ## Próximos pasos
 
@@ -146,14 +166,15 @@ En ambos casos, la app pide iniciar sesión o crear cuenta antes de dejar entrar
 4. Seguir validando la Función 4 (Bookings) con más cuentas de hotel reales, en ambos modos (único y Comparar periodos).
 5. Probar la Función 5 (Comparar periodos) con dos exports reales del mismo cliente.
 6. Probar la Función 6 (Oportunidad de ingresos) con más cuentas reales — ya validada con Estelar, falta confirmar con cuentas de más de una campaña limitada por presupuesto y más de un hotel.
-7. Decidir si el registro de usuarios sigue abierto o pasa a altas manuales, ahora que la app es alcanzable por internet.
-8. Comprar y conectar un dominio propio para reemplazar el de Railway.
+7. Probar la Función 7 (Proyección de ventas) con histórico real de un hotel, y validar con cesar si el margen de error (MAPE) es aceptable para planear presupuesto.
+8. Decidir si el registro de usuarios sigue abierto o pasa a altas manuales, ahora que la app es alcanzable por internet.
+9. Comprar y conectar un dominio propio para reemplazar el de Railway.
 
 ## Archivos del proyecto
 
 | Archivo | Para qué sirve |
 |---|---|
-| `webapp/` | Implementación web completa (HTML/CSS/JS + servidor Python + `Dockerfile`), con login y las seis funciones (cinco activas en el menú) — en producción en Railway, o local con `python3 webapp/server.py`. Ver `webapp/README.md` |
+| `webapp/` | Implementación web completa (HTML/CSS/JS + servidor Python + `Dockerfile`), con login y las siete funciones (seis activas en el menú) — en producción en Railway, o local con `python3 webapp/server.py`. Ver `webapp/README.md` |
 | `Especificacion_v1_Plataforma_Google_Ads.docx` | Especificación completa de las tres funciones originales de Google Ads: alcance, formato de archivo, mecanismo, arquitectura, riesgos |
 | `app.py` | Interfaz Streamlit con las tres funciones (correr con `streamlit run app.py`) |
 | `analysis.py` | Lógica de la Función 1 (rendimiento), reusable sin la interfaz |

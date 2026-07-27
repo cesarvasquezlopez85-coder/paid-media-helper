@@ -58,6 +58,11 @@ const state = {
     rows: null, campaignFilter: 'all', excludeBrand: true, hotelFilter: 'all',
     sortBy: 'revenue_lost', sortDir: 'desc',
   },
+
+  forecast: {
+    status: 'idle', error: null, fileName: null,
+    rows: null, hotelFilter: 'all', monthsAhead: 6,
+  },
 };
 
 const PAGE_META = {
@@ -84,6 +89,10 @@ const PAGE_META = {
   oportunidad: {
     title: 'Oportunidad de ingresos',
     caption: 'Sube un export de campañas y estima cuántos ingresos adicionales se habrían generado en las campañas limitadas por presupuesto si no lo hubieran estado — análisis retrospectivo, no una predicción.',
+  },
+  proyeccion: {
+    title: 'Proyección de ventas',
+    caption: 'Sube el histórico mensual de ingresos del hotel (mínimo 12 meses, idealmente 24+) y obtén una proyección a futuro que combina tendencia y temporada alta/baja.',
   },
 };
 
@@ -155,6 +164,7 @@ function render() {
   else if (state.page === 'copys') pageHtml = renderCopyPage();
   else if (state.page === 'comparativa') pageHtml = renderComparePage();
   else if (state.page === 'oportunidad') pageHtml = renderOpportunityPage();
+  else if (state.page === 'proyeccion') pageHtml = renderForecastPage();
   else pageHtml = renderBookPage();
 
   root.innerHTML = `
@@ -1252,6 +1262,240 @@ function renderOpportunityReady() {
 }
 
 // ---------------------------------------------------------------------------
+// Función 7 — Proyección de ventas (tendencia + estacionalidad)
+// ---------------------------------------------------------------------------
+
+function fmtMoneyShort(n) {
+  if (n === null || n === undefined || Number.isNaN(n)) return 'N/D';
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return '$' + (n / 1e9).toFixed(1) + 'B';
+  if (abs >= 1e6) return '$' + (n / 1e6).toFixed(1) + 'M';
+  if (abs >= 1e3) return '$' + (n / 1e3).toFixed(0) + 'k';
+  return fmtMoney(n);
+}
+
+const MONTH_ABBR_ES = ['', 'ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+function shortPeriodLabel(year, month) {
+  return `${MONTH_ABBR_ES[month]} ${String(year).slice(2)}`;
+}
+
+// Suma los ingresos de todos los hoteles del archivo, mes a mes, para la
+// opción "Todos los hoteles" del filtro.
+function aggregateRevenueByPeriod(rows) {
+  const byPeriod = new Map();
+  for (const r of rows) {
+    const existing = byPeriod.get(r.period);
+    if (existing) existing.revenue += r.revenue;
+    else byPeriod.set(r.period, { period: r.period, year: r.year, month: r.month, hotel: 'Todos', revenue: r.revenue });
+  }
+  return [...byPeriod.values()];
+}
+
+function renderForecastPage() {
+  const s = state.forecast;
+
+  let body = '';
+  if (s.status === 'idle') {
+    body = `
+      <div class="card state-panel idle">
+        ${icon('trending-up', 30)}
+        <p>Esperando el histórico mensual de ingresos. Mínimo ${engine.MIN_MONTHS_FOR_FORECAST} meses, idealmente 24+ para que la estacionalidad sea confiable.</p>
+      </div>`;
+  } else if (s.status === 'loading') {
+    body = `
+      <div class="card state-panel loading">
+        <div class="spinner"></div>
+        <p>Calculando la proyección…</p>
+      </div>`;
+  } else if (s.status === 'error') {
+    body = `<div class="error-panel"><strong>No se pudo calcular la proyección.</strong> ${escapeHtml(s.error)}</div>`;
+  } else if (s.status === 'ready') {
+    body = renderForecastReady();
+  }
+
+  const allHotels = s.rows ? engine.listRevenueHotels(s.rows) : [];
+  const hotelFieldHtml = allHotels.length > 1 ? `
+      <div class="field">
+        <label>Hotel</label>
+        <select id="forecast-hotel-filter" style="width:220px">
+          <option value="all" ${s.hotelFilter === 'all' ? 'selected' : ''}>Todos los hoteles (sumados)</option>
+          ${allHotels.map((h) => `<option value="${escapeHtml(h)}" ${s.hotelFilter === h ? 'selected' : ''}>${escapeHtml(h)}</option>`).join('')}
+        </select>
+      </div>` : '';
+
+  return `
+    <div class="card control-panel align-end">
+      <div class="field">
+        <label>Histórico mensual de ingresos (CSV o Excel)</label>
+        <input type="file" id="forecast-file" accept=".csv,.xlsx,.xls" />
+        <p class="field-hint">Una fila por mes. Columnas esperadas: mes (ej. "Mes", formato <code>2024-01</code> o "Enero 2024") e ingresos (ej. "Ingresos"). Columna "Hotel" opcional si el archivo trae más de una propiedad.</p>
+      </div>
+      <button class="btn-outline" data-action="forecast-demo">Usar datos de ejemplo</button>
+      ${s.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.fileName)}</strong></div>` : ''}
+      ${hotelFieldHtml}
+      <div class="seg-control">
+        <button class="seg-btn ${s.monthsAhead === 3 ? 'active' : ''}" data-action="forecast-horizon-3">Proyectar 3 meses</button>
+        <button class="seg-btn ${s.monthsAhead === 6 ? 'active' : ''}" data-action="forecast-horizon-6">Proyectar 6 meses</button>
+      </div>
+    </div>
+    ${body}
+  `;
+}
+
+function renderForecastReady() {
+  const s = state.forecast;
+  const allRows = s.rows || [];
+  const source = s.hotelFilter === 'all' ? aggregateRevenueByPeriod(allRows) : allRows.filter((r) => r.hotel === s.hotelFilter);
+  const rows = source.slice().sort((a, b) => (a.year - b.year) || (a.month - b.month));
+  rows.forEach((r, i) => { r.t = i; });
+
+  let result;
+  try {
+    result = engine.computeSeasonalForecast(rows, s.monthsAhead);
+  } catch (err) {
+    return `<div class="error-panel"><strong>No se pudo calcular la proyección.</strong> ${escapeHtml(err.message)}</div>`;
+  }
+
+  const trendAt0 = result.intercept;
+  const growthPerYearPct = trendAt0 > 0 ? (12 * result.slope / trendAt0) * 100 : null;
+  const first = result.history[0], last = result.history[result.history.length - 1];
+  const totalForecast = result.forecast.reduce((s2, f) => s2 + f.value, 0);
+
+  const lowDataWarning = (result.monthsOfHistory < 24 || result.monthsWithLowSample.length) ? `
+    <div class="error-panel" style="margin-bottom:16px">
+      <strong>Calidad del histórico limitada.</strong>
+      ${result.monthsOfHistory < 24 ? `Solo hay ${result.monthsOfHistory} meses de datos — con menos de 24 (2 años completos), el índice de temporada de algunos meses se calcula con una sola observación o ninguna.` : ''}
+      ${result.monthsWithLowSample.length ? ` Meses con muy poco dato para estimar su estacionalidad: ${result.monthsWithLowSample.map((m) => MONTH_ABBR_ES[m]).join(', ')}.` : ''}
+      Trata esta proyección como una referencia direccional, no como un número exacto.
+    </div>` : '';
+
+  return `
+    <div class="stat-grid">
+      <div class="card stat-card">
+        <div class="stat-label">Histórico analizado</div>
+        <div class="stat-value lg">${result.monthsOfHistory} meses</div>
+        <div class="stat-sub">${shortPeriodLabel(first.year, first.month)} a ${shortPeriodLabel(last.year, last.month)}</div>
+      </div>
+      <div class="card stat-card ${growthPerYearPct !== null && growthPerYearPct < 0 ? 'danger' : 'accent'}">
+        <div class="stat-label">Tendencia</div>
+        <div class="stat-value lg">${growthPerYearPct === null ? 'N/D' : (growthPerYearPct >= 0 ? '+' : '') + growthPerYearPct.toFixed(1) + '%'}</div>
+        <div class="stat-sub">estimado por año, antes de aplicar temporada</div>
+      </div>
+      <div class="card stat-card">
+        <div class="stat-label">Calidad del ajuste</div>
+        <div class="stat-value lg">${(result.mape * 100).toFixed(1)}%</div>
+        <div class="stat-sub">error promedio mes a mes (MAPE) · R² ${result.r2.toFixed(2)}</div>
+      </div>
+      <div class="card stat-card accent">
+        <div class="stat-label">Proyección próximos ${s.monthsAhead} meses</div>
+        <div class="stat-value lg">${fmtMoneyShort(totalForecast)}</div>
+        <div class="stat-sub">suma de los ${s.monthsAhead} meses proyectados</div>
+      </div>
+    </div>
+
+    ${lowDataWarning}
+
+    <div class="card chart-card">
+      <h3 class="dense-chart-title">Histórico vs. ajuste del modelo, y proyección</h3>
+      ${renderForecastChart(result.history, result.forecast)}
+      <p style="margin:10px 0 0;font-size:11.5px;color:var(--color-text-muted)">
+        <span style="color:var(--navy-800)">■</span> real &nbsp;
+        <span style="color:var(--color-text-muted)">┄</span> ajuste del modelo (tendencia × temporada) &nbsp;
+        <span style="color:var(--gold-600)">■</span> proyección &nbsp;
+        <span style="color:var(--gold-600);opacity:.4">■</span> rango estimado
+      </p>
+    </div>
+
+    <div class="card table-panel">
+      <div class="table-panel-head">
+        <h3>Proyección mensual</h3>
+        <button class="btn-outline sm" data-action="download-forecast">Descargar CSV</button>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Mes</th><th>Proyección</th><th>Rango bajo</th><th>Rango alto</th></tr></thead>
+          <tbody>${result.forecast.map((f) => `
+            <tr>
+              <td>${shortPeriodLabel(f.year, f.month)}</td>
+              <td>${fmtMoney(f.value)}</td>
+              <td>${fmtMoney(f.low)}</td>
+              <td>${fmtMoney(f.high)}</td>
+            </tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <p class="footnote">
+      Método: regresión lineal de ingresos contra el tiempo para la tendencia, más un índice de temporada por mes calendario (promedio de cuánto se desvía cada mes de la tendencia en el histórico) — no es un modelo estadístico de caja negra, y no reemplaza el criterio de quien conoce la operación del hotel.
+      El rango bajo/alto se calcula con el error histórico del modelo (±1 desviación estándar de los residuos) — es una referencia de incertidumbre, no un intervalo de confianza estadístico riguroso.
+    </p>
+  `;
+}
+
+// SVG sin librerías — línea de real/ajuste/proyección + banda de rango,
+// mismo criterio del resto de la plataforma de no depender de un paquete
+// de gráficas externo.
+function renderForecastChart(history, forecast) {
+  const W = 680, H = 230, ML = 56, MR = 16, MT = 16, MB = 26;
+  const plotW = W - ML - MR, plotH = H - MT - MB;
+
+  const allPoints = [...history.map((h) => ({ t: h.t, values: [h.revenue, h.fitted] })),
+    ...forecast.map((f) => ({ t: f.t, values: [f.value, f.low, f.high] }))];
+  const tMax = Math.max(1, allPoints[allPoints.length - 1].t);
+  const yMax = Math.max(1, ...allPoints.flatMap((p) => p.values)) * 1.08;
+
+  const x = (t) => ML + (t / tMax) * plotW;
+  const y = (v) => MT + plotH - (Math.max(0, v) / yMax) * plotH;
+
+  const actualPath = history.map((h, i) => `${i === 0 ? 'M' : 'L'} ${x(h.t).toFixed(1)},${y(h.revenue).toFixed(1)}`).join(' ');
+  const fittedPath = history.map((h, i) => `${i === 0 ? 'M' : 'L'} ${x(h.t).toFixed(1)},${y(h.fitted).toFixed(1)}`).join(' ');
+
+  const lastHist = history[history.length - 1];
+  const forecastPoints = [{ t: lastHist.t, value: lastHist.revenue, low: lastHist.revenue, high: lastHist.revenue }, ...forecast];
+  const forecastPath = forecastPoints.map((f, i) => `${i === 0 ? 'M' : 'L'} ${x(f.t).toFixed(1)},${y(f.value).toFixed(1)}`).join(' ');
+  const bandTop = forecastPoints.map((f) => `${x(f.t).toFixed(1)},${y(f.high).toFixed(1)}`).join(' L ');
+  const bandBottom = forecastPoints.slice().reverse().map((f) => `${x(f.t).toFixed(1)},${y(f.low).toFixed(1)}`).join(' L ');
+  const bandPath = `M ${bandTop} L ${bandBottom} Z`;
+
+  const gridLines = [0, 0.5, 1].map((frac) => {
+    const val = yMax * frac;
+    const yy = y(val);
+    return `<line x1="${ML}" y1="${yy.toFixed(1)}" x2="${W - MR}" y2="${yy.toFixed(1)}" stroke="var(--color-border)" stroke-width="1" />
+      <text x="${ML - 8}" y="${(yy + 3).toFixed(1)}" font-size="10" fill="var(--color-text-muted)" text-anchor="end">${fmtMoneyShort(val)}</text>`;
+  }).join('');
+
+  const labelEvery = Math.max(1, Math.ceil(allPoints.length / 9));
+  const xLabels = allPoints.filter((_, i) => i % labelEvery === 0).map((p) => {
+    const src = p.t <= lastHist.t ? history.find((h) => h.t === p.t) : forecast.find((f) => f.t === p.t);
+    if (!src) return '';
+    return `<text x="${x(p.t).toFixed(1)}" y="${H - 6}" font-size="10" fill="var(--color-text-muted)" text-anchor="middle">${shortPeriodLabel(src.year, src.month)}</text>`;
+  }).join('');
+
+  return `
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;max-height:260px" xmlns="http://www.w3.org/2000/svg">
+      ${gridLines}
+      <path d="${bandPath}" fill="var(--gold-600)" fill-opacity="0.15" stroke="none" />
+      <path d="${fittedPath}" fill="none" stroke="var(--color-text-muted)" stroke-width="1.5" stroke-dasharray="4 3" />
+      <path d="${forecastPath}" fill="none" stroke="var(--gold-600)" stroke-width="2.5" />
+      <path d="${actualPath}" fill="none" stroke="var(--navy-800)" stroke-width="2.5" />
+      <line x1="${x(lastHist.t).toFixed(1)}" y1="${MT}" x2="${x(lastHist.t).toFixed(1)}" y2="${H - MB}" stroke="var(--color-border)" stroke-width="1" stroke-dasharray="2 3" />
+      ${xLabels}
+    </svg>`;
+}
+
+function runForecastAnalysis(text, fileName) {
+  const s = state.forecast;
+  try {
+    const rows = engine.loadRevenueHistory(text);
+    if (!rows.length) throw new Error('No se encontraron filas válidas — revisa el formato de las columnas de mes e ingresos.');
+    Object.assign(s, { status: 'ready', rows, fileName, hotelFilter: 'all' });
+  } catch (err) {
+    Object.assign(s, { status: 'error', error: err.message || String(err), fileName });
+  }
+  render();
+}
+
+// ---------------------------------------------------------------------------
 // Página 2 — Negativización
 // ---------------------------------------------------------------------------
 
@@ -2176,6 +2420,23 @@ function bindEvents() {
     });
   });
 
+  // Proyección de ventas
+  const forecastFileInput = document.getElementById('forecast-file');
+  if (forecastFileInput) forecastFileInput.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    state.forecast.status = 'loading'; state.forecast.error = null; state.forecast.fileName = file.name;
+    render();
+    readFileAsCsvText(file).then((text) => runForecastAnalysis(text, file.name))
+      .catch((err) => { state.forecast.status = 'error'; state.forecast.error = err.message || String(err); render(); });
+  });
+
+  const forecastHotelFilter = document.getElementById('forecast-hotel-filter');
+  if (forecastHotelFilter) forecastHotelFilter.addEventListener('change', (e) => {
+    state.forecast.hotelFilter = e.target.value;
+    render();
+  });
+
   // Negativización
   const negCoreInput = document.getElementById('neg-core');
   if (negCoreInput) negCoreInput.addEventListener('input', (e) => { state.neg.core = e.target.value; });
@@ -2300,6 +2561,25 @@ function handleAction(action) {
       state.opportunity.status = 'loading'; state.opportunity.error = null; state.opportunity.fileName = 'sample_data_oportunidad.csv';
       render();
       setTimeout(() => runOpportunityAnalysis(engine.SAMPLE_CAMPAIGN_CSV_OPPORTUNITY, 'sample_data_oportunidad.csv'), 250);
+      break;
+    }
+
+    case 'forecast-demo': {
+      state.forecast.status = 'loading'; state.forecast.error = null; state.forecast.fileName = 'ingresos_ejemplo.csv';
+      render();
+      setTimeout(() => runForecastAnalysis(engine.SAMPLE_REVENUE_CSV, 'ingresos_ejemplo.csv'), 250);
+      break;
+    }
+    case 'forecast-horizon-3': state.forecast.monthsAhead = 3; render(); break;
+    case 'forecast-horizon-6': state.forecast.monthsAhead = 6; render(); break;
+    case 'download-forecast': {
+      const s = state.forecast;
+      const source = s.hotelFilter === 'all' ? aggregateRevenueByPeriod(s.rows || []) : (s.rows || []).filter((r) => r.hotel === s.hotelFilter);
+      const rows = source.slice().sort((a, b) => (a.year - b.year) || (a.month - b.month));
+      rows.forEach((r, i) => { r.t = i; });
+      const result = engine.computeSeasonalForecast(rows, s.monthsAhead);
+      const data = [['Mes', 'Proyección', 'Rango bajo', 'Rango alto'], ...result.forecast.map((f) => [f.period, f.value.toFixed(2), f.low.toFixed(2), f.high.toFixed(2)])];
+      engine.downloadCsv('proyeccion_ventas.csv', data);
       break;
     }
 

@@ -1537,3 +1537,224 @@ export const SAMPLE_BOOKINGS_CSV_PREVIOUS = `Alta,Hotel,Canal,Pais,Afiliado,Fech
 12/12/2025,Estelar Playa Manzanillo,Agencia,Colombia,Agencia Sol,28/03/2026,31/03/2026
 18/12/2025,Estelar Playa Manzanillo,Directo,Estados Unidos,N/D,10/04/2026,14/04/2026
 23/12/2025,Estelar Playa Manzanillo,Expedia,México,N/D,20/04/2026,23/04/2026`;
+
+// ---------------------------------------------------------------------------
+// Función 7 — Proyección de ventas (regresión + estacionalidad)
+//
+// A diferencia del resto de la plataforma, esta función no parte de un
+// export nativo de Google Ads — necesita un histórico de ingresos reales ya
+// agregado por mes (mínimo 12 meses, idealmente 24+), típicamente exportado
+// del PMS/sistema de reservas del hotel, no de Google Ads.
+//
+// Método: descomposición clásica multiplicativa (tendencia × estacionalidad),
+// no un ARIMA/Holt-Winters completo — a propósito, para que el resultado sea
+// explicable sin abrir una caja negra:
+//   1. Regresión lineal (mínimos cuadrados) de ingresos vs. índice de tiempo
+//      → tendencia.
+//   2. Para cada mes real, ratio = ingreso real / tendencia en ese punto.
+//   3. Índice estacional de cada mes calendario (ene-dic) = promedio de esos
+//      ratios agrupados por mes calendario, normalizado para que el
+//      promedio de los 12 índices sea 1.
+//   4. Ajustado = tendencia × índice estacional del mes. Pronóstico futuro =
+//      misma fórmula, extendiendo la tendencia hacia adelante.
+// Con menos de 24 meses, el índice estacional de algunos meses se calcula
+// con una sola observación (o ninguna, y ahí se usa 1 = sin ajuste) — la UI
+// avisa cuando la calidad del dato histórico es baja.
+// ---------------------------------------------------------------------------
+
+const REVENUE_COLUMN_ALIASES = {
+  period: ["Mes", "Periodo", "Período", "Fecha", "Month", "Period", "Date"],
+  hotel: ["Hotel", "Propiedad", "Property"],
+  revenue: ["Ingresos", "Ventas", "Venta", "Revenue", "Sales", "Total", "Ingreso"],
+};
+
+const SPANISH_MONTHS = {
+  enero: 1, ene: 1, febrero: 2, feb: 2, marzo: 3, mar: 3, abril: 4, abr: 4,
+  mayo: 5, may: 5, junio: 6, jun: 6, julio: 7, jul: 7, agosto: 8, ago: 8,
+  septiembre: 9, setiembre: 9, sep: 9, sept: 9, octubre: 10, oct: 10,
+  noviembre: 11, nov: 11, diciembre: 12, dic: 12,
+};
+
+// Interpreta un valor de periodo mensual en varios formatos comunes:
+// "2024-01", "01/2024", "Enero 2024", "ene-24", o una fecha completa
+// (DD/MM/AAAA, MM/DD/AAAA o AAAA-MM-DD — se usa el año y el mes, se
+// descarta el día). Devuelve null si no reconoce el formato.
+export function parseMonthPeriod(raw) {
+  if (raw === null || raw === undefined) return null;
+  const s = String(raw).trim();
+  if (!s) return null;
+
+  let m = s.match(/^(\d{4})[-\/](\d{1,2})$/);
+  if (m) return { year: +m[1], month: +m[2] };
+
+  m = s.match(/^(\d{1,2})[-\/](\d{4})$/);
+  if (m) return { year: +m[2], month: +m[1] };
+
+  m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return { year: +m[1], month: +m[2] };
+
+  m = s.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/);
+  if (m) {
+    const a = +m[1], b = +m[2], year = +m[3];
+    // Convención regional día-mes-año, salvo que el primer grupo no pueda
+    // ser un día (>12) — ahí se asume mes-día-año (formato US).
+    const month = a > 12 ? b : (b > 12 ? a : b);
+    return { year, month };
+  }
+
+  m = s.toLowerCase().match(/^([a-záéíóúñ]+)\.?[\s\-\/]+'?(\d{2,4})$/);
+  if (m) {
+    const monthNum = SPANISH_MONTHS[normalizeAccents(m[1])];
+    if (monthNum) {
+      let year = +m[2];
+      if (year < 100) year += 2000;
+      return { year, month: monthNum };
+    }
+  }
+  return null;
+}
+
+// Filas { period: 'YYYY-MM', year, month, t (índice cronológico 0,1,2...),
+// hotel, revenue }, ordenadas de más antigua a más reciente. Si el archivo
+// trae más de una fila para el mismo mes/hotel (ej. varias sucursales
+// exportadas por separado antes de consolidar), se suman.
+export function loadRevenueHistory(text) {
+  let parsed = locateHeaderAndParse(text, REVENUE_COLUMN_ALIASES.period);
+  if (!parsed) parsed = textToTable(text);
+  const { headers, records } = parsed;
+  const periodCol = findColumn(headers, REVENUE_COLUMN_ALIASES.period);
+  const revenueCol = findColumn(headers, REVENUE_COLUMN_ALIASES.revenue);
+  if (!periodCol || !revenueCol) {
+    throw new Error('No se encontraron las columnas de periodo/ingresos. Revisa que el archivo tenga una columna de mes (ej. "Mes" o "Periodo") y una de ingresos (ej. "Ingresos" o "Ventas").');
+  }
+  const hotelCol = findColumn(headers, REVENUE_COLUMN_ALIASES.hotel);
+
+  const byKey = new Map();
+  for (const r of records) {
+    const parsedPeriod = parseMonthPeriod(r[periodCol]);
+    if (!parsedPeriod || parsedPeriod.month < 1 || parsedPeriod.month > 12) continue;
+    const revenue = toNumber(r[revenueCol]);
+    if (Number.isNaN(revenue)) continue;
+    const hotel = hotelCol ? String(r[hotelCol] || 'N/D') : 'N/D';
+    const period = `${parsedPeriod.year}-${String(parsedPeriod.month).padStart(2, '0')}`;
+    const key = `${hotel}::${period}`;
+    const existing = byKey.get(key);
+    if (existing) existing.revenue += revenue;
+    else byKey.set(key, { period, year: parsedPeriod.year, month: parsedPeriod.month, hotel, revenue });
+  }
+
+  const rows = [...byKey.values()].sort((a, b) => (a.year - b.year) || (a.month - b.month));
+  rows.forEach((r, i) => { r.t = i; });
+  return rows;
+}
+
+export function listRevenueHotels(rows) {
+  return [...new Set(rows.map((r) => r.hotel))].sort((a, b) => a.localeCompare(b));
+}
+
+// Regresión lineal simple (mínimos cuadrados) — y = intercept + slope*x.
+function linearRegression(points) {
+  const n = points.length;
+  const sumX = points.reduce((s, p) => s + p.x, 0);
+  const sumY = points.reduce((s, p) => s + p.y, 0);
+  const sumXY = points.reduce((s, p) => s + p.x * p.y, 0);
+  const sumXX = points.reduce((s, p) => s + p.x * p.x, 0);
+  const denom = n * sumXX - sumX * sumX;
+  const slope = denom !== 0 ? (n * sumXY - sumX * sumY) / denom : 0;
+  const intercept = (sumY - slope * sumX) / n;
+  return { slope, intercept };
+}
+
+export const MIN_MONTHS_FOR_FORECAST = 12;
+
+// rows: salida de loadRevenueHistory, ya filtrada a un solo hotel y
+// ordenada cronológicamente con `t` reasignado desde 0 por el llamador.
+// monthsAhead: cuántos meses futuros proyectar.
+export function computeSeasonalForecast(rows, monthsAhead) {
+  if (rows.length < MIN_MONTHS_FOR_FORECAST) {
+    throw new Error(`Se necesitan al menos ${MIN_MONTHS_FOR_FORECAST} meses de histórico para calcular una proyección con estacionalidad — este archivo/filtro tiene ${rows.length}.`);
+  }
+
+  const { slope, intercept } = linearRegression(rows.map((r) => ({ x: r.t, y: r.revenue })));
+  const trendAt = (t) => intercept + slope * t;
+
+  const ratiosByMonth = Array.from({ length: 13 }, () => []);
+  rows.forEach((r) => {
+    const trend = trendAt(r.t);
+    if (trend > 0) ratiosByMonth[r.month].push(r.revenue / trend);
+  });
+  const rawIndex = ratiosByMonth.map((list) => list.length ? list.reduce((s, v) => s + v, 0) / list.length : 1);
+  const avgIndex = rawIndex.slice(1).reduce((s, v) => s + v, 0) / 12;
+  const seasonalIndex = {};
+  for (let m = 1; m <= 12; m++) seasonalIndex[m] = avgIndex > 0 ? rawIndex[m] / avgIndex : 1;
+  const monthsWithLowSample = [...Array(12).keys()].map((i) => i + 1).filter((m) => ratiosByMonth[m].length < 2);
+
+  const fitted = rows.map((r) => trendAt(r.t) * seasonalIndex[r.month]);
+  const residuals = rows.map((r, i) => r.revenue - fitted[i]);
+  const residualStd = Math.sqrt(residuals.reduce((s, e) => s + e * e, 0) / Math.max(1, rows.length - 2));
+  const meanAbsPctError = rows.reduce((s, r, i) => s + (r.revenue > 0 ? Math.abs(residuals[i]) / r.revenue : 0), 0) / rows.length;
+  const meanRevenue = rows.reduce((s, r) => s + r.revenue, 0) / rows.length;
+  const ssTot = rows.reduce((s, r) => s + (r.revenue - meanRevenue) ** 2, 0);
+  const ssRes = residuals.reduce((s, e) => s + e * e, 0);
+  const r2 = ssTot > 0 ? 1 - ssRes / ssTot : 0;
+
+  const history = rows.map((r, i) => ({ ...r, fitted: fitted[i] }));
+
+  const lastRow = rows[rows.length - 1];
+  const forecast = [];
+  for (let i = 1; i <= monthsAhead; i++) {
+    const t = lastRow.t + i;
+    let month = lastRow.month + i;
+    let year = lastRow.year;
+    while (month > 12) { month -= 12; year += 1; }
+    const value = Math.max(0, trendAt(t) * seasonalIndex[month]);
+    forecast.push({
+      period: `${year}-${String(month).padStart(2, '0')}`,
+      year, month, t,
+      value,
+      low: Math.max(0, value - residualStd),
+      high: value + residualStd,
+    });
+  }
+
+  return {
+    history, forecast, seasonalIndex, monthsWithLowSample,
+    slope, intercept, r2, mape: meanAbsPctError, residualStd,
+    monthsOfHistory: rows.length,
+  };
+}
+
+// 30 meses (2023-01 a 2025-06) de ingresos mensuales sintéticos con
+// estacionalidad de hotel de playa (alta en dic-mar, baja en sep-oct) y
+// ~8.7%/año de crecimiento — para poder probar la Función 7 con un clic.
+export const SAMPLE_REVENUE_CSV = `Mes,Hotel,Ingresos
+2023-01,Estelar Playa Manzanillo,250290000
+2023-02,Estelar Playa Manzanillo,222043000
+2023-03,Estelar Playa Manzanillo,212007000
+2023-04,Estelar Playa Manzanillo,167632000
+2023-05,Estelar Playa Manzanillo,141596000
+2023-06,Estelar Playa Manzanillo,156846000
+2023-07,Estelar Playa Manzanillo,214721000
+2023-08,Estelar Playa Manzanillo,192504000
+2023-09,Estelar Playa Manzanillo,123715000
+2023-10,Estelar Playa Manzanillo,136847000
+2023-11,Estelar Playa Manzanillo,151315000
+2023-12,Estelar Playa Manzanillo,274819000
+2024-01,Estelar Playa Manzanillo,269501000
+2024-02,Estelar Playa Manzanillo,238967000
+2024-03,Estelar Playa Manzanillo,235082000
+2024-04,Estelar Playa Manzanillo,187963000
+2024-05,Estelar Playa Manzanillo,152450000
+2024-06,Estelar Playa Manzanillo,168818000
+2024-07,Estelar Playa Manzanillo,224489000
+2024-08,Estelar Playa Manzanillo,222259000
+2024-09,Estelar Playa Manzanillo,129136000
+2024-10,Estelar Playa Manzanillo,148795000
+2024-11,Estelar Playa Manzanillo,166206000
+2024-12,Estelar Playa Manzanillo,298813000
+2025-01,Estelar Playa Manzanillo,290158000
+2025-02,Estelar Playa Manzanillo,265188000
+2025-03,Estelar Playa Manzanillo,253126000
+2025-04,Estelar Playa Manzanillo,202310000
+2025-05,Estelar Playa Manzanillo,164119000
+2025-06,Estelar Playa Manzanillo,192923000`;
