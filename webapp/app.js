@@ -481,6 +481,11 @@ function renderRendLayoutA() {
         <div class="stat-value">${resumen.roas != null ? (resumen.roas * 100).toFixed(0) + '%' : 'N/D'}</div>
         <div class="stat-sub">Valor de conv. ÷ gasto</div>
       </div>
+      <div class="card stat-card">
+        <div class="stat-label">CPA %</div>
+        <div class="stat-value">${resumen.cpa_pct != null ? (resumen.cpa_pct * 100).toFixed(1) + '%' : 'N/D'}</div>
+        <div class="stat-sub">Gasto ÷ valor de conv.</div>
+      </div>
     </div>
 
     <div class="card chart-card">
@@ -529,6 +534,7 @@ function renderRendLayoutB() {
           <div class="dense-row"><span>Valor de conversión</span><strong>${resumen.total_conv_value != null ? fmtMoney(resumen.total_conv_value) : 'N/D'}</strong></div>
           <div class="dense-row accent"><span>CPA simple (alerta)</span><strong>${resumen.avg_cpa_simple != null ? fmtMoney(resumen.avg_cpa_simple) : 'N/D'}</strong></div>
           <div class="dense-row"><span>ROAS</span><strong>${resumen.roas != null ? (resumen.roas * 100).toFixed(0) + '%' : 'N/D'}</strong></div>
+          <div class="dense-row"><span>CPA %</span><strong>${resumen.cpa_pct != null ? (resumen.cpa_pct * 100).toFixed(1) + '%' : 'N/D'}</strong></div>
         </div>
         <div class="card dense-recs">
           <h3>Recomendaciones (${recs.length})</h3>

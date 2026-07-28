@@ -276,6 +276,11 @@ export function summarize(rows) {
   const hasConvValue = rows.some((r) => !Number.isNaN(r.conv_value));
   const totalConvValue = rows.reduce((s, r) => s + (Number.isNaN(r.conv_value) ? 0 : r.conv_value), 0);
   const roas = hasConvValue && totalCost > 0 ? totalConvValue / totalCost : null;
+  // CPA % = gasto ÷ valor de conversión — el inverso de ROAS, expresado
+  // como "qué porcentaje de lo vendido se fue en gasto publicitario" (a
+  // veces llamado "costo sobre venta"). Distinto de cpa_file_pct, que es la
+  // columna "CPA" tal cual la trae el export nativo de Google Ads.
+  const cpaPct = hasConvValue && totalConvValue > 0 ? totalCost / totalConvValue : null;
   return {
     total_cost: totalCost,
     total_conversions: totalConversions,
@@ -285,6 +290,7 @@ export function summarize(rows) {
     campanas_analizadas: rows.length,
     campanas_con_gasto: rows.filter((r) => r.cost > 0).length,
     roas,
+    cpa_pct: cpaPct,
   };
 }
 
