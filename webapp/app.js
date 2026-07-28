@@ -16,7 +16,7 @@ const state = {
     source: 'file', // 'file' | 'api'
     api: {
       statusChecked: false, configured: false,
-      accountsStatus: 'idle', accounts: [], accountId: '',
+      accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
       dateFrom: '', dateTo: '',
       simulated: false, error: null,
     },
@@ -307,6 +307,11 @@ function renderRendApiPanel() {
     <div class="field">
       <label>Cuenta</label>
       <select id="rend-api-account" style="width:320px">${accountOptions}</select>
+    </div>
+    <div class="field">
+      <label>...o escribe el ID de la cuenta</label>
+      <input type="text" id="rend-api-account-manual" value="${escapeHtml(a.accountIdManual)}" placeholder="ej. 6862893390" style="width:160px" />
+      <p class="field-hint">Si escribes un ID aquí, se usa este en vez del seleccionado arriba — útil si ya lo tienes copiado y no quieres buscarlo en la lista.</p>
     </div>
     <div class="field">
       <label>Desde</label>
@@ -664,23 +669,26 @@ function loadGoogleAdsAccounts() {
 
 function fetchGoogleAdsCampaigns() {
   const a = state.rend.api;
-  if (!a.accountId && !a.simulated) { a.error = 'Elige una cuenta primero.'; render(); return; }
+  // El ID escrito a mano gana sobre el seleccionado en la lista, si hay uno.
+  const manualId = (a.accountIdManual || '').replace(/[^0-9]/g, '');
+  const customerId = manualId || a.accountId;
+  if (!customerId && !a.simulated) { a.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
   if (!a.dateFrom || !a.dateTo) { a.error = 'Elige el rango de fechas primero.'; render(); return; }
 
   a.error = null;
   state.rend.status = 'loading'; state.rend.error = null;
   render();
 
-  const params = new URLSearchParams({ customer_id: a.accountId || '', date_from: a.dateFrom, date_to: a.dateTo });
+  const params = new URLSearchParams({ customer_id: customerId || '', date_from: a.dateFrom, date_to: a.dateTo });
   fetch(`/api/google-ads/campaigns?${params.toString()}`)
     .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
       a.simulated = !!data.simulated;
-      const account = a.accounts.find((acc) => acc.id === a.accountId);
+      const account = a.accounts.find((acc) => acc.id === customerId);
       const label = a.simulated
         ? `Google Ads (simulado) — ${a.dateFrom} a ${a.dateTo}`
-        : `Google Ads — ${account ? account.name : a.accountId} — ${a.dateFrom} a ${a.dateTo}`;
+        : `Google Ads — ${account ? account.name : customerId} — ${a.dateFrom} a ${a.dateTo}`;
       runRendAnalysisFromApiRows(data.rows || [], label);
     })
     .catch((err) => {
@@ -2468,6 +2476,8 @@ function bindEvents() {
 
   const rendApiAccount = document.getElementById('rend-api-account');
   if (rendApiAccount) rendApiAccount.addEventListener('change', (e) => { state.rend.api.accountId = e.target.value; });
+  const rendApiAccountManual = document.getElementById('rend-api-account-manual');
+  if (rendApiAccountManual) rendApiAccountManual.addEventListener('input', (e) => { state.rend.api.accountIdManual = e.target.value; });
   const rendApiDateFrom = document.getElementById('rend-api-date-from');
   if (rendApiDateFrom) rendApiDateFrom.addEventListener('change', (e) => { state.rend.api.dateFrom = e.target.value; });
   const rendApiDateTo = document.getElementById('rend-api-date-to');
