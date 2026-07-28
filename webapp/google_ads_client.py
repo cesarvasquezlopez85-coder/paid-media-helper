@@ -182,10 +182,13 @@ def _micros_to_units(v):
     return None if v is None else v / MICROS
 
 
-def fetch_campaign_rows(customer_id, date_from, date_to):
+def fetch_campaign_rows(customer_id, date_from, date_to, only_active=False):
     """Reporte de campañas del rango de fechas, ya en el mismo formato de
     fila que consume engine.js → loadCampaignReportFromApi (ver ahí para el
-    detalle de cada campo)."""
+    detalle de cada campo). only_active=True trae solo campañas ENABLED —
+    por defecto trae también las pausadas (todo menos REMOVED), igual que
+    un export CSV nativo de Google Ads."""
+    status_filter = "campaign.status = 'ENABLED'" if only_active else "campaign.status != 'REMOVED'"
     query = f"""
         SELECT
           campaign.name,
@@ -207,7 +210,7 @@ def fetch_campaign_rows(customer_id, date_from, date_to):
           metrics.search_impression_share
         FROM campaign
         WHERE segments.date BETWEEN '{date_from}' AND '{date_to}'
-          AND campaign.status != 'REMOVED'
+          AND {status_filter}
     """
     results = _search(customer_id, query)
     rows = []
@@ -255,8 +258,11 @@ SIMULATED_CAMPAIGNS = [
     {"campaign": "Estelar Hoteles - CO:es - Search Marca", "status": "ENABLED", "channel_type_raw": "search", "bid_strategy": "TARGET_ROAS", "budget": 3000, "impressions": 96000, "clicks": 14200, "ctr": 0.1479, "avg_cpc": 0.6, "cost": 8520, "conversions": 305, "cost_per_conv": 27.9, "conv_rate": 0.0215, "conv_value": 156400, "lost_is_budget": 0.03, "lost_is_rank": 0.01, "impr_share": 0.96},
     {"campaign": "Estelar Hoteles - CO:es - Search Genérica", "status": "ENABLED", "channel_type_raw": "search", "bid_strategy": "MAXIMIZE_CONVERSIONS", "budget": 4200, "impressions": 258000, "clicks": 6100, "ctr": 0.0236, "avg_cpc": 2.4, "cost": 14640, "conversions": 98, "cost_per_conv": 149.4, "conv_rate": 0.0161, "conv_value": 41200, "lost_is_budget": 0.31, "lost_is_rank": 0.08, "impr_share": 0.61},
     {"campaign": "Estelar Hoteles - CO:es - Display Remarketing", "status": "ENABLED", "channel_type_raw": "display", "bid_strategy": "MAXIMIZE_CONVERSIONS", "budget": 900, "impressions": 640000, "clicks": 3100, "ctr": 0.0048, "avg_cpc": 0.9, "cost": 2790, "conversions": 21, "cost_per_conv": 132.9, "conv_rate": 0.0068, "conv_value": 6800, "lost_is_budget": None, "lost_is_rank": None, "impr_share": None},
+    {"campaign": "Estelar Hoteles - CO:es - Search Temporada Baja (pausada)", "status": "PAUSED", "channel_type_raw": "search", "bid_strategy": "MAXIMIZE_CONVERSIONS", "budget": 1500, "impressions": 41000, "clicks": 780, "ctr": 0.019, "avg_cpc": 1.1, "cost": 858, "conversions": 4, "cost_per_conv": 214.5, "conv_rate": 0.0051, "conv_value": 1900, "lost_is_budget": 0.0, "lost_is_rank": 0.35, "impr_share": 0.42},
 ]
 
 
-def simulated_campaign_rows():
+def simulated_campaign_rows(only_active=False):
+    if only_active:
+        return [c for c in SIMULATED_CAMPAIGNS if c["status"] == "ENABLED"]
     return SIMULATED_CAMPAIGNS

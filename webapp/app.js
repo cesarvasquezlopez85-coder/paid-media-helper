@@ -17,7 +17,7 @@ const state = {
     api: {
       statusChecked: false, configured: false,
       accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
-      dateFrom: '', dateTo: '',
+      dateFrom: '', dateTo: '', onlyActive: false,
       simulated: false, error: null,
     },
   },
@@ -320,6 +320,12 @@ function renderRendApiPanel() {
     <div class="field">
       <label>Hasta</label>
       <input type="date" id="rend-api-date-to" value="${escapeHtml(a.dateTo)}" />
+    </div>
+    <div class="field">
+      <label style="display:flex;align-items:center;gap:8px;font-weight:400">
+        <input type="checkbox" id="rend-api-only-active" ${a.onlyActive ? 'checked' : ''} />
+        Solo campañas activas
+      </label>
     </div>
     <button class="btn-accent" data-action="rend-api-fetch">Traer datos de Google Ads</button>
     ${a.error ? `<div class="error-panel" style="margin-top:10px"><strong>No se pudo traer el reporte.</strong> ${escapeHtml(a.error)}</div>` : ''}
@@ -679,7 +685,7 @@ function fetchGoogleAdsCampaigns() {
   state.rend.status = 'loading'; state.rend.error = null;
   render();
 
-  const params = new URLSearchParams({ customer_id: customerId || '', date_from: a.dateFrom, date_to: a.dateTo });
+  const params = new URLSearchParams({ customer_id: customerId || '', date_from: a.dateFrom, date_to: a.dateTo, only_active: a.onlyActive ? '1' : '0' });
   fetch(`/api/google-ads/campaigns?${params.toString()}`)
     .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
     .then(({ ok, data }) => {
@@ -2482,6 +2488,8 @@ function bindEvents() {
   if (rendApiDateFrom) rendApiDateFrom.addEventListener('change', (e) => { state.rend.api.dateFrom = e.target.value; });
   const rendApiDateTo = document.getElementById('rend-api-date-to');
   if (rendApiDateTo) rendApiDateTo.addEventListener('change', (e) => { state.rend.api.dateTo = e.target.value; });
+  const rendApiOnlyActive = document.getElementById('rend-api-only-active');
+  if (rendApiOnlyActive) rendApiOnlyActive.addEventListener('change', (e) => { state.rend.api.onlyActive = e.target.checked; });
 
   document.querySelectorAll('[data-rend-tab]').forEach((btn) => {
     btn.addEventListener('click', () => { state.rend.chartTab = btn.dataset.rendTab; render(); });

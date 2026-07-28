@@ -372,10 +372,11 @@ class Handler(SimpleHTTPRequestHandler):
         customer_id = (query.get("customer_id") or [""])[0].strip()
         date_from = (query.get("date_from") or [""])[0].strip()
         date_to = (query.get("date_to") or [""])[0].strip()
+        only_active = (query.get("only_active") or [""])[0].strip() == "1"
         date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
         if not google_ads_client.is_configured():
-            self._send_json(200, {"rows": google_ads_client.simulated_campaign_rows(), "simulated": True})
+            self._send_json(200, {"rows": google_ads_client.simulated_campaign_rows(only_active), "simulated": True})
             return
 
         if not customer_id.isdigit():
@@ -386,7 +387,7 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         try:
-            rows = google_ads_client.fetch_campaign_rows(customer_id, date_from, date_to)
+            rows = google_ads_client.fetch_campaign_rows(customer_id, date_from, date_to, only_active)
             self._send_json(200, {"rows": rows, "simulated": False})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_json(502, {"error": str(e)})
