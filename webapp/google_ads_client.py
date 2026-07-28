@@ -185,7 +185,7 @@ def fetch_campaign_rows(customer_id, date_from, date_to):
     detalle de cada campo)."""
     query = f"""
         SELECT
-          campaign.descriptive_name,
+          campaign.name,
           campaign.status,
           campaign.advertising_channel_type,
           campaign.bidding_strategy_type,
@@ -213,7 +213,7 @@ def fetch_campaign_rows(customer_id, date_from, date_to):
         budget = r.get("campaignBudget", {})
         metrics = r.get("metrics", {})
         rows.append({
-            "campaign": campaign.get("descriptiveName") or "(sin nombre)",
+            "campaign": campaign.get("name") or "(sin nombre)",
             "status": campaign.get("status"),
             "channel_type_raw": _channel_type_alias(campaign.get("advertisingChannelType")),
             "bid_strategy": campaign.get("biddingStrategyType"),
