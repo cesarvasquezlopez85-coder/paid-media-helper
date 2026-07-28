@@ -98,7 +98,11 @@ def _search(customer_id, query):
     results = []
     page_token = None
     while True:
-        body = {"query": query, "pageSize": 10000}
+        # googleAds:search no acepta pageSize (a diferencia de otras APIs de
+        # Google) — siempre devuelve hasta 10 000 filas por página y se pagina
+        # solo con pageToken. Mandar pageSize da 400 INVALID_ARGUMENT /
+        # PAGE_SIZE_NOT_SUPPORTED, como se vio en la primera prueba real.
+        body = {"query": query}
         if page_token:
             body["pageToken"] = page_token
         req = urllib.request.Request(
