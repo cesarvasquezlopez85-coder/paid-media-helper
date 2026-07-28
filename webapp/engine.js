@@ -1834,6 +1834,37 @@ export function computeRequiredInvestment(revenueHistory, investmentRows, foreca
   return { blendedRoas, overlapMonths: overlap.length, forecastWithInvestment, totalInvestmentNeeded };
 }
 
+// ---------------------------------------------------------------------------
+// Meta de crecimiento (extensión de Función 7) — un gerente puede pedir
+// "quiero crecer X% los próximos meses". A pedido de cesar, ese X% se mide
+// contra el mismo mes real del año anterior (como se piensan las metas en
+// hotelería), no contra la proyección del modelo — son dos números
+// distintos a propósito: la proyección es "si nada cambia", la meta es "lo
+// que el gerente quiere lograr", y la brecha entre ambas es información útil
+// por sí misma.
+// ---------------------------------------------------------------------------
+
+// history: `history` de computeSeasonalForecast (meses reales). forecastRows:
+// `forecast` de computeSeasonalForecast. growthPct: número, ej. 20 para +20%.
+export function computeGrowthGoal(history, forecastRows, growthPct) {
+  const byPeriod = new Map(history.map((r) => [r.period, r.revenue]));
+  const factor = 1 + growthPct / 100;
+
+  let monthsWithoutBase = 0;
+  const forecastWithGoal = forecastRows.map((f) => {
+    const priorPeriod = `${f.year - 1}-${String(f.month).padStart(2, '0')}`;
+    const priorRevenue = byPeriod.get(priorPeriod);
+    if (priorRevenue === undefined) {
+      monthsWithoutBase += 1;
+      return { ...f, goal: null };
+    }
+    return { ...f, goal: priorRevenue * factor };
+  });
+
+  const totalGoal = forecastWithGoal.reduce((s, f) => s + (f.goal || 0), 0);
+  return { forecastWithGoal, totalGoal, monthsWithoutBase };
+}
+
 // Mismos 30 meses del ejemplo de ingresos, con una inversión mensual
 // sintética en torno a un ROAS combinado ~510% (con algo de ruido propio,
 // no perfectamente correlacionado con la estacionalidad de ingresos, para

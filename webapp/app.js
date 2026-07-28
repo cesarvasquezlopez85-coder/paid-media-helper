@@ -63,6 +63,7 @@ const state = {
     status: 'idle', error: null, fileName: null,
     rows: null, hotelFilter: 'all', monthsAhead: 6,
     investmentRows: null, investmentFileName: null, investmentError: null,
+    growthGoalPct: '',
   },
 };
 
@@ -1339,6 +1340,11 @@ function renderForecastPage() {
         <button class="seg-btn ${s.monthsAhead === 6 ? 'active' : ''}" data-action="forecast-horizon-6">Proyectar 6 meses</button>
         <button class="seg-btn ${s.monthsAhead === 12 ? 'active' : ''}" data-action="forecast-horizon-12">Proyectar 12 meses</button>
       </div>
+      <div class="field">
+        <label>Meta de crecimiento vs. mismo mes año pasado (opcional)</label>
+        <input type="number" id="forecast-growth-goal" value="${escapeHtml(s.growthGoalPct)}" placeholder="ej. 20" step="0.1" style="width:100px" />
+        <p class="field-hint">Ej. "20" = cada mes proyectado se compara contra ese mismo mes real del año anterior × 1.20 — es la meta del gerente, no lo que el modelo espera "si nada cambia".</p>
+      </div>
     </div>
     ${s.status === 'ready' ? renderForecastInvestmentPanel() : ''}
     ${body}
@@ -1394,6 +1400,16 @@ function renderForecastReady() {
   }
   const investmentByPeriod = investment ? new Map(investment.forecastWithInvestment.map((f) => [f.period, f.investmentNeeded])) : null;
 
+  let goal = null;
+  const growthGoalPctNum = parseFloat(s.growthGoalPct);
+  if (!Number.isNaN(growthGoalPctNum)) {
+    goal = engine.computeGrowthGoal(result.history, result.forecast, growthGoalPctNum);
+  }
+  const goalByPeriod = goal ? new Map(goal.forecastWithGoal.map((f) => [f.period, f.goal])) : null;
+  const goalInvestmentByPeriod = (goal && investment && investment.blendedRoas)
+    ? new Map(goal.forecastWithGoal.map((f) => [f.period, f.goal != null ? f.goal / investment.blendedRoas : null]))
+    : null;
+
   const lowDataWarning = (result.monthsOfHistory < 24 || result.monthsWithLowSample.length) ? `
     <div class="error-panel" style="margin-bottom:16px">
       <strong>Calidad del histórico limitada.</strong>
@@ -1435,6 +1451,18 @@ function renderForecastReady() {
         <div class="stat-value lg">${fmtMoneyShort(investment.totalInvestmentNeeded)}</div>
         <div class="stat-sub">para sostener la venta proyectada, al ROAS histórico</div>
       </div>` : ''}
+      ${goal ? `
+      <div class="card stat-card" style="border-color:var(--ok-text)">
+        <div class="stat-label" style="color:var(--ok-text)">Meta (+${growthGoalPctNum}% vs. año pasado)</div>
+        <div class="stat-value lg">${fmtMoneyShort(goal.totalGoal)}</div>
+        <div class="stat-sub">${goal.monthsWithoutBase ? `${goal.monthsWithoutBase} mes(es) sin dato del año pasado, no incluidos` : `suma de los ${s.monthsAhead} meses`}</div>
+      </div>
+      ${goalInvestmentByPeriod ? `
+      <div class="card stat-card" style="border-color:var(--ok-text)">
+        <div class="stat-label" style="color:var(--ok-text)">Inversión necesaria para la meta</div>
+        <div class="stat-value lg">${fmtMoneyShort([...goalInvestmentByPeriod.values()].reduce((s2, v) => s2 + (v || 0), 0))}</div>
+        <div class="stat-sub">mismo ROAS histórico, aplicado a la meta en vez de la proyección</div>
+      </div>` : ''}` : ''}
     </div>
 
     ${investmentError ? `<div class="error-panel" style="margin-bottom:16px"><strong>No se pudo calcular la inversión necesaria.</strong> ${escapeHtml(investmentError)}</div>` : ''}
@@ -1443,12 +1471,13 @@ function renderForecastReady() {
 
     <div class="card chart-card">
       <h3 class="dense-chart-title">Histórico vs. ajuste del modelo, y proyección</h3>
-      ${renderForecastChart(result.history, result.forecast)}
+      ${renderForecastChart(result.history, result.forecast, goalByPeriod)}
       <p style="margin:10px 0 0;font-size:11.5px;color:var(--color-text-muted)">
         <span style="color:var(--navy-800)">■</span> real &nbsp;
         <span style="color:var(--color-text-muted)">┄</span> ajuste del modelo (tendencia × temporada) &nbsp;
         <span style="color:var(--gold-600)">■</span> proyección &nbsp;
         <span style="color:var(--gold-600);opacity:.4">■</span> rango estimado
+        ${goal ? `&nbsp; <span style="color:var(--ok-text)">┄</span> meta` : ''}
       </p>
     </div>
 
@@ -1459,7 +1488,7 @@ function renderForecastReady() {
       </div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Mes</th><th>Proyección</th><th>Rango bajo</th><th>Rango alto</th>${investment ? '<th>Inversión necesaria</th>' : ''}</tr></thead>
+          <thead><tr><th>Mes</th><th>Proyección</th><th>Rango bajo</th><th>Rango alto</th>${investment ? '<th>Inversión necesaria</th>' : ''}${goal ? '<th>Meta</th>' : ''}${goalInvestmentByPeriod ? '<th>Inversión para la meta</th>' : ''}</tr></thead>
           <tbody>${result.forecast.map((f) => `
             <tr>
               <td>${shortPeriodLabel(f.year, f.month)}</td>
@@ -1467,6 +1496,8 @@ function renderForecastReady() {
               <td>${fmtMoney(f.low)}</td>
               <td>${fmtMoney(f.high)}</td>
               ${investment ? `<td>${fmtMoney(investmentByPeriod.get(f.period))}</td>` : ''}
+              ${goal ? `<td>${goalByPeriod.get(f.period) != null ? fmtMoney(goalByPeriod.get(f.period)) : 'N/D'}</td>` : ''}
+              ${goalInvestmentByPeriod ? `<td>${goalInvestmentByPeriod.get(f.period) != null ? fmtMoney(goalInvestmentByPeriod.get(f.period)) : 'N/D'}</td>` : ''}
             </tr>`).join('')}</tbody>
         </table>
       </div>
@@ -1476,6 +1507,7 @@ function renderForecastReady() {
       Método: regresión lineal de ingresos contra el tiempo para la tendencia, más un índice de temporada por mes calendario (promedio de cuánto se desvía cada mes de la tendencia en el histórico) — no es un modelo estadístico de caja negra, y no reemplaza el criterio de quien conoce la operación del hotel.
       El rango bajo/alto se calcula con el error histórico del modelo (±1 desviación estándar de los residuos) — es una referencia de incertidumbre, no un intervalo de confianza estadístico riguroso.
       ${investment ? ' La inversión necesaria usa un ROAS combinado (todo lo pagado vs. todo el ingreso del hotel en los meses donde hay ambos datos) — no distingue canal de inversión ni canal de venta, y asume que esa eficiencia histórica se mantiene igual hacia adelante; no considera rendimientos decrecientes.' : ''}
+      ${goal ? ` La meta de crecimiento no sale del modelo — es lo que el gerente quiere lograr, calculada contra el mismo mes real del año anterior (no contra la proyección). Si algún mes no tiene su equivalente del año pasado en el histórico cargado, queda como N/D en vez de inventar un número.` : ''}
     </p>
   `;
 }
@@ -1483,14 +1515,15 @@ function renderForecastReady() {
 // SVG sin librerías — línea de real/ajuste/proyección + banda de rango,
 // mismo criterio del resto de la plataforma de no depender de un paquete
 // de gráficas externo.
-function renderForecastChart(history, forecast) {
+function renderForecastChart(history, forecast, goalByPeriod) {
   const W = 680, H = 230, ML = 56, MR = 16, MT = 16, MB = 26;
   const plotW = W - ML - MR, plotH = H - MT - MB;
 
+  const goalValues = goalByPeriod ? [...goalByPeriod.values()].filter((v) => v != null) : [];
   const allPoints = [...history.map((h) => ({ t: h.t, values: [h.revenue, h.fitted] })),
-    ...forecast.map((f) => ({ t: f.t, values: [f.value, f.low, f.high] }))];
+    ...forecast.map((f) => ({ t: f.t, values: [f.value, f.low, f.high, ...(goalByPeriod && goalByPeriod.get(f.period) != null ? [goalByPeriod.get(f.period)] : [])] }))];
   const tMax = Math.max(1, allPoints[allPoints.length - 1].t);
-  const yMax = Math.max(1, ...allPoints.flatMap((p) => p.values)) * 1.08;
+  const yMax = Math.max(1, ...allPoints.flatMap((p) => p.values), ...goalValues) * 1.08;
 
   const x = (t) => ML + (t / tMax) * plotW;
   const y = (v) => MT + plotH - (Math.max(0, v) / yMax) * plotH;
@@ -1504,6 +1537,19 @@ function renderForecastChart(history, forecast) {
   const bandTop = forecastPoints.map((f) => `${x(f.t).toFixed(1)},${y(f.high).toFixed(1)}`).join(' L ');
   const bandBottom = forecastPoints.slice().reverse().map((f) => `${x(f.t).toFixed(1)},${y(f.low).toFixed(1)}`).join(' L ');
   const bandPath = `M ${bandTop} L ${bandBottom} Z`;
+
+  // Línea de meta: parte del mismo punto que la proyección (último mes real)
+  // para que las tres líneas arranquen del mismo lugar en el gráfico — se
+  // corta si algún mes futuro no tiene su equivalente del año pasado.
+  let goalPath = '';
+  if (goalByPeriod) {
+    const goalPoints = [{ t: lastHist.t, value: lastHist.revenue }, ...forecast
+      .filter((f) => goalByPeriod.get(f.period) != null)
+      .map((f) => ({ t: f.t, value: goalByPeriod.get(f.period) }))];
+    if (goalPoints.length > 1) {
+      goalPath = goalPoints.map((g, i) => `${i === 0 ? 'M' : 'L'} ${x(g.t).toFixed(1)},${y(g.value).toFixed(1)}`).join(' ');
+    }
+  }
 
   const gridLines = [0, 0.5, 1].map((frac) => {
     const val = yMax * frac;
@@ -1526,6 +1572,7 @@ function renderForecastChart(history, forecast) {
       <path d="${fittedPath}" fill="none" stroke="var(--color-text-muted)" stroke-width="1.5" stroke-dasharray="4 3" />
       <path d="${forecastPath}" fill="none" stroke="var(--gold-600)" stroke-width="2.5" />
       <path d="${actualPath}" fill="none" stroke="var(--navy-800)" stroke-width="2.5" />
+      ${goalPath ? `<path d="${goalPath}" fill="none" stroke="var(--ok-text)" stroke-width="2" stroke-dasharray="1 4" stroke-linecap="round" />` : ''}
       <line x1="${x(lastHist.t).toFixed(1)}" y1="${MT}" x2="${x(lastHist.t).toFixed(1)}" y2="${H - MB}" stroke="var(--color-border)" stroke-width="1" stroke-dasharray="2 3" />
       ${xLabels}
     </svg>`;
@@ -2497,6 +2544,15 @@ function bindEvents() {
     render();
   });
 
+  const forecastGrowthGoal = document.getElementById('forecast-growth-goal');
+  // 'change' (no 'input') a propósito: re-renderizar en cada tecla reconstruye
+  // el DOM y le hace perder el foco al campo mientras se escribe. Con
+  // 'change' el recálculo pasa al salir del campo (blur, tab, o flechas).
+  if (forecastGrowthGoal) forecastGrowthGoal.addEventListener('change', (e) => {
+    state.forecast.growthGoalPct = e.target.value;
+    render();
+  });
+
   const forecastInvestmentFileInput = document.getElementById('forecast-investment-file');
   if (forecastInvestmentFileInput) forecastInvestmentFileInput.addEventListener('change', (e) => {
     const file = e.target.files && e.target.files[0];
@@ -2652,12 +2708,24 @@ function handleAction(action) {
       if (s.investmentRows && s.investmentRows.length) {
         try { investment = engine.computeRequiredInvestment(result.history, s.investmentRows, result.forecast); } catch (err) { /* se omite la columna si no se puede calcular */ }
       }
+      let goal = null;
+      const growthGoalPctNum = parseFloat(s.growthGoalPct);
+      if (!Number.isNaN(growthGoalPctNum)) goal = engine.computeGrowthGoal(result.history, result.forecast, growthGoalPctNum);
+      const goalByPeriod = goal ? new Map(goal.forecastWithGoal.map((f) => [f.period, f.goal])) : null;
+      const goalInvestmentByPeriod = (goal && investment && investment.blendedRoas)
+        ? new Map(goal.forecastWithGoal.map((f) => [f.period, f.goal != null ? f.goal / investment.blendedRoas : null]))
+        : null;
+
       const header = ['Mes', 'Proyección', 'Rango bajo', 'Rango alto'];
       if (investment) header.push('Inversión necesaria');
+      if (goal) header.push('Meta');
+      if (goalInvestmentByPeriod) header.push('Inversión para la meta');
       const investmentByPeriod = investment ? new Map(investment.forecastWithInvestment.map((f) => [f.period, f.investmentNeeded])) : null;
       const data = [header, ...result.forecast.map((f) => {
         const row = [f.period, f.value.toFixed(2), f.low.toFixed(2), f.high.toFixed(2)];
         if (investment) row.push((investmentByPeriod.get(f.period) || 0).toFixed(2));
+        if (goal) row.push(goalByPeriod.get(f.period) != null ? goalByPeriod.get(f.period).toFixed(2) : '');
+        if (goalInvestmentByPeriod) row.push(goalInvestmentByPeriod.get(f.period) != null ? goalInvestmentByPeriod.get(f.period).toFixed(2) : '');
         return row;
       })];
       engine.downloadCsv('proyeccion_ventas.csv', data);
