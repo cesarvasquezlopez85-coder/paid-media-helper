@@ -124,13 +124,16 @@ def _search(customer_id, query):
 
 
 def list_client_accounts():
-    """Cuentas de cliente (no sub-MCC) accesibles bajo el MCC configurado."""
+    """Cuentas de cliente (no sub-MCC) accesibles bajo el MCC configurado, en
+    cualquier nivel de la jerarquía — algunas agencias organizan sus cuentas
+    en sub-MCCs (una por marca, por ejemplo), así que limitar a nivel <= 1
+    dejaba fuera cuentas reales que cuelgan de esos sub-MCCs."""
     mcc_id = os.environ["GOOGLE_ADS_LOGIN_CUSTOMER_ID"]
     query = """
         SELECT customer_client.id, customer_client.descriptive_name,
                customer_client.status, customer_client.manager
         FROM customer_client
-        WHERE customer_client.level <= 1 AND customer_client.status = 'ENABLED'
+        WHERE customer_client.status = 'ENABLED'
     """
     rows = _search(mcc_id, query)
     accounts = []
