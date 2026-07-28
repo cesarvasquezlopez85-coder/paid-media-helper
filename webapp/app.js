@@ -236,12 +236,19 @@ function renderRendPage() {
       </div>`;
   }
 
-  return `
-    <div class="card control-panel align-end">
+  // El campo de palabras de marca solo se muestra subiendo archivo — en modo
+  // API se usa el valor que ya tenga guardado (por defecto DEFAULT_BRAND_KEYWORDS)
+  // sin pedírselo al usuario cada vez, para no ensuciar esa pantalla. La
+  // clasificación marca/genérica se sigue aplicando igual en ambos modos.
+  const brandKeywordsField = s.source === 'file' ? `
       <div class="field">
         <label>Palabras que identifican una campaña de marca (separadas por coma)</label>
         <input type="text" id="rend-brand-keywords" value="${escapeHtml(s.brandKeywords)}" style="width:320px" />
-      </div>
+      </div>` : '';
+
+  return `
+    <div class="card control-panel align-end">
+      ${brandKeywordsField}
       <div class="seg-control">
         <button class="seg-btn ${s.source === 'file' ? 'active' : ''}" data-action="rend-source-file">Subir archivo</button>
         <button class="seg-btn ${s.source === 'api' ? 'active' : ''}" data-action="rend-source-api">Conectar Google Ads</button>
