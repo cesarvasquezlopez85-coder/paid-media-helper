@@ -28,6 +28,8 @@ El resumen ejecutivo ahora muestra el CPA promedio de cuenta en dos versiones di
 
 **Nuevas tarjetas y filtros (2026-07-13/14):** la tarjeta "Campañas con gasto" se reemplazó por **ROAS** (valor de conversión ÷ gasto, en %, "N/D" si el archivo no trae "Valor de conv."); la tarjeta "CPA promedio · ponderado por gasto" se reemplazó por **Valor de conversión** total; se agregó un **filtro por campaña** para ver el resumen, los gráficos y las recomendaciones de una sola campaña sin volver a subir el archivo.
 
+**Tarjeta CPA % y alerta de "CPA alto" rediseñada por tipo de campaña (2026-07-28):** nueva tarjeta **CPA %** (gasto ÷ valor de conversión, el inverso de ROAS) junto a ROAS, en Vista estándar y Vista densa. A pedido de cesar, esta tarjeta pasó a ser la que determina la alerta de "CPA alto" — que dejó de comparar el CPA en $ contra el promedio simple de la cuenta (un umbral único, sin distinguir tipo de campaña) y ahora usa el CPA %, con un óptimo distinto por tipo de campaña — mismo criterio que ya usaba el umbral de CTR. Óptimos: Search marca 11%, Performance Max 20%, Demand Gen 30%, Display 30%, Search genérica 30%. Solo se evalúa si el archivo trae "Valor de conv."; sin ese dato, la campaña simplemente no se marca. De paso se agregó "Demand Gen" como tipo de campaña reconocido — antes esas campañas caían mal clasificadas como Search por defecto. La tarjeta de CPA en $ pasó a ser solo informativa, ya no dispara la alerta.
+
 Pendiente: repetir la carga de ambas cuentas y anotar explícitamente si las recomendaciones coinciden con el criterio de cesar, y seguir con el resto de las 3-5 cuentas objetivo de Fase 1.
 
 ### Función 2 — Negativización de términos de búsqueda

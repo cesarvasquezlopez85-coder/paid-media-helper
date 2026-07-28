@@ -217,8 +217,9 @@ function renderRendPage() {
       <p class="footnote">
         Los umbrales son heurísticos y ajustables — no reemplazan el criterio del estratega de cuenta.
         CTR mínimo por tipo: Search marca 20%, Search genérica 8%, Display 1%, Performance Max 3%.
+        CPA % óptimo por tipo (gasto ÷ valor de conversión, dispara la alerta de "CPA alto" si se supera): Search marca 11%, Performance Max 20%, Demand Gen 30%, Display 30%, Search genérica 30%. Solo se evalúa si el archivo trae "Valor de conv.".
         Sin la columna "Campaign type", o sin match de marca en el nombre, se trata como Search genérica.
-        ${hasCpaFilePct ? ' "CPA %" es la columna "CPA" tal cual viene en tu export — es una métrica distinta al CPA en $ que ya calculamos desde "Costo/conv." (usado en el resto de la pantalla).' : ''}
+        ${hasCpaFilePct ? ' La columna "CPA %" de la tabla es la columna "CPA" tal cual viene en tu export — una métrica distinta a la tarjeta "CPA %" de arriba (esa es gasto ÷ valor de conv.).' : ''}
       </p>`;
   }
 
@@ -471,20 +472,19 @@ function renderRendLayoutA() {
         <div class="stat-label">Valor de conversión</div>
         <div class="stat-value">${resumen.total_conv_value != null ? fmtMoney(resumen.total_conv_value) : 'N/D'}</div>
       </div>
-      <div class="card stat-card accent">
+      <div class="card stat-card">
         <div class="stat-label">CPA promedio · simple entre campañas</div>
         <div class="stat-value">${resumen.avg_cpa_simple != null ? fmtMoney(resumen.avg_cpa_simple) : 'N/D'}</div>
-        <div class="stat-sub">Usado por la alerta de "CPA alto"</div>
       </div>
       <div class="card stat-card">
         <div class="stat-label">ROAS</div>
         <div class="stat-value">${resumen.roas != null ? (resumen.roas * 100).toFixed(0) + '%' : 'N/D'}</div>
         <div class="stat-sub">Valor de conv. ÷ gasto</div>
       </div>
-      <div class="card stat-card">
+      <div class="card stat-card accent">
         <div class="stat-label">CPA %</div>
         <div class="stat-value">${resumen.cpa_pct != null ? (resumen.cpa_pct * 100).toFixed(1) + '%' : 'N/D'}</div>
-        <div class="stat-sub">Gasto ÷ valor de conv.</div>
+        <div class="stat-sub">Gasto ÷ valor de conv. — usado por la alerta de "CPA alto"</div>
       </div>
     </div>
 
@@ -532,9 +532,9 @@ function renderRendLayoutB() {
           <div class="dense-row"><span>Gasto total</span><strong>${fmtMoney(resumen.total_cost)}</strong></div>
           <div class="dense-row"><span>Conversiones</span><strong>${fmtInt(resumen.total_conversions)}</strong></div>
           <div class="dense-row"><span>Valor de conversión</span><strong>${resumen.total_conv_value != null ? fmtMoney(resumen.total_conv_value) : 'N/D'}</strong></div>
-          <div class="dense-row accent"><span>CPA simple (alerta)</span><strong>${resumen.avg_cpa_simple != null ? fmtMoney(resumen.avg_cpa_simple) : 'N/D'}</strong></div>
+          <div class="dense-row"><span>CPA simple</span><strong>${resumen.avg_cpa_simple != null ? fmtMoney(resumen.avg_cpa_simple) : 'N/D'}</strong></div>
           <div class="dense-row"><span>ROAS</span><strong>${resumen.roas != null ? (resumen.roas * 100).toFixed(0) + '%' : 'N/D'}</strong></div>
-          <div class="dense-row"><span>CPA %</span><strong>${resumen.cpa_pct != null ? (resumen.cpa_pct * 100).toFixed(1) + '%' : 'N/D'}</strong></div>
+          <div class="dense-row accent"><span>CPA % (alerta)</span><strong>${resumen.cpa_pct != null ? (resumen.cpa_pct * 100).toFixed(1) + '%' : 'N/D'}</strong></div>
         </div>
         <div class="card dense-recs">
           <h3>Recomendaciones (${recs.length})</h3>

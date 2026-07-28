@@ -130,6 +130,18 @@ export const CAMPAIGN_TYPE_LABELS = {
   search_generic: "Search (genérica)",
   display: "Display",
   performance_max: "Performance Max",
+  demand_gen: "Demand Gen",
+};
+
+// CPA % = gasto ÷ valor de conversión de la campaña — óptimo por tipo,
+// definido por cesar (2026-07-28) para reemplazar la alerta de "CPA alto"
+// que antes comparaba el CPA en $ contra el promedio simple de la cuenta.
+export const CPA_PCT_THRESHOLDS_BY_TYPE = {
+  search_brand: 0.11,
+  performance_max: 0.20,
+  demand_gen: 0.30,
+  display: 0.30,
+  search_generic: 0.30,
 };
 
 const CAMPAIGN_TYPE_ALIASES = {
@@ -137,13 +149,13 @@ const CAMPAIGN_TYPE_ALIASES = {
   display: "display", "red de display": "display",
   "performance max": "performance_max", "performance max campaigns": "performance_max",
   "máximo rendimiento": "performance_max", "maximo rendimiento": "performance_max",
+  "demand gen": "demand_gen", "demand gen campaigns": "demand_gen", discovery: "demand_gen",
 };
 const DEFAULT_BASE_TYPE = "search";
 
 export const DEFAULT_BRAND_KEYWORDS = ["marca", "brand", "branded", "brnd"];
 
 const THRESHOLDS = {
-  cpa_high_vs_avg_pct: 0.20,
   lost_is_budget_high: 0.10,
   lost_is_rank_high: 0.10,
   min_cost_to_flag: 0.0,
@@ -296,18 +308,26 @@ export function summarize(rows) {
 
 export function generateRecommendations(rows) {
   const recs = [];
-  const validCpa = rows.map((r) => r.cpa).filter((v) => !Number.isNaN(v));
-  const avgCpa = validCpa.length ? validCpa.reduce((a, b) => a + b, 0) / validCpa.length : null;
 
   for (const row of rows) {
     const cost = Number.isNaN(row.cost) ? 0 : row.cost;
     if (cost < THRESHOLDS.min_cost_to_flag) continue;
 
-    if (avgCpa && !Number.isNaN(row.cpa) && row.cpa > avgCpa * (1 + THRESHOLDS.cpa_high_vs_avg_pct)) {
-      const pct = (row.cpa / avgCpa - 1) * 100;
+    const campaignType = row.campaign_type || DEFAULT_CAMPAIGN_TYPE;
+    const typeLabel = CAMPAIGN_TYPE_LABELS[campaignType] || campaignType;
+
+    // CPA % = gasto ÷ valor de conversión, contra el óptimo por tipo de
+    // campaña (ver CPA_PCT_THRESHOLDS_BY_TYPE) — reemplaza la alerta
+    // anterior, que comparaba el CPA en $ contra el promedio simple de la
+    // cuenta sin distinguir tipo de campaña. Si el archivo no trae "Valor
+    // de conv.", no se puede calcular y esta campaña no se evalúa (no hay
+    // forma honesta de estimarlo sin ese dato).
+    const cpaPctThreshold = CPA_PCT_THRESHOLDS_BY_TYPE[campaignType] ?? CPA_PCT_THRESHOLDS_BY_TYPE[DEFAULT_CAMPAIGN_TYPE];
+    const cpaPct = !Number.isNaN(row.cost) && !Number.isNaN(row.conv_value) && row.conv_value > 0 ? row.cost / row.conv_value : NaN;
+    if (!Number.isNaN(cpaPct) && cpaPct > cpaPctThreshold) {
       recs.push({
         campaign: row.campaign, categoria: "CPA",
-        hallazgo: `CPA de $${row.cpa.toFixed(2)} está ${pct.toFixed(0)}% por arriba del promedio de cuenta ($${avgCpa.toFixed(2)}).`,
+        hallazgo: `CPA de ${(cpaPct * 100).toFixed(1)}% del valor de conversión, por arriba del óptimo para ${typeLabel} (${(cpaPctThreshold * 100).toFixed(0)}%).`,
         recomendacion: "Revisar las palabras clave/segmentos de mayor gasto de esta campaña; pausar o bajar puja en las que no conviertan.",
         impacto_gasto: row.share_of_spend,
       });
@@ -320,9 +340,7 @@ export function generateRecommendations(rows) {
         impacto_gasto: row.share_of_spend,
       });
     }
-    const campaignType = row.campaign_type || DEFAULT_CAMPAIGN_TYPE;
     const ctrThreshold = CTR_THRESHOLDS_BY_TYPE[campaignType] ?? CTR_THRESHOLDS_BY_TYPE[DEFAULT_CAMPAIGN_TYPE];
-    const typeLabel = CAMPAIGN_TYPE_LABELS[campaignType] || campaignType;
     if (!Number.isNaN(row.ctr) && row.ctr < ctrThreshold) {
       recs.push({
         campaign: row.campaign, categoria: "Relevancia (CTR)",
