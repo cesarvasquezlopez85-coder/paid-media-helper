@@ -1471,7 +1471,7 @@ function renderForecastReady() {
 
     <div class="card chart-card">
       <h3 class="dense-chart-title">Histórico vs. ajuste del modelo, y proyección</h3>
-      ${renderForecastChart(result.history, result.forecast, goalByPeriod)}
+      ${renderForecastChart(result.history, result.forecast, goalByPeriod, investmentByPeriod, goalInvestmentByPeriod)}
       <p style="margin:10px 0 0;font-size:11.5px;color:var(--color-text-muted)">
         <span style="color:var(--navy-800)">■</span> real &nbsp;
         <span style="color:var(--color-text-muted)">┄</span> ajuste del modelo (tendencia × temporada) &nbsp;
@@ -1515,7 +1515,7 @@ function renderForecastReady() {
 // SVG sin librerías — línea de real/ajuste/proyección + banda de rango,
 // mismo criterio del resto de la plataforma de no depender de un paquete
 // de gráficas externo.
-function renderForecastChart(history, forecast, goalByPeriod) {
+function renderForecastChart(history, forecast, goalByPeriod, investmentByPeriod, goalInvestmentByPeriod) {
   const W = 680, H = 230, ML = 56, MR = 16, MT = 16, MB = 26;
   const plotW = W - ML - MR, plotH = H - MT - MB;
 
@@ -1565,17 +1565,46 @@ function renderForecastChart(history, forecast, goalByPeriod) {
     return `<text x="${x(p.t).toFixed(1)}" y="${H - 6}" font-size="10" fill="var(--color-text-muted)" text-anchor="middle">${shortPeriodLabel(src.year, src.month)}</text>`;
   }).join('');
 
+  // Columnas invisibles para el hover: una por mes (histórico + proyectado),
+  // con el texto del tooltip guardado en data-tooltip — bindEvents() les
+  // agrega los listeners de mouseenter/mouseleave después de renderizar.
+  const colStep = plotW / tMax;
+  const hoverCols = allPoints.map((p) => {
+    const isHistory = p.t <= lastHist.t;
+    const src = isHistory ? history.find((h) => h.t === p.t) : forecast.find((f) => f.t === p.t);
+    if (!src) return '';
+    let lines;
+    if (isHistory) {
+      lines = [shortPeriodLabel(src.year, src.month), `Real: ${fmtMoney(src.revenue)}`, `Ajuste del modelo: ${fmtMoney(src.fitted)}`];
+    } else {
+      lines = [shortPeriodLabel(src.year, src.month), `Proyección: ${fmtMoney(src.value)}`, `Rango: ${fmtMoney(src.low)} – ${fmtMoney(src.high)}`];
+      const inv = investmentByPeriod && investmentByPeriod.get(src.period);
+      if (inv != null) lines.push(`Inversión necesaria: ${fmtMoney(inv)}`);
+      const g = goalByPeriod && goalByPeriod.get(src.period);
+      if (g != null) lines.push(`Meta: ${fmtMoney(g)}`);
+      const gInv = goalInvestmentByPeriod && goalInvestmentByPeriod.get(src.period);
+      if (gInv != null) lines.push(`Inversión para la meta: ${fmtMoney(gInv)}`);
+    }
+    const rectX = (x(p.t) - colStep / 2).toFixed(1);
+    return `<rect class="forecast-hover-col" x="${rectX}" y="${MT}" width="${colStep.toFixed(1)}" height="${plotH}" fill="transparent" data-x="${x(p.t).toFixed(1)}" data-tooltip="${escapeHtml(lines.join('\n'))}"></rect>`;
+  }).join('');
+
   return `
-    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;max-height:260px" xmlns="http://www.w3.org/2000/svg">
-      ${gridLines}
-      <path d="${bandPath}" fill="var(--gold-600)" fill-opacity="0.15" stroke="none" />
-      <path d="${fittedPath}" fill="none" stroke="var(--color-text-muted)" stroke-width="1.5" stroke-dasharray="4 3" />
-      <path d="${forecastPath}" fill="none" stroke="var(--gold-600)" stroke-width="2.5" />
-      <path d="${actualPath}" fill="none" stroke="var(--navy-800)" stroke-width="2.5" />
-      ${goalPath ? `<path d="${goalPath}" fill="none" stroke="var(--ok-text)" stroke-width="2" stroke-dasharray="1 4" stroke-linecap="round" />` : ''}
-      <line x1="${x(lastHist.t).toFixed(1)}" y1="${MT}" x2="${x(lastHist.t).toFixed(1)}" y2="${H - MB}" stroke="var(--color-border)" stroke-width="1" stroke-dasharray="2 3" />
-      ${xLabels}
-    </svg>`;
+    <div style="position:relative">
+      <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;max-height:260px;display:block" xmlns="http://www.w3.org/2000/svg">
+        ${gridLines}
+        <path d="${bandPath}" fill="var(--gold-600)" fill-opacity="0.15" stroke="none" />
+        <path d="${fittedPath}" fill="none" stroke="var(--color-text-muted)" stroke-width="1.5" stroke-dasharray="4 3" />
+        <path d="${forecastPath}" fill="none" stroke="var(--gold-600)" stroke-width="2.5" />
+        <path d="${actualPath}" fill="none" stroke="var(--navy-800)" stroke-width="2.5" />
+        ${goalPath ? `<path d="${goalPath}" fill="none" stroke="var(--ok-text)" stroke-width="2" stroke-dasharray="1 4" stroke-linecap="round" />` : ''}
+        <line x1="${x(lastHist.t).toFixed(1)}" y1="${MT}" x2="${x(lastHist.t).toFixed(1)}" y2="${H - MB}" stroke="var(--color-border)" stroke-width="1" stroke-dasharray="2 3" />
+        <line class="forecast-hover-guide" x1="0" y1="${MT}" x2="0" y2="${H - MB}" stroke="var(--navy-800)" stroke-width="1" style="opacity:0" />
+        ${xLabels}
+        ${hoverCols}
+      </svg>
+      <div class="forecast-tooltip"></div>
+    </div>`;
 }
 
 function runForecastAnalysis(text, fileName) {
@@ -2559,6 +2588,31 @@ function bindEvents() {
     if (!file) return;
     readFileAsCsvText(file).then((text) => runForecastInvestmentAnalysis(text, file.name))
       .catch((err) => { state.forecast.investmentError = err.message || String(err); render(); });
+  });
+
+  // Tooltips del gráfico de Proyección de ventas — hover muestra los datos
+  // de ese mes (real/ajuste, o proyección/rango/inversión/meta según el mes).
+  document.querySelectorAll('.forecast-hover-col').forEach((col) => {
+    const chartWrap = col.closest('div');
+    const svg = col.closest('svg');
+    const tooltip = chartWrap ? chartWrap.querySelector('.forecast-tooltip') : null;
+    const guide = svg ? svg.querySelector('.forecast-hover-guide') : null;
+    if (!tooltip || !guide) return;
+    col.addEventListener('mouseenter', () => {
+      tooltip.textContent = col.dataset.tooltip;
+      tooltip.style.display = 'block';
+      const svgRect = svg.getBoundingClientRect();
+      const svgX = parseFloat(col.dataset.x);
+      const leftPx = (svgX / svg.viewBox.baseVal.width) * svgRect.width;
+      tooltip.style.left = `${leftPx}px`;
+      guide.setAttribute('x1', col.dataset.x);
+      guide.setAttribute('x2', col.dataset.x);
+      guide.style.opacity = '1';
+    });
+    col.addEventListener('mouseleave', () => {
+      tooltip.style.display = 'none';
+      guide.style.opacity = '0';
+    });
   });
 
   // Negativización
