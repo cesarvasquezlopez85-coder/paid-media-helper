@@ -84,6 +84,13 @@ const state = {
     status: 'idle', error: null, fileName: null,
     rows: null, campaignFilter: 'all', excludeBrand: true, hotelFilter: 'all',
     sortBy: 'revenue_lost', sortDir: 'desc',
+    source: 'file', // 'file' | 'api'
+    api: {
+      statusChecked: false, configured: false,
+      accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
+      dateFrom: '', dateTo: '', onlyActive: false,
+      simulated: false, error: null,
+    },
   },
 
   forecast: {
@@ -1173,6 +1180,146 @@ function runOpportunityAnalysis(text, fileName) {
   render();
 }
 
+function runOpportunityAnalysisFromApiRows(apiRows, fileName) {
+  const s = state.opportunity;
+  try {
+    const brandKeywords = s.brandKeywords.split(',').map((v) => v.trim()).filter(Boolean);
+    const rowsRaw = engine.loadCampaignReportFromApi(apiRows, brandKeywords);
+    const rows = engine.computeMetrics(rowsRaw);
+    Object.assign(s, { status: 'ready', error: null, rows, fileName, campaignFilter: 'all', hotelFilter: 'all' });
+  } catch (err) {
+    Object.assign(s, { status: 'error', error: err.message || String(err), fileName, rows: null });
+  }
+  render();
+}
+
+function ensureOpportunityGoogleAdsStatusLoaded() {
+  const a = state.opportunity.api;
+  if (a.statusChecked) return;
+  fetch('/api/google-ads/status')
+    .then((r) => r.json())
+    .then((data) => { a.statusChecked = true; a.configured = !!data.configured; render(); })
+    .catch(() => { a.statusChecked = true; a.configured = false; render(); });
+}
+
+function loadOpportunityGoogleAdsAccounts() {
+  const a = state.opportunity.api;
+  a.accountsStatus = 'loading'; a.error = null;
+  render();
+  fetch('/api/google-ads/accounts')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.accounts = data.accounts || [];
+      a.simulated = !!data.simulated;
+      if (!a.dateFrom || !a.dateTo) {
+        const today = new Date();
+        const monthAgo = new Date(today);
+        monthAgo.setDate(monthAgo.getDate() - 30);
+        a.dateTo = today.toISOString().slice(0, 10);
+        a.dateFrom = monthAgo.toISOString().slice(0, 10);
+      }
+      a.accountsStatus = 'ready';
+      render();
+    })
+    .catch((err) => {
+      a.accountsStatus = 'error'; a.error = err.message || String(err);
+      render();
+    });
+}
+
+function fetchOpportunityGoogleAdsCampaigns() {
+  const a = state.opportunity.api;
+  const manualId = (a.accountIdManual || '').replace(/[^0-9]/g, '');
+  const customerId = manualId || a.accountId;
+  if (!customerId && !a.simulated) { a.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
+  if (!a.dateFrom || !a.dateTo) { a.error = 'Elige el rango de fechas primero.'; render(); return; }
+
+  a.error = null;
+  state.opportunity.status = 'loading'; state.opportunity.error = null;
+  render();
+
+  const params = new URLSearchParams({ customer_id: customerId || '', date_from: a.dateFrom, date_to: a.dateTo, only_active: a.onlyActive ? '1' : '0' });
+  fetch(`/api/google-ads/campaigns?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.simulated = !!data.simulated;
+      const account = a.accounts.find((acc) => acc.id === customerId);
+      const label = a.simulated
+        ? `Google Ads (simulado) — ${a.dateFrom} a ${a.dateTo}`
+        : `Google Ads — ${account ? account.name : customerId} — ${a.dateFrom} a ${a.dateTo}`;
+      runOpportunityAnalysisFromApiRows(data.rows || [], label);
+    })
+    .catch((err) => {
+      a.error = err.message || String(err);
+      state.opportunity.status = 'idle';
+      render();
+    });
+}
+
+function renderOpportunityApiPanel() {
+  const a = state.opportunity.api;
+
+  if (!a.statusChecked) {
+    return `<div class="field"><p class="footnote">Consultando la conexión con Google Ads…</p></div>`;
+  }
+
+  const simulatedNotice = a.simulated ? `
+    <div class="ok-panel" style="margin:10px 0">
+      <strong>Modo simulado.</strong> La API de Google Ads todavía no está configurada en el servidor
+      (falta la aprobación del developer token de Google) — estos son datos de ejemplo, no de una cuenta real.
+    </div>` : '';
+
+  if (a.accountsStatus === 'idle') {
+    return `
+      <div class="field">
+        <p class="footnote">${a.configured ? 'Conectado a la API de Google Ads.' : 'La API de Google Ads aún no está configurada — se usarán datos simulados para probar el flujo.'}</p>
+        <button class="btn-outline" data-action="opp-api-load-accounts">Ver cuentas disponibles</button>
+      </div>`;
+  }
+  if (a.accountsStatus === 'loading') {
+    return `<div class="field"><p class="footnote">Cargando cuentas…</p></div>`;
+  }
+  if (a.accountsStatus === 'error') {
+    return `<div class="error-panel"><strong>No se pudieron cargar las cuentas.</strong> ${escapeHtml(a.error)}</div>`;
+  }
+
+  const accountOptions = ['<option value="">Elige una cuenta…</option>']
+    .concat(a.accounts.map((acc) => `<option value="${escapeHtml(acc.id)}" ${a.accountId === acc.id ? 'selected' : ''}>${escapeHtml(acc.name)} (${escapeHtml(acc.id)})</option>`))
+    .join('');
+
+  return `
+    ${simulatedNotice}
+    <div class="field">
+      <label>Cuenta</label>
+      <select id="opp-api-account" style="width:320px">${accountOptions}</select>
+    </div>
+    <div class="field">
+      <label>...o escribe el ID de la cuenta</label>
+      <input type="text" id="opp-api-account-manual" value="${escapeHtml(a.accountIdManual)}" placeholder="ej. 6862893390" style="width:160px" />
+    </div>
+    <div style="display:flex;gap:24px;flex-wrap:nowrap">
+      <div class="field">
+        <label>Desde</label>
+        <input type="date" id="opp-api-date-from" value="${escapeHtml(a.dateFrom)}" />
+      </div>
+      <div class="field">
+        <label>Hasta</label>
+        <input type="date" id="opp-api-date-to" value="${escapeHtml(a.dateTo)}" />
+      </div>
+    </div>
+    <div class="field">
+      <label style="display:flex;align-items:center;gap:8px;font-weight:400">
+        <input type="checkbox" id="opp-api-only-active" ${a.onlyActive ? 'checked' : ''} />
+        Solo campañas activas
+      </label>
+    </div>
+    <button class="btn-accent" data-action="opp-api-fetch">Traer datos de Google Ads</button>
+    ${a.error ? `<div class="error-panel" style="margin-top:10px"><strong>No se pudo traer el reporte.</strong> ${escapeHtml(a.error)}</div>` : ''}
+  `;
+}
+
 // El export de Google Ads no trae una columna de hotel/propiedad — se
 // deriva del nombre de campaña, tomando lo que hay antes del primer
 // " - " (así vienen nombradas las cuentas reales, ej. "Estelar Hoteles -
@@ -1196,18 +1343,29 @@ function getOpportunityFilteredRows() {
 function renderOpportunityPage() {
   const s = state.opportunity;
 
-  const controlPanel = `
-    <div class="card control-panel align-end">
+  // El campo de palabras de marca solo se muestra subiendo archivo — en modo
+  // API se usa el valor que ya tenga guardado, mismo criterio que Rendimiento.
+  const brandKeywordsField = s.source === 'file' ? `
       <div class="field">
         <label>Palabras que identifican una campaña de marca (separadas por coma)</label>
         <input type="text" id="opp-brand-keywords" value="${escapeHtml(s.brandKeywords)}" style="width:320px" />
+      </div>` : '';
+
+  const controlPanel = `
+    <div class="card control-panel align-end">
+      ${brandKeywordsField}
+      <div class="seg-control">
+        <button class="seg-btn ${s.source === 'file' ? 'active' : ''}" data-action="opp-source-file">Subir archivo</button>
+        <button class="seg-btn ${s.source === 'api' ? 'active' : ''}" data-action="opp-source-api">Conectar Google Ads</button>
       </div>
-      <div class="field">
-        <label>Export de campañas (CSV o Excel)</label>
-        <input type="file" id="opp-file" accept=".csv,.xlsx,.xls" />
-      </div>
-      <button class="btn-outline" data-action="opp-demo">Usar ejemplo</button>
-      ${s.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.fileName)}</strong></div>` : ''}
+      ${s.source === 'file' ? `
+        <div class="field">
+          <label>Export de campañas (CSV o Excel)</label>
+          <input type="file" id="opp-file" accept=".csv,.xlsx,.xls" />
+        </div>
+        <button class="btn-outline" data-action="opp-demo">Usar ejemplo</button>
+        ${s.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.fileName)}</strong></div>` : ''}
+      ` : renderOpportunityApiPanel()}
     </div>`;
 
   let body = '';
@@ -1215,7 +1373,7 @@ function renderOpportunityPage() {
     body = `
       <div class="card state-panel idle">
         ${icon('trending-up', 30)}
-        <p>Esperando un archivo. Además de las columnas habituales de Rendimiento, necesita "Search Impr. Share" y "Valor de conv." para poder calcular la oportunidad.</p>
+        <p>Esperando datos. Además de las columnas/campos habituales de Rendimiento, necesita "Search Impr. Share" y "Valor de conv." para poder calcular la oportunidad — sube un archivo, usa el ejemplo, o conecta Google Ads.</p>
       </div>`;
   } else if (s.status === 'loading') {
     body = `
@@ -3144,6 +3302,17 @@ function bindEvents() {
     render();
   });
 
+  const oppApiAccount = document.getElementById('opp-api-account');
+  if (oppApiAccount) oppApiAccount.addEventListener('change', (e) => { state.opportunity.api.accountId = e.target.value; });
+  const oppApiAccountManual = document.getElementById('opp-api-account-manual');
+  if (oppApiAccountManual) oppApiAccountManual.addEventListener('input', (e) => { state.opportunity.api.accountIdManual = e.target.value; });
+  const oppApiDateFrom = document.getElementById('opp-api-date-from');
+  if (oppApiDateFrom) oppApiDateFrom.addEventListener('change', (e) => { state.opportunity.api.dateFrom = e.target.value; });
+  const oppApiDateTo = document.getElementById('opp-api-date-to');
+  if (oppApiDateTo) oppApiDateTo.addEventListener('change', (e) => { state.opportunity.api.dateTo = e.target.value; });
+  const oppApiOnlyActive = document.getElementById('opp-api-only-active');
+  if (oppApiOnlyActive) oppApiOnlyActive.addEventListener('change', (e) => { state.opportunity.api.onlyActive = e.target.checked; });
+
   document.querySelectorAll('[data-opp-sort]').forEach((th) => {
     th.addEventListener('click', () => {
       const key = th.dataset.oppSort;
@@ -3391,6 +3560,15 @@ function handleAction(action) {
       setTimeout(() => runOpportunityAnalysis(engine.SAMPLE_CAMPAIGN_CSV_OPPORTUNITY, 'sample_data_oportunidad.csv'), 250);
       break;
     }
+    case 'opp-source-file': state.opportunity.source = 'file'; render(); break;
+    case 'opp-source-api': {
+      state.opportunity.source = 'api';
+      ensureOpportunityGoogleAdsStatusLoaded();
+      render();
+      break;
+    }
+    case 'opp-api-load-accounts': loadOpportunityGoogleAdsAccounts(); break;
+    case 'opp-api-fetch': fetchOpportunityGoogleAdsCampaigns(); break;
 
     case 'forecast-demo': {
       state.forecast.status = 'loading'; state.forecast.error = null; state.forecast.fileName = 'ingresos_ejemplo.csv';

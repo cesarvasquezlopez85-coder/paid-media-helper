@@ -148,6 +148,8 @@ El parser de campañas (Función 1) ahora reconoce dos columnas nuevas del expor
 
 Verificada con datos sintéticos y con el archivo real de Estelar: en ese archivo, solo las campañas Performance Max (que sí traen Search Impr. Share y Search Lost IS) entran al cálculo — la campaña Demand Gen, que no trae esas columnas, queda correctamente excluida en vez de mostrar un número inventado. Pendiente: probar con más cuentas reales, especialmente con más de una campaña limitada por presupuesto a la vez y con más de un hotel.
 
+**Conexión con la API de Google Ads (2026-07-29):** cuarta y última función con el toggle "Subir archivo" / "Conectar Google Ads" — completa la integración iniciada en Rendimiento. Mismo patrón: selector de cuenta, rango de fechas, checkbox "Solo campañas activas". Sin cambios de backend, reutiliza `fetch_campaign_rows()` y `loadCampaignReportFromApi()` que ya existían. Verificado en modo simulado de punta a punta: el embudo, la gráfica de Impression Share y la tabla de acción calculan igual que con un CSV, incluida la campaña Performance Max con sus datos reales de Impression Share.
+
 ### Función 7 — Proyección de ventas (nueva, 2026-07-27)
 
 Sección para proyectar ingresos futuros del hotel, a pedido de cesar. A diferencia de las otras seis funciones, no parte de un export de Google Ads — necesita un histórico mensual de ingresos reales del hotel (típicamente del PMS/sistema de reservas), con mínimo 12 meses y, idealmente, 24+.
@@ -217,7 +219,7 @@ En ambos casos, la app pide iniciar sesión o crear cuenta antes de dejar entrar
 6. Probar la Función 6 (Oportunidad de ingresos) con más cuentas reales — ya validada con Estelar, falta confirmar con cuentas de más de una campaña limitada por presupuesto y más de un hotel.
 7. Probar la Función 7 (Proyección de ventas) con histórico real de un hotel, y validar con cesar si el margen de error (MAPE) es aceptable para planear presupuesto.
 8. Probar la escritura de negativos (Función 2) contra una cuenta real por primera vez — empezando por vista previa (`validateOnly`) en una campaña de bajo riesgo antes de confirmar cualquier subida real.
-9. Extender la conexión con la API de Google Ads (toggle archivo/API) a Oportunidad de ingresos — ya está en Rendimiento, Negativización y Comparar periodos (2026-07-29).
+9. ~~Extender la conexión con la API de Google Ads a todas las funciones de campañas~~ — completado 2026-07-29 (Rendimiento, Negativización, Comparar periodos, Oportunidad de ingresos).
 10. Decidir si el registro de usuarios sigue abierto o pasa a altas manuales, ahora que la app es alcanzable por internet.
 11. Comprar y conectar un dominio propio para reemplazar el de Railway.
 
