@@ -697,20 +697,28 @@ export function loadSearchTermsFromApi(apiRows) {
     const campaignId = r.campaign_id != null ? String(r.campaign_id) : null;
     const key = `${term}::${campaignId}`;
     const existing = byKey.get(key);
+    // r.cost === null → categoría de Performance Max (campaign_search_term_insight
+    // no trae costo por categoría, a diferencia de un término Search real).
+    // cost_na queda en true si CUALQUIER fila que aportó a este término no
+    // traía costo, para que la interfaz muestre "N/D" en vez de un $0.00
+    // que insinuaría que ese término no costó nada.
     if (existing) {
       existing.clicks += Number(r.clicks) || 0;
       existing.impr += Number(r.impr) || 0;
-      existing.cost += Number(r.cost) || 0;
+      if (r.cost == null) { existing.cost_na = true; } else { existing.cost += Number(r.cost) || 0; }
       existing.conversions += Number(r.conversions) || 0;
+      if (r.is_category) existing.is_category = true;
     } else {
       byKey.set(key, {
         term,
         clicks: Number(r.clicks) || 0,
         impr: Number(r.impr) || 0,
-        cost: Number(r.cost) || 0,
+        cost: r.cost == null ? 0 : Number(r.cost) || 0,
+        cost_na: r.cost == null,
         conversions: Number(r.conversions) || 0,
         campaign_id: campaignId,
         campaign_name: r.campaign_name || 'N/D',
+        is_category: !!r.is_category,
       });
     }
   }

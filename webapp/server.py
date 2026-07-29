@@ -415,7 +415,8 @@ class Handler(SimpleHTTPRequestHandler):
         date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
         if not google_ads_client.is_configured():
-            self._send_json(200, {"rows": google_ads_client.simulated_search_terms(), "simulated": True})
+            rows = google_ads_client.simulated_search_terms() + google_ads_client.simulated_pmax_search_term_insights()
+            self._send_json(200, {"rows": rows, "simulated": True})
             return
 
         if not customer_id.isdigit():
@@ -427,9 +428,20 @@ class Handler(SimpleHTTPRequestHandler):
 
         try:
             rows = google_ads_client.fetch_search_terms(customer_id, date_from, date_to)
-            self._send_json(200, {"rows": rows, "simulated": False})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_json(502, {"error": str(e)})
+            return
+
+        # Categorías de Performance Max — recurso distinto (ver
+        # fetch_pmax_search_term_insights), no cuentas sin campañas PMax lo
+        # necesitan; si falla, no debe tumbar el reporte de términos Search
+        # que sí funcionó.
+        try:
+            rows = rows + google_ads_client.fetch_pmax_search_term_insights(customer_id, date_from, date_to)
+        except Exception:
+            pass
+
+        self._send_json(200, {"rows": rows, "simulated": False})
 
     def _handle_google_ads_campaign_list(self, query):
         # Listado liviano de TODAS las campañas activas de la cuenta (no

@@ -327,6 +327,56 @@ def fetch_search_terms(customer_id, date_from, date_to):
     return rows
 
 
+def fetch_pmax_search_term_insights(customer_id, date_from, date_to):
+    """Categorías de búsqueda para campañas Performance Max. Confirmado
+    contra una cuenta real (2026-07-29): search_term_view devuelve 0 filas
+    para PMax vía API aunque la UI de Google Ads sí muestre términos — esos
+    datos viven en un recurso distinto, campaign_search_term_insight, que
+    agrupa búsquedas parecidas bajo una categoría representativa en vez de
+    traer el término literal exacto (para búsquedas comunes suele coincidir
+    con el término real; para long-tail, Google las agrupa sin desglosar).
+    metrics.cost_micros no es un campo soportado por este recurso (error
+    PROHIBITED_METRIC_IN_SELECT_OR_WHERE_CLAUSE si se pide) — el costo por
+    categoría no está disponible, a diferencia del costo por término real
+    que sí trae fetch_search_terms(). La categoría con category_label vacío
+    es el balde "(otros)" de búsquedas sin categorizar y se descarta, porque
+    no corresponde a un texto que se pueda subir como negativo."""
+    query = f"""
+        SELECT
+          campaign_search_term_insight.campaign_id,
+          campaign_search_term_insight.category_label,
+          campaign.name,
+          metrics.clicks,
+          metrics.impressions,
+          metrics.conversions
+        FROM campaign_search_term_insight
+        WHERE segments.date BETWEEN '{date_from}' AND '{date_to}'
+          AND campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+    """
+    results = _search(customer_id, query)
+    rows = []
+    for r in results:
+        insight = r.get("campaignSearchTermInsight", {})
+        label = insight.get("categoryLabel") or ""
+        if not label:
+            continue
+        campaign = r.get("campaign", {})
+        metrics = r.get("metrics", {})
+        rows.append({
+            "term": label,
+            "campaign_id": str(insight.get("campaignId")) if insight.get("campaignId") is not None else None,
+            "campaign_name": campaign.get("name") or "(sin nombre)",
+            "ad_group_id": None,
+            "ad_group_name": None,
+            "clicks": _int_or_none(metrics.get("clicks")) or 0,
+            "impr": _int_or_none(metrics.get("impressions")) or 0,
+            "cost": None,
+            "conversions": _float_or_none(metrics.get("conversions")) or 0,
+            "is_category": True,
+        })
+    return rows
+
+
 def fetch_account_campaigns(customer_id, only_active=True):
     """Lista liviana de campañas de la cuenta (id + nombre), de TODOS los
     tipos — a diferencia de fetch_search_terms, que solo puede traer
@@ -452,6 +502,22 @@ SIMULATED_SEARCH_TERMS = [
 
 def simulated_search_terms():
     return SIMULATED_SEARCH_TERMS
+
+
+# Categorías de búsqueda simuladas para la campaña PMax ("1111111103") —
+# mismo formato que fetch_pmax_search_term_insights: sin costo (no
+# disponible en ese recurso real) y con is_category=True. Incluye un
+# competidor de bajo riesgo para poder probar el flujo de negativización
+# igual que se validó contra la cuenta real (2026-07-29).
+SIMULATED_PMAX_SEARCH_TERM_INSIGHTS = [
+    {"term": "hotel estelar corporativo bogota", "campaign_id": "1111111103", "campaign_name": "Estelar Hoteles - CO:es - PMAX Corpo", "ad_group_id": None, "ad_group_name": None, "clicks": 210, "impr": 5600, "cost": None, "conversions": 18.4, "is_category": True},
+    {"term": "hoteles para eventos empresariales bogota", "campaign_id": "1111111103", "campaign_name": "Estelar Hoteles - CO:es - PMAX Corpo", "ad_group_id": None, "ad_group_name": None, "clicks": 95, "impr": 3100, "cost": None, "conversions": 6.1, "is_category": True},
+    {"term": "hotel tequendama bogota", "campaign_id": "1111111103", "campaign_name": "Estelar Hoteles - CO:es - PMAX Corpo", "ad_group_id": None, "ad_group_name": None, "clicks": 14, "impr": 240, "cost": None, "conversions": 0, "is_category": True},
+]
+
+
+def simulated_pmax_search_term_insights():
+    return SIMULATED_PMAX_SEARCH_TERM_INSIGHTS
 
 
 # Listado de TODAS las campañas activas de la cuenta simulada (no solo las

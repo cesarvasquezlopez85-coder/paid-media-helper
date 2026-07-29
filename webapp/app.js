@@ -1907,14 +1907,15 @@ function renderNegReady() {
     .sort((a, b) => (sortKeyFn(a) > sortKeyFn(b) ? 1 : sortKeyFn(a) < sortKeyFn(b) ? -1 : 0) * sortDirMul);
   const revisarAll = rows.filter((r) => r.clasificacion === 'revisar').sort((a, b) => b.cost - a.cost);
 
+  const hasPmaxCategory = rows.some((r) => r.is_category);
   const termRowHtml = (r, withCheckbox) => `
     <tr>
       ${withCheckbox ? `<td><input type="checkbox" class="neg-push-checkbox" data-key="${escapeHtml(`${r.term}::${r.campaign_id}`)}" ${s.push.selected.has(`${r.term}::${r.campaign_id}`) ? 'checked' : ''} /></td>` : ''}
-      <td>${escapeHtml(r.term)}</td>
+      <td>${escapeHtml(r.term)}${r.is_category ? ` <span class="delta-badge neutral" title="Categoría de búsqueda de Performance Max — Google agrupa búsquedas parecidas bajo esta etiqueta en vez de exponer el término literal exacto.">categoría PMax</span>` : ''}</td>
       ${hasCampaign ? `<td>${escapeHtml(r.campaign_name || 'N/D')}</td>` : ''}
       <td>${fmtInt(r.clicks)}</td>
       <td>${fmtInt(r.impr)}</td>
-      <td>${fmtMoney(r.cost)}</td>
+      <td>${r.cost_na ? 'N/D' : fmtMoney(r.cost)}</td>
       <td>${fmtInt(r.conversions || 0)}</td>
     </tr>`;
 
@@ -2010,6 +2011,7 @@ function renderNegReady() {
     <p class="footnote">
       El mecanismo compara texto contra los términos núcleo y las excepciones definidas — no usa un modelo de lenguaje por término.
       Solo detecta la ambigüedad anticipada como excepción; nunca subas "candidatos a negativo" a Google Ads sin revisión humana.
+      ${hasPmaxCategory ? ' Los términos marcados "categoría PMax" vienen de campañas Performance Max: Google no expone el texto exacto de búsqueda para este tipo de campaña vía API (ni en la interfaz), solo categorías que agrupan búsquedas parecidas — el costo por categoría tampoco está disponible (columna "N/D"), así que el ahorro estimado de arriba no lo incluye. La escritura de negativos sí está confirmada contra una cuenta real para Performance Max, igual que en Search.' : ''}
     </p>
   `;
 }
@@ -3192,7 +3194,7 @@ function handleAction(action) {
       const hasCampaign = state.neg.source === 'api';
       const rows = getNegFilteredRows().filter((r) => r.clasificacion === 'negativizar').sort((a, b) => b.cost - a.cost);
       const header = ['Término', ...(hasCampaign ? ['Campaña'] : []), 'Clics', 'Impresiones', 'Costo', 'Conversiones'];
-      const data = [header, ...rows.map((r) => [r.term, ...(hasCampaign ? [r.campaign_name || 'N/D'] : []), r.clicks, r.impr, r.cost.toFixed(2), r.conversions || 0])];
+      const data = [header, ...rows.map((r) => [r.term, ...(hasCampaign ? [r.campaign_name || 'N/D'] : []), r.clicks, r.impr, r.cost_na ? 'N/D' : r.cost.toFixed(2), r.conversions || 0])];
       engine.downloadCsv('negativos_candidatos.csv', data);
       break;
     }
@@ -3200,7 +3202,7 @@ function handleAction(action) {
       const hasCampaign = state.neg.source === 'api';
       const rows = getNegFilteredRows().filter((r) => r.clasificacion === 'revisar').sort((a, b) => b.cost - a.cost);
       const header = ['Término', ...(hasCampaign ? ['Campaña'] : []), 'Clics', 'Impresiones', 'Costo', 'Conversiones'];
-      const data = [header, ...rows.map((r) => [r.term, ...(hasCampaign ? [r.campaign_name || 'N/D'] : []), r.clicks, r.impr, r.cost.toFixed(2), r.conversions || 0])];
+      const data = [header, ...rows.map((r) => [r.term, ...(hasCampaign ? [r.campaign_name || 'N/D'] : []), r.clicks, r.impr, r.cost_na ? 'N/D' : r.cost.toFixed(2), r.conversions || 0])];
       engine.downloadCsv('negativos_revisar.csv', data);
       break;
     }
