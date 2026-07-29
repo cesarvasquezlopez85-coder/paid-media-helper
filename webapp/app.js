@@ -337,13 +337,15 @@ function renderRendApiPanel() {
       <input type="text" id="rend-api-account-manual" value="${escapeHtml(a.accountIdManual)}" placeholder="ej. 6862893390" style="width:160px" />
       <p class="field-hint">Si escribes un ID aquí, se usa este en vez del seleccionado arriba — útil si ya lo tienes copiado y no quieres buscarlo en la lista.</p>
     </div>
-    <div class="field">
-      <label>Desde</label>
-      <input type="date" id="rend-api-date-from" value="${escapeHtml(a.dateFrom)}" />
-    </div>
-    <div class="field">
-      <label>Hasta</label>
-      <input type="date" id="rend-api-date-to" value="${escapeHtml(a.dateTo)}" />
+    <div style="display:flex;gap:24px;flex-wrap:nowrap">
+      <div class="field">
+        <label>Desde</label>
+        <input type="date" id="rend-api-date-from" value="${escapeHtml(a.dateFrom)}" />
+      </div>
+      <div class="field">
+        <label>Hasta</label>
+        <input type="date" id="rend-api-date-to" value="${escapeHtml(a.dateTo)}" />
+      </div>
     </div>
     <div class="field">
       <label style="display:flex;align-items:center;gap:8px;font-weight:400">
@@ -1809,13 +1811,15 @@ function renderNegApiPanel() {
       <label>...o escribe el ID de la cuenta</label>
       <input type="text" id="neg-api-account-manual" value="${escapeHtml(a.accountIdManual)}" placeholder="ej. 6862893390" style="width:160px" />
     </div>
-    <div class="field">
-      <label>Desde</label>
-      <input type="date" id="neg-api-date-from" value="${escapeHtml(a.dateFrom)}" />
-    </div>
-    <div class="field">
-      <label>Hasta</label>
-      <input type="date" id="neg-api-date-to" value="${escapeHtml(a.dateTo)}" />
+    <div style="display:flex;gap:24px;flex-wrap:nowrap">
+      <div class="field">
+        <label>Desde</label>
+        <input type="date" id="neg-api-date-from" value="${escapeHtml(a.dateFrom)}" />
+      </div>
+      <div class="field">
+        <label>Hasta</label>
+        <input type="date" id="neg-api-date-to" value="${escapeHtml(a.dateTo)}" />
+      </div>
     </div>
     <button class="btn-accent" data-action="neg-api-fetch">Traer términos de Google Ads</button>
     ${a.error ? `<div class="error-panel" style="margin-top:10px"><strong>No se pudo traer el reporte.</strong> ${escapeHtml(a.error)}</div>` : ''}
