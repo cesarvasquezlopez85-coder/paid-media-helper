@@ -1852,6 +1852,24 @@ function renderNegPushPanel() {
   const selectedCount = p.selected.size;
   const candidatesCount = getNegFilteredRows().filter((r) => r.clasificacion === 'negativizar').length;
   const busy = p.status === 'previewing' || p.status === 'pushing';
+  // Lista aparte de los términos marcados — para poder revisarlos de un
+  // vistazo antes de confirmar, sin tener que buscarlos entre todos los
+  // candidatos de la tabla de arriba. Se arma contra s.rows (no filtrado
+  // por campaña) porque las claves seleccionadas son term::campaign_id.
+  const selectedRows = (s.rows || []).filter((r) => p.selected.has(`${r.term}::${r.campaign_id}`));
+
+  const selectedListHtml = selectedCount > 0 ? `
+    <div class="table-scroll" style="max-height:200px;border:1px solid var(--color-border);border-radius:var(--radius-sm);margin-bottom:12px">
+      <table>
+        <thead><tr><th>Término seleccionado</th><th>Campaña</th><th>Costo</th></tr></thead>
+        <tbody>${selectedRows.map((r) => `
+          <tr>
+            <td>${escapeHtml(r.term)}${r.is_category ? ' <span class="delta-badge neutral">categoría PMax</span>' : ''}</td>
+            <td>${escapeHtml(r.campaign_name || 'N/D')}</td>
+            <td>${r.cost_na ? 'N/D' : fmtMoney(r.cost)}</td>
+          </tr>`).join('')}</tbody>
+      </table>
+    </div>` : '';
 
   return `
     <div class="card table-panel" style="margin-bottom:20px">
@@ -1862,6 +1880,8 @@ function renderNegPushPanel() {
         <button class="btn-outline sm" data-action="neg-push-select-none">Deseleccionar todos</button>
         <span style="font-size:12.5px;color:var(--color-text-muted)">${selectedCount} seleccionado${selectedCount === 1 ? '' : 's'}</span>
       </div>
+
+      ${selectedListHtml}
 
       ${p.status === 'idle' || p.status === 'error' ? `
         <button class="btn-accent" data-action="neg-push-preview" ${selectedCount === 0 || busy ? 'disabled' : ''}>Vista previa</button>
