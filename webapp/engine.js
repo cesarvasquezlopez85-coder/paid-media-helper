@@ -423,6 +423,7 @@ export function compareSummaries(currentSummary, previousSummary) {
     delta_cost: pctChange(previousSummary.total_cost, currentSummary.total_cost),
     delta_conversions: pctChange(previousSummary.total_conversions, currentSummary.total_conversions),
     delta_cpa: pctChange(previousSummary.avg_cpa_weighted, currentSummary.avg_cpa_weighted),
+    delta_cpa_pct: pctChange(previousSummary.cpa_pct, currentSummary.cpa_pct),
     delta_roas: pctChange(previousSummary.roas, currentSummary.roas),
     delta_conv_value: pctChange(previousSummary.total_conv_value, currentSummary.total_conv_value),
   };

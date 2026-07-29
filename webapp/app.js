@@ -1073,6 +1073,11 @@ function renderComparePage() {
         <div class="stat-value">${currentSummary.total_conv_value != null ? fmtMoney(currentSummary.total_conv_value) : 'N/D'}</div>
         <div class="stat-sub">${deltaBadge(deltas.delta_conv_value, 'good_up')} vs. ${previousSummary.total_conv_value != null ? fmtMoney(previousSummary.total_conv_value) : 'N/D'}</div>
       </div>
+      <div class="card stat-card accent">
+        <div class="stat-label">CPA %</div>
+        <div class="stat-value">${currentSummary.cpa_pct != null ? (currentSummary.cpa_pct * 100).toFixed(1) + '%' : 'N/D'}</div>
+        <div class="stat-sub">${deltaBadge(deltas.delta_cpa_pct, 'good_down')} vs. ${previousSummary.cpa_pct != null ? (previousSummary.cpa_pct * 100).toFixed(1) + '%' : 'N/D'}</div>
+      </div>
     </div>`;
 
   const recsHtml = trendRecs.length
