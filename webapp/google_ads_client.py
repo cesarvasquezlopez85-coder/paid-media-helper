@@ -192,8 +192,12 @@ def fetch_campaign_rows(customer_id, date_from, date_to, only_active=False):
     por defecto trae también las pausadas (todo menos REMOVED), igual que
     un export CSV nativo de Google Ads."""
     status_filter = "campaign.status = 'ENABLED'" if only_active else "campaign.status != 'REMOVED'"
-    query = f"""
+
+    # Consulta principal: todas las campañas, cualquier tipo, con sus
+    # métricas generales — sin los campos de "Search Impr. Share".
+    main_query = f"""
         SELECT
+          campaign.id,
           campaign.name,
           campaign.status,
           campaign.advertising_channel_type,
@@ -207,7 +211,24 @@ def fetch_campaign_rows(customer_id, date_from, date_to, only_active=False):
           metrics.conversions,
           metrics.cost_per_conversion,
           metrics.conversions_from_interactions_rate,
-          metrics.conversions_value,
+          metrics.conversions_value
+        FROM campaign
+        WHERE segments.date BETWEEN '{date_from}' AND '{date_to}'
+          AND {status_filter}
+    """
+    main_results = _search(customer_id, main_query)
+
+    # Segunda consulta, solo para el Impression Share de Search — bug real
+    # reportado por cesar (2026-07-30): pedir metrics.search_impression_share
+    # (y las dos de % perdido) en la MISMA consulta que el resto hace que
+    # Google Ads devuelva solo campañas de Search — Performance Max, Demand
+    # Gen, Display, etc. desaparecían del reporte por completo, aunque sí
+    # tuvieran gasto y conversiones. Separarla en su propia consulta deja
+    # que esos campos sigan aplicando solo a Search (donde tienen sentido),
+    # sin filtrar el resto de las campañas de la cuenta.
+    is_query = f"""
+        SELECT
+          campaign.id,
           metrics.search_budget_lost_impression_share,
           metrics.search_rank_lost_impression_share,
           metrics.search_impression_share
@@ -215,12 +236,23 @@ def fetch_campaign_rows(customer_id, date_from, date_to, only_active=False):
         WHERE segments.date BETWEEN '{date_from}' AND '{date_to}'
           AND {status_filter}
     """
-    results = _search(customer_id, query)
+    is_results = _search(customer_id, is_query)
+    is_by_campaign_id = {}
+    for r in is_results:
+        cid = r.get("campaign", {}).get("id")
+        m = r.get("metrics", {})
+        is_by_campaign_id[cid] = {
+            "lost_is_budget": _float_or_none(m.get("searchBudgetLostImpressionShare")),
+            "lost_is_rank": _float_or_none(m.get("searchRankLostImpressionShare")),
+            "impr_share": _float_or_none(m.get("searchImpressionShare")),
+        }
+
     rows = []
-    for r in results:
+    for r in main_results:
         campaign = r.get("campaign", {})
         budget = r.get("campaignBudget", {})
         metrics = r.get("metrics", {})
+        is_data = is_by_campaign_id.get(campaign.get("id"), {})
         rows.append({
             "campaign": campaign.get("name") or "(sin nombre)",
             "status": campaign.get("status"),
@@ -236,9 +268,9 @@ def fetch_campaign_rows(customer_id, date_from, date_to, only_active=False):
             "cost_per_conv": _micros_to_units(_float_or_none(metrics.get("costPerConversion"))),
             "conv_rate": _float_or_none(metrics.get("conversionsFromInteractionsRate")),
             "conv_value": _float_or_none(metrics.get("conversionsValue")),
-            "lost_is_budget": _float_or_none(metrics.get("searchBudgetLostImpressionShare")),
-            "lost_is_rank": _float_or_none(metrics.get("searchRankLostImpressionShare")),
-            "impr_share": _float_or_none(metrics.get("searchImpressionShare")),
+            "lost_is_budget": is_data.get("lost_is_budget"),
+            "lost_is_rank": is_data.get("lost_is_rank"),
+            "impr_share": is_data.get("impr_share"),
             "cpa_file_pct": None,  # esa columna solo existe en el CSV nativo, no en la API
         })
     return rows
