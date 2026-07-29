@@ -1580,14 +1580,20 @@ function renderOpportunityReady() {
         </select>
       </div>` : '';
 
-  const filterPanel = `
-    <div class="card control-panel align-end">
+  // Mismo criterio que el campo de palabras de marca: en modo API se oculta
+  // y se usa el valor ya guardado (por defecto true, excluir marca), sin
+  // pedírselo al usuario en esa pantalla; en modo archivo sigue visible.
+  const excludeBrandFieldHtml = s.source === 'file' ? `
       <div class="field">
         <label style="display:flex;align-items:center;gap:8px;font-weight:400">
           <input type="checkbox" id="opp-exclude-brand" ${s.excludeBrand ? 'checked' : ''} />
           Excluir campañas de marca (recomendado para un ROAS realista)
         </label>
-      </div>
+      </div>` : '';
+
+  const filterPanel = `
+    <div class="card control-panel align-end">
+      ${excludeBrandFieldHtml}
       ${hotelFieldHtml}
       <div class="field">
         <label>Ver solo esta campaña</label>
