@@ -8,7 +8,16 @@ Hay una función más ya construida — generador de copys de anuncio desde una 
 
 Ya no es solo un prototipo de Streamlit, y ya no corre solo local: existe una implementación web completa (`webapp/`, HTML/CSS/JS + un servidor Python sin dependencias externas) con login por usuario/contraseña, que reproduce el diseño hecho en Claude Design. **Vive en producción en [Railway](https://railway.app)**, en `https://paid-media-helper.up.railway.app`, con auto-deploy desde la rama `main` del repo de GitHub — cualquier cambio que se suba se despliega solo, sin pasos manuales. También se puede correr local con `python3 webapp/server.py` → `http://localhost:8642` — ver "Cómo corre la plataforma" más abajo.
 
-## Estado: siete funciones construidas, seis activas en el menú (Función 3, copys, en pausa para v2)
+## Versión V2 (2026-07-29)
+
+El sidebar de la app ya lo muestra así. El salto de V1 a V2 marca el paso de "solo archivos subidos a mano" a **conexión real con la API de Google Ads**, tanto de lectura como de escritura:
+
+- **Lectura**, en Rendimiento y Negativización: un toggle "Subir archivo" / "Conectar Google Ads" reemplaza la carga manual — se elige la cuenta (con buscador por ID para no perderse entre las 1105 cuentas reales del MCC), el rango de fechas y, en Rendimiento, un checkbox para traer solo campañas activas.
+- **Escritura**, solo en Negativización por ahora: subir palabras clave negativas de verdad a la cuenta, por campaña específica y concordancia exacta — siempre con una vista previa que Google Ads valida sin aplicar el cambio, antes de que el botón de confirmar quede disponible.
+- **Conectada de verdad desde el 2026-07-28** (no solo en modo simulado): la primera prueba contra una cuenta real de la agencia encontró y corrigió varios bugs reales (versión de API retirada, un parámetro no soportado, un nombre de campo equivocado, un filtro que dejaba fuera la mayoría de las cuentas del MCC) — ver el detalle completo en la sección de Función 1 más abajo y en `roadmap.md`.
+- Mientras las credenciales de Google no estén configuradas (o para cualquier cuenta de prueba), todo sigue funcionando en **modo simulado** — mismos botones, mismo flujo, datos de ejemplo en vez de reales.
+
+## Estado: V2 — siete funciones construidas, seis activas en el menú (Función 3, copys, en pausa para v2)
 
 ### Función 1 — Análisis de rendimiento
 
@@ -16,7 +25,7 @@ Sube un CSV/Excel de campañas → calcula CPA, CTR, share de gasto e impression
 
 Umbral de CTR segmentado por tipo de campaña (Fase 1, ya construido): Search se divide en marca (20% mínimo) y genérica (8% mínimo) — quien busca el nombre de la marca casi siempre hace clic, así que un umbral único generaba falsas alertas en marca. Display 1%, Performance Max 3%. Marca se detecta por palabras clave en el nombre de la campaña, configurables por el usuario (por defecto: "marca", "brand", "branded", "brnd" — cubre la convención BRND/GNR del equipo); sin match, o sin la columna "Campaign type" en el archivo, se trata como Search genérica.
 
-El resumen ejecutivo ahora muestra el CPA promedio de cuenta en dos versiones diferenciadas: ponderado por gasto y simple entre campañas (este último es el que usa la alerta de "CPA alto"), para que no se confundan como un solo número.
+El resumen ejecutivo muestra el CPA promedio de cuenta en dos versiones diferenciadas: ponderado por gasto y simple entre campañas, para que no se confundan como un solo número. **Nota:** hasta el 2026-07-28 el simple era el que usaba la alerta de "CPA alto" — ver más abajo el rediseño que cambió esto por CPA %.
 
 **Validada con la primera cuenta real** (Click Clack Bogotá): esa primera carga encontró un bug real — el export nativo de campañas de Google Ads trae 2-3 líneas de título (informe, cuenta, rango de fechas) antes del encabezado real, y la app asumía que la línea 1 ya era el encabezado. El `sample_data.csv` sintético usado hasta entonces no tenía ese preámbulo, así que el caso nunca se había probado. Ya corregido: la app busca la fila de encabezado entre las primeras líneas, igual que ya hacía la Función 2.
 
@@ -29,6 +38,16 @@ El resumen ejecutivo ahora muestra el CPA promedio de cuenta en dos versiones di
 **Nuevas tarjetas y filtros (2026-07-13/14):** la tarjeta "Campañas con gasto" se reemplazó por **ROAS** (valor de conversión ÷ gasto, en %, "N/D" si el archivo no trae "Valor de conv."); la tarjeta "CPA promedio · ponderado por gasto" se reemplazó por **Valor de conversión** total; se agregó un **filtro por campaña** para ver el resumen, los gráficos y las recomendaciones de una sola campaña sin volver a subir el archivo.
 
 **Tarjeta CPA % y alerta de "CPA alto" rediseñada por tipo de campaña (2026-07-28):** nueva tarjeta **CPA %** (gasto ÷ valor de conversión, el inverso de ROAS) junto a ROAS, en Vista estándar y Vista densa. A pedido de cesar, esta tarjeta pasó a ser la que determina la alerta de "CPA alto" — que dejó de comparar el CPA en $ contra el promedio simple de la cuenta (un umbral único, sin distinguir tipo de campaña) y ahora usa el CPA %, con un óptimo distinto por tipo de campaña — mismo criterio que ya usaba el umbral de CTR. Óptimos: Search marca 11%, Performance Max 20%, Demand Gen 30%, Display 30%, Search genérica 30%. Solo se evalúa si el archivo trae "Valor de conv."; sin ese dato, la campaña simplemente no se marca. De paso se agregó "Demand Gen" como tipo de campaña reconocido — antes esas campañas caían mal clasificadas como Search por defecto. La tarjeta de CPA en $ pasó a ser solo informativa, ya no dispara la alerta.
+
+**Conexión directa con la API de Google Ads (2026-07-22 en adelante, ver "Versión V2" arriba):** toggle "Subir archivo" / "Conectar Google Ads" en el panel de control — elige la cuenta (selector con buscador, o escribir el ID a mano), el rango de fechas, y un checkbox opcional "Solo campañas activas". El campo de palabras de marca se oculta en este modo (se sigue usando el valor ya guardado, sin pedírselo al usuario en esa pantalla) — sigue siendo necesario para la clasificación marca/genérica, solo que no hace falta mostrarlo cada vez.
+
+Conectada de verdad a una cuenta real desde el 2026-07-28, después de que cesar completara la parte administrativa con Google (proyecto de Cloud, developer token con Basic access aprobado). La primera prueba real encontró y corrigió 4 bugs, ninguno detectable sin una cuenta real:
+1. La versión de la API que se usó al construir (`v18`) ya había sido retirada por Google — actualizada a `v25`.
+2. La consulta de campañas no acepta el parámetro `pageSize` (a diferencia de otras APIs de Google) — corregido.
+3. El nombre de campo `campaign.descriptive_name` no existe para campañas (solo para cuentas) — el correcto es `campaign.name`.
+4. El listado de cuentas solo traía las hijas directas del MCC (nivel 1) — la agencia organiza sus cuentas en sub-MCCs por marca de hotel, así que la mayoría quedaban fuera. Corregido para traer toda la jerarquía: pasó de listar 37 cuentas a **1105**.
+
+Verificado de punta a punta contra la cuenta real de Hotel Neptuno: cuentas, campañas, gasto, conversiones, ROAS y recomendaciones — todo igual que con un CSV subido a mano.
 
 Pendiente: repetir la carga de ambas cuentas y anotar explícitamente si las recomendaciones coinciden con el criterio de cesar, y seguir con el resto de las 3-5 cuentas objetivo de Fase 1.
 
@@ -53,6 +72,8 @@ El caso que validó el mecanismo: "Manzanillo del Mar" es una zona real de Carta
 En modo API, la tabla de candidatos trae una columna "Campaña" y un checkbox por término. El flujo de subida **siempre** pasa primero por una vista previa que Google Ads valida sin aplicar el cambio (`validateOnly`) — el botón "Confirmar y subir" solo se habilita después de una vista previa exitosa, para que nunca haya un solo clic entre seleccionar términos y escribir en la cuenta real. En modo "Subir archivo" (CSV) nada de esto aparece, ese flujo sigue exactamente igual que antes.
 
 Verificado de punta a punta en modo simulado (traer términos → clasificar → seleccionar → vista previa → confirmar). Pendiente: la primera prueba contra una cuenta real, que — como pasó con el resto de la integración — probablemente encuentre algún nombre de campo a ajustar en la consulta de términos o en la subida.
+
+**Filtro "Ver solo esta campaña" en modo API (2026-07-29):** para poder ser específico sobre en qué campaña negativizar en vez de trabajar siempre con toda la cuenta a la vez — filtra los términos, el resumen y la selección de negativos por campaña antes de decidir qué subir. Solo aparece en modo "Conectar Google Ads"; se resetea a "Todas" cada vez que se trae un nuevo reporte.
 
 ### Función 3 — Generador de copys desde URL (construida, oculta del menú — pendiente para v2)
 
@@ -169,6 +190,8 @@ En ambos casos, la app pide iniciar sesión o crear cuenta antes de dejar entrar
 - La Función 5 (Comparar periodos) solo se probó con datos sintéticos — falta validarla con dos exports reales del mismo cliente. Lo mismo aplica al modo "Comparar periodos" de la Función 4 (Bookings).
 - La Función 6 (Oportunidad de ingresos) calcula el presupuesto extra necesario con el ROAS promedio del conjunto de campañas seleccionado — un promedio distorsionado (por ejemplo, por no excluir marca) cambia ese número; el checkbox "Excluir campañas de marca" mitiga esto pero depende de que el usuario lo revise.
 - La Función 7 (Proyección de ventas) solo se probó con un dataset sintético — el índice de temporada se calcula sobre los datos que traiga el archivo, así que con menos de 24 meses de histórico real (o con meses atípicos, ej. una remodelación o un evento puntual) la proyección puede ser menos confiable de lo que sugiere el MAPE del ajuste histórico. No es un modelo estadístico riguroso (no es ARIMA/Holt-Winters) — es tendencia + estacionalidad simple, elegido a propósito por ser explicable.
+- La conexión con la API de Google Ads (Función 1 y 2) solo está construida para Rendimiento y Negativización — Comparar periodos y Oportunidad de ingresos siguen dependiendo de subir un archivo.
+- La **escritura** de negativos hacia Google Ads (Función 2) solo se probó en modo simulado — todavía no se probó la primera vez contra una cuenta real (ni siquiera en vista previa), así que es probable que aparezca algún ajuste de nombre de campo, igual que pasó en cada pieza de la integración de solo lectura.
 
 ## Próximos pasos
 
@@ -179,14 +202,17 @@ En ambos casos, la app pide iniciar sesión o crear cuenta antes de dejar entrar
 5. Probar la Función 5 (Comparar periodos) con dos exports reales del mismo cliente.
 6. Probar la Función 6 (Oportunidad de ingresos) con más cuentas reales — ya validada con Estelar, falta confirmar con cuentas de más de una campaña limitada por presupuesto y más de un hotel.
 7. Probar la Función 7 (Proyección de ventas) con histórico real de un hotel, y validar con cesar si el margen de error (MAPE) es aceptable para planear presupuesto.
-8. Decidir si el registro de usuarios sigue abierto o pasa a altas manuales, ahora que la app es alcanzable por internet.
-9. Comprar y conectar un dominio propio para reemplazar el de Railway.
+8. Probar la escritura de negativos (Función 2) contra una cuenta real por primera vez — empezando por vista previa (`validateOnly`) en una campaña de bajo riesgo antes de confirmar cualquier subida real.
+9. Extender la conexión con la API de Google Ads (toggle archivo/API) a Comparar periodos y Oportunidad de ingresos.
+10. Decidir si el registro de usuarios sigue abierto o pasa a altas manuales, ahora que la app es alcanzable por internet.
+11. Comprar y conectar un dominio propio para reemplazar el de Railway.
 
 ## Archivos del proyecto
 
 | Archivo | Para qué sirve |
 |---|---|
 | `webapp/` | Implementación web completa (HTML/CSS/JS + servidor Python + `Dockerfile`), con login y las siete funciones (seis activas en el menú) — en producción en Railway, o local con `python3 webapp/server.py`. Ver `webapp/README.md` |
+| `webapp/google_ads_client.py` | Cliente de la API de Google Ads (lectura de cuentas/campañas/términos de búsqueda, y escritura de negativos) — solo `urllib`, sin la librería oficial, para no agregar dependencias pip al servidor |
 | `Especificacion_v1_Plataforma_Google_Ads.docx` | Especificación completa de las tres funciones originales de Google Ads: alcance, formato de archivo, mecanismo, arquitectura, riesgos |
 | `app.py` | Interfaz Streamlit con las tres funciones (correr con `streamlit run app.py`) |
 | `analysis.py` | Lógica de la Función 1 (rendimiento), reusable sin la interfaz |
