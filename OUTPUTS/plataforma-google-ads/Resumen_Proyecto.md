@@ -49,6 +49,8 @@ Conectada de verdad a una cuenta real desde el 2026-07-28, después de que cesar
 
 Verificado de punta a punta contra la cuenta real de Hotel Neptuno: cuentas, campañas, gasto, conversiones, ROAS y recomendaciones — todo igual que con un CSV subido a mano.
 
+**Bug real: solo aparecían campañas Search al conectar la API (2026-07-29).** cesar probó contra una cuenta real y reportó que faltaban Performance Max, Demand Gen y Display. Causa: `fetch_campaign_rows` traía las métricas de Impression Share (exclusivas de Search) en la misma consulta GAQL que el resto de campos — comportamiento documentado de Google Ads, combinar esos campos con otros restringe **todo** el resultado a campañas Search, sin avisar. Corregido separando en dos consultas: la principal (sin campos de Impression Share) trae todos los tipos de campaña; la de Impression Share se usa solo como diccionario auxiliar por `campaign.id`, quedando en `None` para las campañas que no aplican.
+
 Pendiente: repetir la carga de ambas cuentas y anotar explícitamente si las recomendaciones coinciden con el criterio de cesar, y seguir con el resto de las 3-5 cuentas objetivo de Fase 1.
 
 ### Función 2 — Negativización de términos de búsqueda
@@ -74,6 +76,8 @@ En modo API, la tabla de candidatos trae una columna "Campaña" y un checkbox po
 Verificado de punta a punta en modo simulado (traer términos → clasificar → seleccionar → vista previa → confirmar). Pendiente: la primera prueba contra una cuenta real, que — como pasó con el resto de la integración — probablemente encuentre algún nombre de campo a ajustar en la consulta de términos o en la subida.
 
 **Filtro "Ver solo esta campaña" en modo API (2026-07-29):** para poder ser específico sobre en qué campaña negativizar en vez de trabajar siempre con toda la cuenta a la vez — filtra los términos, el resumen y la selección de negativos por campaña antes de decidir qué subir. Solo aparece en modo "Conectar Google Ads"; se resetea a "Todas" cada vez que se trae un nuevo reporte.
+
+**Bug real: el filtro solo listaba campañas Search (2026-07-29).** cesar probó con una cuenta real y reportó que, igual que en Rendimiento, solo aparecían campañas Search. La causa acá es distinta a la de Rendimiento (ver Función 1): `search_term_view` es un recurso Search-only por diseño de Google — Performance Max/Demand Gen/Display no generan términos de búsqueda, así que no hay consulta que separar. Se le preguntó a cesar qué esperaba ver en vez de asumir; pidió que el filtro listara **todas** las campañas activas de la cuenta, no solo las que tienen términos. Se agregó un endpoint liviano (`GET /api/google-ads/campaign-list`, función `fetch_account_campaigns()`) que trae `campaign.id`/`campaign.name` de todos los tipos, sin pasar por `search_term_view` — el filtro ahora se arma con ese listado completo. Elegir una campaña sin términos (ej. una PMax) muestra "0 términos" correctamente, sin error. Verificado en modo simulado con 4 campañas activas (2 Search, 1 PMax, 1 Display): las 4 aparecen en el filtro.
 
 ### Función 3 — Generador de copys desde URL (construida, oculta del menú — pendiente para v2)
 

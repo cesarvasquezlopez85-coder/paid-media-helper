@@ -34,6 +34,7 @@ const state = {
       accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
       dateFrom: '', dateTo: '',
       simulated: false, error: null,
+      allCampaigns: [], // {id, name} de TODAS las campañas activas de la cuenta — no solo las que tienen search terms
     },
     // Subida de negativos a Google Ads (solo con source === 'api', necesita
     // campaign_id por término). selected: Set de claves "term::campaign_id".
@@ -1702,19 +1703,27 @@ function renderNegPage() {
   // Filtro por campaña — solo tiene sentido con source==='api', porque un
   // CSV no trae campaign_id/campaign_name por fila. Deja ver solo los
   // términos de una campaña puntual antes de decidir qué subir como negativo.
+  // Lista TODAS las campañas activas de la cuenta (s.api.allCampaigns), no
+  // solo las que aparecen en s.rows — search_term_view solo trae Search, así
+  // que sin esto Performance Max/Demand Gen/Display nunca aparecerían acá
+  // aunque estén activas (se unen las de s.rows por si acaso, ya que
+  // allCampaigns puede fallar en cargar sin tumbar el flujo principal).
   let campaignFilterHtml = '';
-  if (s.source === 'api' && s.status === 'ready' && s.rows && s.rows.length) {
+  if (s.source === 'api' && s.status === 'ready' && s.rows) {
     const campaignsById = new Map();
-    s.rows.forEach((r) => { if (r.campaign_id) campaignsById.set(r.campaign_id, r.campaign_name || r.campaign_id); });
+    (s.api.allCampaigns || []).forEach((c) => { if (c.id) campaignsById.set(c.id, c.name || c.id); });
+    s.rows.forEach((r) => { if (r.campaign_id && !campaignsById.has(r.campaign_id)) campaignsById.set(r.campaign_id, r.campaign_name || r.campaign_id); });
     const campaigns = [...campaignsById.entries()].sort((a, b) => a[1].localeCompare(b[1]));
-    const options = ['<option value="all">Todas las campañas</option>']
-      .concat(campaigns.map(([id, name]) => `<option value="${escapeHtml(id)}" ${s.campaignFilter === id ? 'selected' : ''}>${escapeHtml(name)}</option>`))
-      .join('');
-    campaignFilterHtml = `
-      <div class="field">
-        <label>Ver solo esta campaña</label>
-        <select id="neg-campaign-filter" style="width:320px">${options}</select>
-      </div>`;
+    if (campaigns.length) {
+      const options = ['<option value="all">Todas las campañas</option>']
+        .concat(campaigns.map(([id, name]) => `<option value="${escapeHtml(id)}" ${s.campaignFilter === id ? 'selected' : ''}>${escapeHtml(name)}</option>`))
+        .join('');
+      campaignFilterHtml = `
+        <div class="field">
+          <label>Ver solo esta campaña</label>
+          <select id="neg-campaign-filter" style="width:320px">${options}</select>
+        </div>`;
+    }
   }
 
   return `
@@ -2079,16 +2088,26 @@ function fetchGoogleAdsSearchTerms() {
   render();
 
   const params = new URLSearchParams({ customer_id: customerId || '', date_from: a.dateFrom, date_to: a.dateTo });
-  fetch(`/api/google-ads/search-terms?${params.toString()}`)
-    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
-    .then(({ ok, data }) => {
-      if (!ok) throw new Error(data.error || 'Error desconocido.');
-      a.simulated = !!data.simulated;
+  const campaignListParams = new URLSearchParams({ customer_id: customerId || '' });
+
+  // Se traen en paralelo: los términos de búsqueda (solo Search, por diseño
+  // de Google) y el listado completo de campañas activas (todos los tipos)
+  // — el segundo alimenta el filtro por campaña para que también se puedan
+  // ver campañas Performance Max / Demand Gen / Display aunque no tengan
+  // términos que negativizar.
+  Promise.all([
+    fetch(`/api/google-ads/search-terms?${params.toString()}`).then((r) => r.json().then((data) => ({ ok: r.ok, data }))),
+    fetch(`/api/google-ads/campaign-list?${campaignListParams.toString()}`).then((r) => r.json().then((data) => ({ ok: r.ok, data }))),
+  ])
+    .then(([termsResp, campaignsResp]) => {
+      if (!termsResp.ok) throw new Error(termsResp.data.error || 'Error desconocido.');
+      a.simulated = !!termsResp.data.simulated;
+      a.allCampaigns = campaignsResp.ok ? (campaignsResp.data.campaigns || []) : [];
       const account = a.accounts.find((acc) => acc.id === customerId);
       const label = a.simulated
         ? `Google Ads (simulado) — ${a.dateFrom} a ${a.dateTo}`
         : `Google Ads — ${account ? account.name : customerId} — ${a.dateFrom} a ${a.dateTo}`;
-      runNegAnalysisFromApiRows(data.rows || [], label);
+      runNegAnalysisFromApiRows(termsResp.data.rows || [], label);
     })
     .catch((err) => {
       a.error = err.message || String(err);

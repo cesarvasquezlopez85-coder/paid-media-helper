@@ -173,6 +173,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_search_terms(parse_qs(parsed.query))
             return
 
+        if path == "/api/google-ads/campaign-list":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_campaign_list(parse_qs(parsed.query))
+            return
+
         filename = STATIC_FILES.get(path)
         if filename is None:
             self.send_error(404, "No encontrado")
@@ -422,6 +428,27 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             rows = google_ads_client.fetch_search_terms(customer_id, date_from, date_to)
             self._send_json(200, {"rows": rows, "simulated": False})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_json(502, {"error": str(e)})
+
+    def _handle_google_ads_campaign_list(self, query):
+        # Listado liviano de TODAS las campañas activas de la cuenta (no
+        # solo las que tienen search terms) — search_term_view es Search-only
+        # por diseño de Google, así que este endpoint es la única forma de
+        # ver campañas Performance Max / Demand Gen / Display en Negativización.
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, {"campaigns": google_ads_client.simulated_account_campaigns(), "simulated": True})
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+
+        try:
+            campaigns = google_ads_client.fetch_account_campaigns(customer_id)
+            self._send_json(200, {"campaigns": campaigns, "simulated": False})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_json(502, {"error": str(e)})
 

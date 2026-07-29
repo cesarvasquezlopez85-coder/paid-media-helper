@@ -327,6 +327,30 @@ def fetch_search_terms(customer_id, date_from, date_to):
     return rows
 
 
+def fetch_account_campaigns(customer_id, only_active=True):
+    """Lista liviana de campañas de la cuenta (id + nombre), de TODOS los
+    tipos — a diferencia de fetch_search_terms, que solo puede traer
+    campañas Search porque search_term_view es un recurso Search-only por
+    diseño de Google. Se usa para poblar selectores donde hace falta ver
+    todas las campañas activas aunque no tengan términos de búsqueda
+    (ej. filtro de campaña en Negativización)."""
+    status_filter = "campaign.status = 'ENABLED'" if only_active else "campaign.status != 'REMOVED'"
+    query = f"""
+        SELECT campaign.id, campaign.name
+        FROM campaign
+        WHERE {status_filter}
+    """
+    results = _search(customer_id, query)
+    campaigns = []
+    for r in results:
+        c = r.get("campaign", {})
+        campaigns.append({
+            "id": str(c.get("id")) if c.get("id") is not None else None,
+            "name": c.get("name") or "(sin nombre)",
+        })
+    return campaigns
+
+
 def push_negative_keywords(customer_id, items, validate_only=True):
     """Sube palabras clave negativas de concordancia exacta a nivel de
     campaña. items: lista de {"campaign_id": ..., "term": ...}.
@@ -428,6 +452,22 @@ SIMULATED_SEARCH_TERMS = [
 
 def simulated_search_terms():
     return SIMULATED_SEARCH_TERMS
+
+
+# Listado de TODAS las campañas activas de la cuenta simulada (no solo las
+# que tienen search terms) — PMAX Corpo y Display Remarketing no generan
+# search_term_view por ser no-Search, pero deben poder elegirse en el filtro
+# de campaña de Negativización igual que en una cuenta real.
+SIMULATED_ACCOUNT_CAMPAIGNS = [
+    {"id": "1111111101", "name": "Estelar Hoteles - CO:es - Search Genérica"},
+    {"id": "1111111102", "name": "Estelar Hoteles - CO:es - Search Marca"},
+    {"id": "1111111103", "name": "Estelar Hoteles - CO:es - PMAX Corpo"},
+    {"id": "1111111104", "name": "Estelar Hoteles - CO:es - Display Remarketing"},
+]
+
+
+def simulated_account_campaigns():
+    return SIMULATED_ACCOUNT_CAMPAIGNS
 
 
 def simulated_push_negative_keywords(items, validate_only=True):
