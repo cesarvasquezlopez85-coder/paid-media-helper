@@ -2992,6 +2992,15 @@ function bindEvents() {
   const negCampaignFilter = document.getElementById('neg-campaign-filter');
   if (negCampaignFilter) negCampaignFilter.addEventListener('change', (e) => {
     state.neg.campaignFilter = e.target.value;
+    // La selección y el estado de subida (idle/preview_ready/done/...) son
+    // de la campaña anterior — sin este reset, después de subir negativos
+    // en una campaña y cambiar a otra, el botón "Vista previa" se quedaba
+    // oculto porque el estado seguía en "done" en vez de volver a "idle".
+    state.neg.push.selected = new Set();
+    state.neg.push.status = 'idle';
+    state.neg.push.preview = null;
+    state.neg.push.result = null;
+    state.neg.push.error = null;
     render();
   });
 
