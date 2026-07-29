@@ -1104,13 +1104,13 @@ function renderComparePage() {
     : `<div class="ok-panel">No se detectaron caídas ni subidas fuertes entre los dos periodos con los umbrales actuales.</div>`;
 
   const tableRows = matched.map((m) => {
-    const cpaText = !Number.isNaN(m.current.cpa) ? fmtMoney(m.current.cpa) : 'N/D';
+    const cpaPctText = !Number.isNaN(m.current.cpa_pct) ? (m.current.cpa_pct * 100).toFixed(1) + '%' : 'N/D';
     const ctrText = !Number.isNaN(m.current.ctr) ? (m.current.ctr * 100).toFixed(2) + '%' : 'N/D';
     return `
       <tr>
         <td>${escapeHtml(m.campaign)}</td>
         <td>${fmtMoney(m.current.cost)} ${deltaBadge(m.delta_cost, 'neutral')}</td>
-        <td>${cpaText} ${deltaBadge(m.delta_cpa, 'good_down')}</td>
+        <td>${cpaPctText} ${deltaBadge(m.delta_cpa_pct, 'good_down')}</td>
         <td>${ctrText} ${deltaBadge(m.delta_ctr, 'good_up')}</td>
         <td>${fmtInt(m.current.conversions)} ${deltaBadge(m.delta_conversions, 'good_up')}</td>
       </tr>`;
@@ -1142,7 +1142,7 @@ function renderComparePage() {
       <h3 class="dense-chart-title">Campañas comparadas (${matched.length})</h3>
       <div style="overflow-x:auto">
         <table>
-          <thead><tr><th>Campaña</th><th>Gasto</th><th>CPA</th><th>CTR</th><th>Conversiones</th></tr></thead>
+          <thead><tr><th>Campaña</th><th>Gasto</th><th>CPA %</th><th>CTR</th><th>Conversiones</th></tr></thead>
           <tbody>${tableRows}</tbody>
         </table>
       </div>

@@ -271,6 +271,7 @@ export function computeMetrics(rows) {
     if (Number.isNaN(row.ctr) && row.impressions > 0) row.ctr = row.clicks / row.impressions;
     row.share_of_spend = totalCost > 0 ? (Number.isNaN(row.cost) ? 0 : row.cost) / totalCost : 0;
     row.roas = !Number.isNaN(row.conv_value) && row.cost > 0 ? row.conv_value / row.cost : NaN;
+    row.cpa_pct = !Number.isNaN(row.conv_value) && row.conv_value > 0 ? row.cost / row.conv_value : NaN;
     return row;
   });
 }
@@ -402,6 +403,7 @@ export function compareCampaignPeriods(currentRows, previousRows) {
         previous: prev,
         delta_cost: pctChange(prev.cost, curr.cost),
         delta_cpa: pctChange(prev.cpa, curr.cpa),
+        delta_cpa_pct: pctChange(prev.cpa_pct, curr.cpa_pct),
         delta_ctr: pctChange(prev.ctr, curr.ctr),
         delta_conversions: pctChange(prev.conversions, curr.conversions),
         delta_roas: pctChange(prev.roas, curr.roas),
