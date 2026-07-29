@@ -167,6 +167,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_campaigns(parse_qs(parsed.query))
             return
 
+        if path == "/api/google-ads/search-terms":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_search_terms(parse_qs(parsed.query))
+            return
+
         filename = STATIC_FILES.get(path)
         if filename is None:
             self.send_error(404, "No encontrado")
@@ -196,6 +202,10 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_login(payload)
         elif path == "/api/logout":
             self._handle_logout()
+        elif path == "/api/google-ads/negative-keywords":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_negative_keywords(payload)
         else:
             self.send_error(404, "No encontrado")
 
@@ -389,6 +399,62 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             rows = google_ads_client.fetch_campaign_rows(customer_id, date_from, date_to, only_active)
             self._send_json(200, {"rows": rows, "simulated": False})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_json(502, {"error": str(e)})
+
+    def _handle_google_ads_search_terms(self, query):
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        date_from = (query.get("date_from") or [""])[0].strip()
+        date_to = (query.get("date_to") or [""])[0].strip()
+        date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, {"rows": google_ads_client.simulated_search_terms(), "simulated": True})
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not date_pattern.match(date_from) or not date_pattern.match(date_to):
+            self._send_json(400, {"error": "date_from y date_to deben tener formato AAAA-MM-DD."})
+            return
+
+        try:
+            rows = google_ads_client.fetch_search_terms(customer_id, date_from, date_to)
+            self._send_json(200, {"rows": rows, "simulated": False})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_json(502, {"error": str(e)})
+
+    # Escritura real sobre la cuenta del cliente — a diferencia de todos los
+    # demás endpoints de /api/google-ads/, este modifica Google Ads. Por
+    # default (validate_only ausente o true) SIEMPRE valida sin aplicar; el
+    # llamador tiene que pedir explícitamente validate_only=false para que
+    # el cambio quede escrito de verdad.
+    def _handle_google_ads_negative_keywords(self, payload):
+        customer_id = str(payload.get("customer_id") or "").strip()
+        items = payload.get("items") or []
+        validate_only = payload.get("validate_only", True) is not False
+
+        if not isinstance(items, list) or not items:
+            self._send_json(400, {"error": "Falta la lista de términos a subir."})
+            return
+        for item in items:
+            if not isinstance(item, dict) or not item.get("campaign_id") or not item.get("term"):
+                self._send_json(400, {"error": "Cada término debe traer campaign_id y term."})
+                return
+
+        if not google_ads_client.is_configured():
+            result = google_ads_client.simulated_push_negative_keywords(items, validate_only)
+            self._send_json(200, result)
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+
+        try:
+            result = google_ads_client.push_negative_keywords(customer_id, items, validate_only)
+            self._send_json(200, result)
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_json(502, {"error": str(e)})
 

@@ -87,14 +87,8 @@ def _get_access_token():
 def _search(customer_id, query):
     """Ejecuta una consulta GAQL contra `customer_id` y junta todas las
     páginas de resultados de googleAds:search."""
-    token = _get_access_token()
     url = f"{BASE_URL}/customers/{customer_id}/googleAds:search"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "developer-token": os.environ["GOOGLE_ADS_DEVELOPER_TOKEN"],
-        "login-customer-id": os.environ["GOOGLE_ADS_LOGIN_CUSTOMER_ID"],
-        "Content-Type": "application/json",
-    }
+    headers = _auth_headers()
     results = []
     page_token = None
     while True:
@@ -121,6 +115,15 @@ def _search(customer_id, query):
         if not page_token:
             break
     return results
+
+
+def _auth_headers():
+    return {
+        "Authorization": f"Bearer {_get_access_token()}",
+        "developer-token": os.environ["GOOGLE_ADS_DEVELOPER_TOKEN"],
+        "login-customer-id": os.environ["GOOGLE_ADS_LOGIN_CUSTOMER_ID"],
+        "Content-Type": "application/json",
+    }
 
 
 def list_client_accounts():
@@ -242,6 +245,114 @@ def fetch_campaign_rows(customer_id, date_from, date_to, only_active=False):
 
 
 # ---------------------------------------------------------------------------
+# Negativización (Función 2) — leer términos de búsqueda con su campaña, y
+# escribir palabras clave negativas de vuelta a la cuenta real. A diferencia
+# de todo lo anterior en este archivo, fetch_campaign_rows/list_client_
+# accounts, esta última función SÍ escribe en la cuenta del cliente — por
+# eso push_negative_keywords soporta validate_only (vista previa sin aplicar
+# el cambio) y nunca se llama con validate_only=False sin que antes haya
+# pasado una vista previa exitosa desde la interfaz.
+# ---------------------------------------------------------------------------
+
+def fetch_search_terms(customer_id, date_from, date_to):
+    """Términos de búsqueda del rango de fechas, con la campaña (y grupo de
+    anuncios) donde aparecieron — necesario para poder subir el negativo a
+    la campaña correcta. Excluye términos que ya están excluidos (ya son
+    negativos), para no sugerir subir algo que ya se subió."""
+    query = f"""
+        SELECT
+          search_term_view.search_term,
+          campaign.id,
+          campaign.name,
+          ad_group.id,
+          ad_group.name,
+          metrics.clicks,
+          metrics.impressions,
+          metrics.cost_micros,
+          metrics.conversions
+        FROM search_term_view
+        WHERE segments.date BETWEEN '{date_from}' AND '{date_to}'
+          AND search_term_view.status != 'EXCLUDED'
+    """
+    results = _search(customer_id, query)
+    rows = []
+    for r in results:
+        stv = r.get("searchTermView", {})
+        campaign = r.get("campaign", {})
+        ad_group = r.get("adGroup", {})
+        metrics = r.get("metrics", {})
+        rows.append({
+            "term": stv.get("searchTerm") or "",
+            "campaign_id": str(campaign.get("id")) if campaign.get("id") is not None else None,
+            "campaign_name": campaign.get("name") or "(sin nombre)",
+            "ad_group_id": str(ad_group.get("id")) if ad_group.get("id") is not None else None,
+            "ad_group_name": ad_group.get("name"),
+            "clicks": _int_or_none(metrics.get("clicks")) or 0,
+            "impr": _int_or_none(metrics.get("impressions")) or 0,
+            "cost": _micros_to_units(_int_or_none(metrics.get("costMicros"))) or 0,
+            "conversions": _float_or_none(metrics.get("conversions")) or 0,
+        })
+    return rows
+
+
+def push_negative_keywords(customer_id, items, validate_only=True):
+    """Sube palabras clave negativas de concordancia exacta a nivel de
+    campaña. items: lista de {"campaign_id": ..., "term": ...}.
+
+    validate_only=True (vista previa): Google valida la operación sin
+    aplicarla — nada cambia en la cuenta real. Solo con validate_only=False
+    el cambio queda escrito de verdad.
+
+    Usa partialFailure para que un término inválido (ej. ya existe como
+    negativo) no tumbe la subida completa de los demás — cada fallo se
+    reporta por separado en "failed"."""
+    if not items:
+        return {"created": 0, "failed": [], "validate_only": validate_only}
+
+    operations = [{
+        "create": {
+            "campaign": f"customers/{customer_id}/campaigns/{item['campaign_id']}",
+            "negative": True,
+            "keyword": {"text": item["term"], "matchType": "EXACT"},
+        }
+    } for item in items]
+
+    url = f"{BASE_URL}/customers/{customer_id}/campaignCriteria:mutate"
+    body = {"operations": operations, "partialFailure": True, "validateOnly": validate_only}
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Google Ads API respondió {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"No se pudo conectar a la API de Google Ads: {e.reason}") from e
+
+    failed_indices = set()
+    failed_messages = []
+    partial_error = payload.get("partialFailureError")
+    if partial_error:
+        for detail in partial_error.get("details", []):
+            for err in detail.get("errors", []):
+                message = err.get("message", "Error desconocido.")
+                idx = None
+                for el in err.get("location", {}).get("fieldPathElements", []):
+                    if el.get("fieldName") == "operations" and el.get("index") is not None:
+                        idx = el["index"]
+                if idx is not None and idx < len(items):
+                    failed_indices.add(idx)
+                    failed_messages.append(f"\"{items[idx]['term']}\" ({items[idx]['campaign_name']}): {message}" if 'campaign_name' in items[idx] else f"\"{items[idx]['term']}\": {message}")
+                else:
+                    failed_messages.append(message)
+
+    created = len(items) - len(failed_indices)
+    return {"created": created, "failed": failed_messages, "validate_only": validate_only}
+
+
+# ---------------------------------------------------------------------------
 # Datos simulados — mismas cuentas/campañas "de mentira" para poder construir
 # y probar todo el flujo (selector de cuenta, rango de fechas, tabla,
 # recomendaciones) mientras Google aprueba el developer token real. Se usan
@@ -266,3 +377,26 @@ def simulated_campaign_rows(only_active=False):
     if only_active:
         return [c for c in SIMULATED_CAMPAIGNS if c["status"] == "ENABLED"]
     return SIMULATED_CAMPAIGNS
+
+
+# Términos de búsqueda de ejemplo, con su campaña — para probar el flujo de
+# Negativización (traer términos → clasificar → vista previa → subir) sin
+# esperar a Google. "manzanillo del mar" es a propósito el mismo caso de
+# ambigüedad ya validado con datos reales en la Función 2 (ver roadmap.md).
+SIMULATED_SEARCH_TERMS = [
+    {"term": "hotel estelar playa manzanillo opiniones", "campaign_id": "1111111101", "campaign_name": "Estelar Hoteles - CO:es - Search Genérica", "ad_group_id": "1", "ad_group_name": "Genérico Hoteles Caribe", "clicks": 12, "impr": 340, "cost": 28.5, "conversions": 0},
+    {"term": "manzanillo del mar cartagena", "campaign_id": "1111111101", "campaign_name": "Estelar Hoteles - CO:es - Search Genérica", "ad_group_id": "1", "ad_group_name": "Genérico Hoteles Caribe", "clicks": 8, "impr": 210, "cost": 15.2, "conversions": 0},
+    {"term": "hotel barato manzanillo", "campaign_id": "1111111101", "campaign_name": "Estelar Hoteles - CO:es - Search Genérica", "ad_group_id": "1", "ad_group_name": "Genérico Hoteles Caribe", "clicks": 5, "impr": 130, "cost": 9.4, "conversions": 0},
+    {"term": "estelar hoteles cartagena", "campaign_id": "1111111102", "campaign_name": "Estelar Hoteles - CO:es - Search Marca", "ad_group_id": "2", "ad_group_name": "Marca Estelar", "clicks": 45, "impr": 980, "cost": 33.75, "conversions": 6},
+    {"term": "reservar estelar playa manzanillo", "campaign_id": "1111111102", "campaign_name": "Estelar Hoteles - CO:es - Search Marca", "ad_group_id": "2", "ad_group_name": "Marca Estelar", "clicks": 30, "impr": 620, "cost": 21.0, "conversions": 4},
+    {"term": "trabajo camarera hotel cartagena", "campaign_id": "1111111101", "campaign_name": "Estelar Hoteles - CO:es - Search Genérica", "ad_group_id": "1", "ad_group_name": "Genérico Hoteles Caribe", "clicks": 6, "impr": 95, "cost": 11.3, "conversions": 0},
+    {"term": "hoteles todo incluido cartagena centro", "campaign_id": "1111111101", "campaign_name": "Estelar Hoteles - CO:es - Search Genérica", "ad_group_id": "1", "ad_group_name": "Genérico Hoteles Caribe", "clicks": 9, "impr": 180, "cost": 17.6, "conversions": 0},
+]
+
+
+def simulated_search_terms():
+    return SIMULATED_SEARCH_TERMS
+
+
+def simulated_push_negative_keywords(items, validate_only=True):
+    return {"created": len(items), "failed": [], "validate_only": validate_only, "simulated": True}

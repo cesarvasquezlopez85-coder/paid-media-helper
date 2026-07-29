@@ -27,6 +27,20 @@ const state = {
     exceptions: '',
     status: 'idle', error: null, fileName: null, rows: null,
     sortBy: 'cost', sortDir: 'desc',
+    source: 'file', // 'file' | 'api'
+    api: {
+      statusChecked: false, configured: false,
+      accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
+      dateFrom: '', dateTo: '',
+      simulated: false, error: null,
+    },
+    // Subida de negativos a Google Ads (solo con source === 'api', necesita
+    // campaign_id por término). selected: Set de claves "term::campaign_id".
+    push: {
+      selected: new Set(),
+      status: 'idle', // idle | previewing | preview_ready | pushing | done | error
+      preview: null, result: null, error: null,
+    },
   },
 
   copy: {
@@ -1698,14 +1712,78 @@ function renderNegPage() {
       </div>
     </div>
     <div class="card control-panel align-end" style="margin-top:-8px">
-      <div class="field">
-        <label>Export de "Términos de búsqueda" (CSV)</label>
-        <input type="file" id="neg-file" accept=".csv" />
+      <div class="seg-control">
+        <button class="seg-btn ${s.source === 'file' ? 'active' : ''}" data-action="neg-source-file">Subir archivo</button>
+        <button class="seg-btn ${s.source === 'api' ? 'active' : ''}" data-action="neg-source-api">Conectar Google Ads</button>
       </div>
-      <button class="btn-outline" data-action="neg-demo">Usar datos de ejemplo</button>
-      ${s.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.fileName)}</strong></div>` : ''}
+      ${s.source === 'file' ? `
+        <div class="field">
+          <label>Export de "Términos de búsqueda" (CSV)</label>
+          <input type="file" id="neg-file" accept=".csv" />
+        </div>
+        <button class="btn-outline" data-action="neg-demo">Usar datos de ejemplo</button>
+        ${s.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.fileName)}</strong></div>` : ''}
+      ` : renderNegApiPanel()}
     </div>
     ${body}
+  `;
+}
+
+// Mismo patrón que renderRendApiPanel (Rendimiento) — cuenta + rango de
+// fechas para traer el reporte de términos de búsqueda directo de Google
+// Ads, con la campaña de cada término (necesaria para poder subir negativos
+// después). Ver runNegAnalysisFromApiRows / fetchGoogleAdsSearchTerms.
+function renderNegApiPanel() {
+  const a = state.neg.api;
+
+  if (!a.statusChecked) {
+    return `<div class="field"><p class="footnote">Consultando la conexión con Google Ads…</p></div>`;
+  }
+
+  const simulatedNotice = a.simulated ? `
+    <div class="ok-panel" style="margin:10px 0">
+      <strong>Modo simulado.</strong> La API de Google Ads todavía no está configurada en el servidor
+      (falta la aprobación del developer token de Google) — estos son datos de ejemplo, no de una cuenta real.
+    </div>` : '';
+
+  if (a.accountsStatus === 'idle') {
+    return `
+      <div class="field">
+        <p class="footnote">${a.configured ? 'Conectado a la API de Google Ads.' : 'La API de Google Ads aún no está configurada — se usarán datos simulados para probar el flujo.'}</p>
+        <button class="btn-outline" data-action="neg-api-load-accounts">Ver cuentas disponibles</button>
+      </div>`;
+  }
+  if (a.accountsStatus === 'loading') {
+    return `<div class="field"><p class="footnote">Cargando cuentas…</p></div>`;
+  }
+  if (a.accountsStatus === 'error') {
+    return `<div class="error-panel"><strong>No se pudieron cargar las cuentas.</strong> ${escapeHtml(a.error)}</div>`;
+  }
+
+  const accountOptions = ['<option value="">Elige una cuenta…</option>']
+    .concat(a.accounts.map((acc) => `<option value="${escapeHtml(acc.id)}" ${a.accountId === acc.id ? 'selected' : ''}>${escapeHtml(acc.name)} (${escapeHtml(acc.id)})</option>`))
+    .join('');
+
+  return `
+    ${simulatedNotice}
+    <div class="field">
+      <label>Cuenta</label>
+      <select id="neg-api-account" style="width:320px">${accountOptions}</select>
+    </div>
+    <div class="field">
+      <label>...o escribe el ID de la cuenta</label>
+      <input type="text" id="neg-api-account-manual" value="${escapeHtml(a.accountIdManual)}" placeholder="ej. 6862893390" style="width:160px" />
+    </div>
+    <div class="field">
+      <label>Desde</label>
+      <input type="date" id="neg-api-date-from" value="${escapeHtml(a.dateFrom)}" />
+    </div>
+    <div class="field">
+      <label>Hasta</label>
+      <input type="date" id="neg-api-date-to" value="${escapeHtml(a.dateTo)}" />
+    </div>
+    <button class="btn-accent" data-action="neg-api-fetch">Traer términos de Google Ads</button>
+    ${a.error ? `<div class="error-panel" style="margin-top:10px"><strong>No se pudo traer el reporte.</strong> ${escapeHtml(a.error)}</div>` : ''}
   `;
 }
 
@@ -1724,11 +1802,59 @@ function negSortTh(label, key, s) {
   return `<th data-neg-sort="${key}" style="cursor:pointer;user-select:none${active ? ';color:var(--color-text-heading)' : ''}">${escapeHtml(label)}${arrow}</th>`;
 }
 
+// Panel de escritura real sobre la cuenta — solo aparece con source==='api',
+// porque necesita campaign_id por término (no lo trae un CSV). La vista
+// previa (validate_only) siempre corre antes de que "Confirmar" pueda
+// aplicar el cambio de verdad; nunca hay un solo clic entre "seleccionar" y
+// "escribir en la cuenta real".
+function renderNegPushPanel() {
+  const s = state.neg;
+  const p = s.push;
+  const selectedCount = p.selected.size;
+  const candidatesCount = (s.rows || []).filter((r) => r.clasificacion === 'negativizar').length;
+  const busy = p.status === 'previewing' || p.status === 'pushing';
+
+  return `
+    <div class="card table-panel" style="margin-bottom:20px">
+      <h3 class="dense-chart-title">Subir negativos a Google Ads</h3>
+      <p style="margin:0 0 12px;font-size:12.5px;color:var(--color-text-muted)">Marca los términos en la tabla de arriba — se agregan como negativo de concordancia exacta, directo en la campaña donde aparecieron. La vista previa valida contra Google Ads sin aplicar nada; solo al confirmar queda escrito de verdad en la cuenta.</p>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+        <button class="btn-outline sm" data-action="neg-push-select-all">Seleccionar los ${candidatesCount} candidatos</button>
+        <button class="btn-outline sm" data-action="neg-push-select-none">Deseleccionar todos</button>
+        <span style="font-size:12.5px;color:var(--color-text-muted)">${selectedCount} seleccionado${selectedCount === 1 ? '' : 's'}</span>
+      </div>
+
+      ${p.status === 'idle' || p.status === 'error' ? `
+        <button class="btn-accent" data-action="neg-push-preview" ${selectedCount === 0 || busy ? 'disabled' : ''}>Vista previa</button>
+        ${p.error ? `<div class="error-panel" style="margin-top:10px">${escapeHtml(p.error)}</div>` : ''}
+      ` : ''}
+
+      ${busy ? `<p class="footnote">${p.status === 'previewing' ? 'Validando con Google Ads (vista previa, no aplica nada todavía)…' : 'Subiendo negativos a Google Ads…'}</p>` : ''}
+
+      ${p.status === 'preview_ready' && p.preview ? `
+        <div class="ok-panel" style="margin:10px 0">
+          <strong>Vista previa lista.</strong> Google Ads validó ${p.preview.created} de ${p.preview.items.length} sin problema — nada se aplicó todavía.
+          ${p.preview.failed && p.preview.failed.length ? `<div style="margin-top:6px"><strong>${p.preview.failed.length} no pasaron la validación:</strong><br>${p.preview.failed.map((m) => escapeHtml(m)).join('<br>')}</div>` : ''}
+        </div>
+        <button class="btn-accent" data-action="neg-push-confirm">Confirmar y subir a Google Ads</button>
+        <button class="btn-outline" data-action="neg-push-cancel">Cancelar</button>
+      ` : ''}
+
+      ${p.status === 'done' && p.result ? `
+        <div class="ok-panel" style="margin:10px 0">
+          <strong>Listo.</strong> Se subieron ${p.result.created} negativos a Google Ads.
+          ${p.result.failed && p.result.failed.length ? `<div style="margin-top:6px"><strong>${p.result.failed.length} fallaron:</strong><br>${p.result.failed.map((m) => escapeHtml(m)).join('<br>')}</div>` : ''}
+        </div>
+      ` : ''}
+    </div>`;
+}
+
 function renderNegReady() {
   const s = state.neg;
   const rows = s.rows;
   const summary = engine.summarizeClassification(rows);
   const maxCost = Math.max(1, summary.mantener.costo, summary.revisar.costo, summary.negativizar.costo);
+  const hasCampaign = s.source === 'api';
 
   const chartRows = [
     { campaign: 'Mantener', valueLabel: fmtMoney(summary.mantener.costo), width: pctWidth(summary.mantener.costo, maxCost), color: 'var(--navy-800)' },
@@ -1742,9 +1868,11 @@ function renderNegReady() {
     .sort((a, b) => (sortKeyFn(a) > sortKeyFn(b) ? 1 : sortKeyFn(a) < sortKeyFn(b) ? -1 : 0) * sortDirMul);
   const revisarAll = rows.filter((r) => r.clasificacion === 'revisar').sort((a, b) => b.cost - a.cost);
 
-  const termRowHtml = (r) => `
+  const termRowHtml = (r, withCheckbox) => `
     <tr>
+      ${withCheckbox ? `<td><input type="checkbox" class="neg-push-checkbox" data-key="${escapeHtml(`${r.term}::${r.campaign_id}`)}" ${s.push.selected.has(`${r.term}::${r.campaign_id}`) ? 'checked' : ''} /></td>` : ''}
       <td>${escapeHtml(r.term)}</td>
+      ${hasCampaign ? `<td>${escapeHtml(r.campaign_name || 'N/D')}</td>` : ''}
       <td>${fmtInt(r.clicks)}</td>
       <td>${fmtInt(r.impr)}</td>
       <td>${fmtMoney(r.cost)}</td>
@@ -1811,16 +1939,20 @@ function renderNegReady() {
       <div class="table-scroll">
         <table>
           <thead><tr>
+            ${hasCampaign ? '<th></th>' : ''}
             ${negSortTh('Término', 'term', s)}
+            ${hasCampaign ? '<th>Campaña</th>' : ''}
             ${negSortTh('Clics', 'clicks', s)}
             ${negSortTh('Impr.', 'impr', s)}
             ${negSortTh('Costo', 'cost', s)}
             ${negSortTh('Conversiones', 'conversions', s)}
           </tr></thead>
-          <tbody>${negativizarAll.slice(0, 50).map(termRowHtml).join('')}</tbody>
+          <tbody>${negativizarAll.slice(0, 50).map((r) => termRowHtml(r, hasCampaign)).join('')}</tbody>
         </table>
       </div>
     </div>
+
+    ${hasCampaign ? renderNegPushPanel() : ''}
 
     <div class="card table-panel">
       <div class="table-panel-head">
@@ -1830,8 +1962,8 @@ function renderNegReady() {
       <p style="margin:0 0 12px;font-size:12.5px;color:var(--color-text-muted)">Contienen un término núcleo pero también una excepción conocida — no se clasifican solos.</p>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Término</th><th>Clics</th><th>Impr.</th><th>Costo</th><th>Conversiones</th></tr></thead>
-          <tbody>${revisarAll.slice(0, 50).map(termRowHtml).join('')}</tbody>
+          <thead><tr><th>Término</th>${hasCampaign ? '<th>Campaña</th>' : ''}<th>Clics</th><th>Impr.</th><th>Costo</th><th>Conversiones</th></tr></thead>
+          <tbody>${revisarAll.slice(0, 50).map((r) => termRowHtml(r, false)).join('')}</tbody>
         </table>
       </div>
     </div>
@@ -1856,6 +1988,136 @@ function runNegAnalysis(text, fileName) {
     Object.assign(s, { status: 'error', error: err.message || String(err), fileName });
   }
   render();
+}
+
+function runNegAnalysisFromApiRows(apiRows, fileName) {
+  const s = state.neg;
+  try {
+    const coreTerms = s.core.split('\n').map((v) => v.trim()).filter(Boolean);
+    if (!coreTerms.length) throw new Error('Escribe al menos un término núcleo para poder clasificar.');
+    const exceptions = s.exceptions.split('\n').map((v) => v.trim()).filter(Boolean);
+    const rows = engine.loadSearchTermsFromApi(apiRows);
+    const classified = engine.classifyTerms(rows, coreTerms, exceptions);
+    s.push.selected = new Set(); s.push.status = 'idle'; s.push.preview = null; s.push.result = null; s.push.error = null;
+    Object.assign(s, { status: 'ready', rows: classified, fileName });
+  } catch (err) {
+    Object.assign(s, { status: 'error', error: err.message || String(err), fileName });
+  }
+  render();
+}
+
+function ensureNegGoogleAdsStatusLoaded() {
+  const a = state.neg.api;
+  if (a.statusChecked) return;
+  fetch('/api/google-ads/status')
+    .then((r) => r.json())
+    .then((data) => { a.statusChecked = true; a.configured = !!data.configured; render(); })
+    .catch(() => { a.statusChecked = true; a.configured = false; render(); });
+}
+
+function loadNegGoogleAdsAccounts() {
+  const a = state.neg.api;
+  a.accountsStatus = 'loading'; a.error = null;
+  render();
+  fetch('/api/google-ads/accounts')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.accounts = data.accounts || [];
+      a.simulated = !!data.simulated;
+      if (!a.dateFrom || !a.dateTo) {
+        const today = new Date();
+        const monthAgo = new Date(today);
+        monthAgo.setDate(monthAgo.getDate() - 30);
+        a.dateTo = today.toISOString().slice(0, 10);
+        a.dateFrom = monthAgo.toISOString().slice(0, 10);
+      }
+      a.accountsStatus = 'ready';
+      render();
+    })
+    .catch((err) => {
+      a.accountsStatus = 'error'; a.error = err.message || String(err);
+      render();
+    });
+}
+
+function fetchGoogleAdsSearchTerms() {
+  const a = state.neg.api;
+  const manualId = (a.accountIdManual || '').replace(/[^0-9]/g, '');
+  const customerId = manualId || a.accountId;
+  if (!customerId && !a.simulated) { a.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
+  if (!a.dateFrom || !a.dateTo) { a.error = 'Elige el rango de fechas primero.'; render(); return; }
+
+  a.error = null;
+  state.neg.status = 'loading'; state.neg.error = null;
+  render();
+
+  const params = new URLSearchParams({ customer_id: customerId || '', date_from: a.dateFrom, date_to: a.dateTo });
+  fetch(`/api/google-ads/search-terms?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.simulated = !!data.simulated;
+      const account = a.accounts.find((acc) => acc.id === customerId);
+      const label = a.simulated
+        ? `Google Ads (simulado) — ${a.dateFrom} a ${a.dateTo}`
+        : `Google Ads — ${account ? account.name : customerId} — ${a.dateFrom} a ${a.dateTo}`;
+      runNegAnalysisFromApiRows(data.rows || [], label);
+    })
+    .catch((err) => {
+      a.error = err.message || String(err);
+      state.neg.status = 'idle';
+      render();
+    });
+}
+
+// Sube a Google Ads los negativos marcados en state.neg.push.selected.
+// preview=true valida sin aplicar (vista previa) — solo al confirmar
+// (preview=false) el cambio queda escrito de verdad en la cuenta real.
+function pushNegativeKeywords(preview) {
+  const s = state.neg;
+  const a = s.api;
+  const manualId = (a.accountIdManual || '').replace(/[^0-9]/g, '');
+  const customerId = manualId || a.accountId;
+  const rows = s.rows || [];
+  const items = [...s.push.selected].map((key) => {
+    const row = rows.find((r) => `${r.term}::${r.campaign_id}` === key);
+    return row ? { campaign_id: row.campaign_id, term: row.term, campaign_name: row.campaign_name } : null;
+  }).filter(Boolean);
+
+  if (!items.length) { s.push.error = 'Selecciona al menos un término.'; render(); return; }
+
+  s.push.status = preview ? 'previewing' : 'pushing';
+  s.push.error = null;
+  render();
+
+  fetch('/api/google-ads/negative-keywords', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customer_id: customerId,
+      items: items.map((i) => ({ campaign_id: i.campaign_id, term: i.term })),
+      validate_only: preview,
+    }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      if (preview) {
+        s.push.status = 'preview_ready';
+        s.push.preview = { ...data, items };
+      } else {
+        s.push.status = 'done';
+        s.push.result = data;
+        s.push.selected = new Set();
+      }
+      render();
+    })
+    .catch((err) => {
+      s.push.status = 'error';
+      s.push.error = err.message || String(err);
+      render();
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -2667,6 +2929,24 @@ function bindEvents() {
     reader.readAsArrayBuffer(file);
   });
 
+  const negApiAccount = document.getElementById('neg-api-account');
+  if (negApiAccount) negApiAccount.addEventListener('change', (e) => { state.neg.api.accountId = e.target.value; });
+  const negApiAccountManual = document.getElementById('neg-api-account-manual');
+  if (negApiAccountManual) negApiAccountManual.addEventListener('input', (e) => { state.neg.api.accountIdManual = e.target.value; });
+  const negApiDateFrom = document.getElementById('neg-api-date-from');
+  if (negApiDateFrom) negApiDateFrom.addEventListener('change', (e) => { state.neg.api.dateFrom = e.target.value; });
+  const negApiDateTo = document.getElementById('neg-api-date-to');
+  if (negApiDateTo) negApiDateTo.addEventListener('change', (e) => { state.neg.api.dateTo = e.target.value; });
+
+  document.querySelectorAll('.neg-push-checkbox').forEach((cb) => {
+    cb.addEventListener('change', (e) => {
+      const key = e.target.dataset.key;
+      if (e.target.checked) state.neg.push.selected.add(key);
+      else state.neg.push.selected.delete(key);
+      render();
+    });
+  });
+
   // Generador de copys
   const copyUrlInput = document.getElementById('copy-url');
   if (copyUrlInput) copyUrlInput.addEventListener('input', (e) => { state.copy.url = e.target.value; });
@@ -2828,15 +3108,44 @@ function handleAction(action) {
       setTimeout(() => runNegAnalysis(engine.SAMPLE_SEARCH_TERMS_CSV, 'negativos_ejemplo.csv'), 250);
       break;
     }
+
+    case 'neg-source-file': state.neg.source = 'file'; render(); break;
+    case 'neg-source-api': {
+      state.neg.source = 'api';
+      ensureNegGoogleAdsStatusLoaded();
+      render();
+      break;
+    }
+    case 'neg-api-load-accounts': loadNegGoogleAdsAccounts(); break;
+    case 'neg-api-fetch': fetchGoogleAdsSearchTerms(); break;
+
+    case 'neg-push-select-all': {
+      const candidates = (state.neg.rows || []).filter((r) => r.clasificacion === 'negativizar');
+      state.neg.push.selected = new Set(candidates.map((r) => `${r.term}::${r.campaign_id}`));
+      render();
+      break;
+    }
+    case 'neg-push-select-none': state.neg.push.selected = new Set(); render(); break;
+    case 'neg-push-preview': pushNegativeKeywords(true); break;
+    case 'neg-push-confirm': pushNegativeKeywords(false); break;
+    case 'neg-push-cancel': {
+      state.neg.push.status = 'idle'; state.neg.push.preview = null; state.neg.push.error = null;
+      render();
+      break;
+    }
     case 'download-neg-candidatos': {
+      const hasCampaign = state.neg.source === 'api';
       const rows = state.neg.rows.filter((r) => r.clasificacion === 'negativizar').sort((a, b) => b.cost - a.cost);
-      const data = [['Término', 'Clics', 'Impresiones', 'Costo', 'Conversiones'], ...rows.map((r) => [r.term, r.clicks, r.impr, r.cost.toFixed(2), r.conversions || 0])];
+      const header = ['Término', ...(hasCampaign ? ['Campaña'] : []), 'Clics', 'Impresiones', 'Costo', 'Conversiones'];
+      const data = [header, ...rows.map((r) => [r.term, ...(hasCampaign ? [r.campaign_name || 'N/D'] : []), r.clicks, r.impr, r.cost.toFixed(2), r.conversions || 0])];
       engine.downloadCsv('negativos_candidatos.csv', data);
       break;
     }
     case 'download-neg-revisar': {
+      const hasCampaign = state.neg.source === 'api';
       const rows = state.neg.rows.filter((r) => r.clasificacion === 'revisar').sort((a, b) => b.cost - a.cost);
-      const data = [['Término', 'Clics', 'Impresiones', 'Costo', 'Conversiones'], ...rows.map((r) => [r.term, r.clicks, r.impr, r.cost.toFixed(2), r.conversions || 0])];
+      const header = ['Término', ...(hasCampaign ? ['Campaña'] : []), 'Clics', 'Impresiones', 'Costo', 'Conversiones'];
+      const data = [header, ...rows.map((r) => [r.term, ...(hasCampaign ? [r.campaign_name || 'N/D'] : []), r.clicks, r.impr, r.cost.toFixed(2), r.conversions || 0])];
       engine.downloadCsv('negativos_revisar.csv', data);
       break;
     }

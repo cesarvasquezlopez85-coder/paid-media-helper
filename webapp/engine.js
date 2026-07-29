@@ -683,6 +683,40 @@ export function loadSearchTerms(text) {
   });
 }
 
+// Misma forma de fila que loadSearchTerms, pero a partir de filas ya
+// estructuradas de la API (server.py → /api/google-ads/search-terms), que
+// además traen la campaña de cada término — necesaria para poder subir el
+// negativo a la campaña correcta después. Un mismo término puede repetirse
+// en varias filas si apareció en más de un grupo de anuncios de la misma
+// campaña; se suma en una sola fila por (término, campaña).
+export function loadSearchTermsFromApi(apiRows) {
+  const byKey = new Map();
+  for (const r of (apiRows || [])) {
+    const term = String(r.term || '').trim();
+    if (!term) continue;
+    const campaignId = r.campaign_id != null ? String(r.campaign_id) : null;
+    const key = `${term}::${campaignId}`;
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.clicks += Number(r.clicks) || 0;
+      existing.impr += Number(r.impr) || 0;
+      existing.cost += Number(r.cost) || 0;
+      existing.conversions += Number(r.conversions) || 0;
+    } else {
+      byKey.set(key, {
+        term,
+        clicks: Number(r.clicks) || 0,
+        impr: Number(r.impr) || 0,
+        cost: Number(r.cost) || 0,
+        conversions: Number(r.conversions) || 0,
+        campaign_id: campaignId,
+        campaign_name: r.campaign_name || 'N/D',
+      });
+    }
+  }
+  return [...byKey.values()];
+}
+
 function normalizeAccents(text) {
   const accents = { "á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u", "ñ": "n", "ü": "u" };
   let out = String(text).toLowerCase();
