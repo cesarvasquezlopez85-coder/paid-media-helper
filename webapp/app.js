@@ -66,6 +66,17 @@ const state = {
     current: { status: 'idle', error: null, fileName: null, rows: null },
     previous: { status: 'idle', error: null, fileName: null, rows: null },
     campaignFilter: 'all',
+    campaignTypeFilter: 'all',
+    brandKeywords: 'marca, brand, branded, brnd',
+    source: 'file', // 'file' | 'api'
+    api: {
+      statusChecked: false, configured: false,
+      accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
+      current: { dateFrom: '', dateTo: '' },
+      previous: { dateFrom: '', dateTo: '' },
+      onlyActive: false,
+      simulated: false, error: null,
+    },
   },
 
   opportunity: {
@@ -744,25 +755,207 @@ function fetchGoogleAdsCampaigns() {
 function runCompareAnalysis(which, text, fileName) {
   const slot = state.compare[which];
   try {
-    const rowsRaw = engine.loadCampaignReport(text, null);
+    const brandKeywords = state.compare.brandKeywords.split(',').map((v) => v.trim()).filter(Boolean);
+    const rowsRaw = engine.loadCampaignReport(text, brandKeywords);
     const rows = engine.computeMetrics(rowsRaw);
     Object.assign(slot, { status: 'ready', error: null, rows, fileName });
   } catch (err) {
     Object.assign(slot, { status: 'error', error: err.message || String(err), fileName, rows: null });
   }
   state.compare.campaignFilter = 'all';
+  state.compare.campaignTypeFilter = 'all';
   render();
+}
+
+function runCompareAnalysisFromApiRows(which, apiRows, fileName) {
+  const slot = state.compare[which];
+  try {
+    const brandKeywords = state.compare.brandKeywords.split(',').map((v) => v.trim()).filter(Boolean);
+    const rowsRaw = engine.loadCampaignReportFromApi(apiRows, brandKeywords);
+    const rows = engine.computeMetrics(rowsRaw);
+    Object.assign(slot, { status: 'ready', error: null, rows, fileName });
+  } catch (err) {
+    Object.assign(slot, { status: 'error', error: err.message || String(err), fileName, rows: null });
+  }
 }
 
 function getCompareFilteredRows() {
   const s = state.compare;
-  const currentRows = s.current.rows || [];
-  const previousRows = s.previous.rows || [];
-  if (s.campaignFilter === 'all') return { currentRows, previousRows };
-  return {
-    currentRows: currentRows.filter((r) => r.campaign === s.campaignFilter),
-    previousRows: previousRows.filter((r) => r.campaign === s.campaignFilter),
+  let currentRows = s.current.rows || [];
+  let previousRows = s.previous.rows || [];
+  if (s.campaignFilter !== 'all') {
+    currentRows = currentRows.filter((r) => r.campaign === s.campaignFilter);
+    previousRows = previousRows.filter((r) => r.campaign === s.campaignFilter);
+  }
+  if (s.campaignTypeFilter !== 'all') {
+    currentRows = currentRows.filter((r) => r.campaign_type === s.campaignTypeFilter);
+    previousRows = previousRows.filter((r) => r.campaign_type === s.campaignTypeFilter);
+  }
+  return { currentRows, previousRows };
+}
+
+// ---------------------------------------------------------------------------
+// Comparativa de periodos — fuente API: mismo patrón que Rendimiento, pero
+// con UN solo selector de cuenta (se compara la misma cuenta en dos rangos
+// de fecha) y DOS pares de fecha (periodo actual / periodo anterior). Se
+// traen ambos periodos en paralelo con /api/google-ads/campaigns.
+// ---------------------------------------------------------------------------
+
+function ensureCompareGoogleAdsStatusLoaded() {
+  const a = state.compare.api;
+  if (a.statusChecked) return;
+  fetch('/api/google-ads/status')
+    .then((r) => r.json())
+    .then((data) => { a.statusChecked = true; a.configured = !!data.configured; render(); })
+    .catch(() => { a.statusChecked = true; a.configured = false; render(); });
+}
+
+function loadCompareGoogleAdsAccounts() {
+  const a = state.compare.api;
+  a.accountsStatus = 'loading'; a.error = null;
+  render();
+  fetch('/api/google-ads/accounts')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.accounts = data.accounts || [];
+      a.simulated = !!data.simulated;
+      if (!a.current.dateFrom || !a.current.dateTo) {
+        const today = new Date();
+        const monthAgo = new Date(today);
+        monthAgo.setDate(monthAgo.getDate() - 30);
+        a.current.dateTo = today.toISOString().slice(0, 10);
+        a.current.dateFrom = monthAgo.toISOString().slice(0, 10);
+      }
+      if (!a.previous.dateFrom || !a.previous.dateTo) {
+        // Por defecto, el mismo rango de días pero el mes anterior — el
+        // usuario puede ajustarlo a cualquier periodo que quiera comparar.
+        const from = new Date(a.current.dateFrom);
+        const to = new Date(a.current.dateTo);
+        const spanDays = Math.round((to - from) / 86400000);
+        const prevTo = new Date(from);
+        prevTo.setDate(prevTo.getDate() - 1);
+        const prevFrom = new Date(prevTo);
+        prevFrom.setDate(prevFrom.getDate() - spanDays);
+        a.previous.dateTo = prevTo.toISOString().slice(0, 10);
+        a.previous.dateFrom = prevFrom.toISOString().slice(0, 10);
+      }
+      a.accountsStatus = 'ready';
+      render();
+    })
+    .catch((err) => {
+      a.accountsStatus = 'error'; a.error = err.message || String(err);
+      render();
+    });
+}
+
+function fetchCompareGoogleAdsCampaigns() {
+  const a = state.compare.api;
+  const manualId = (a.accountIdManual || '').replace(/[^0-9]/g, '');
+  const customerId = manualId || a.accountId;
+  if (!customerId && !a.simulated) { a.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
+  if (!a.current.dateFrom || !a.current.dateTo || !a.previous.dateFrom || !a.previous.dateTo) {
+    a.error = 'Elige el rango de fechas de ambos periodos.'; render(); return;
+  }
+
+  a.error = null;
+  state.compare.current.status = 'loading'; state.compare.current.error = null;
+  state.compare.previous.status = 'loading'; state.compare.previous.error = null;
+  render();
+
+  const fetchPeriod = (dateFrom, dateTo) => {
+    const params = new URLSearchParams({ customer_id: customerId || '', date_from: dateFrom, date_to: dateTo, only_active: a.onlyActive ? '1' : '0' });
+    return fetch(`/api/google-ads/campaigns?${params.toString()}`).then((r) => r.json().then((data) => ({ ok: r.ok, data })));
   };
+
+  Promise.all([
+    fetchPeriod(a.current.dateFrom, a.current.dateTo),
+    fetchPeriod(a.previous.dateFrom, a.previous.dateTo),
+  ])
+    .then(([curResp, prevResp]) => {
+      if (!curResp.ok) throw new Error('Periodo actual: ' + (curResp.data.error || 'Error desconocido.'));
+      if (!prevResp.ok) throw new Error('Periodo anterior: ' + (prevResp.data.error || 'Error desconocido.'));
+      a.simulated = !!curResp.data.simulated || !!prevResp.data.simulated;
+      const account = a.accounts.find((acc) => acc.id === customerId);
+      const accountLabel = a.simulated ? 'Google Ads (simulado)' : `Google Ads — ${account ? account.name : customerId}`;
+      runCompareAnalysisFromApiRows('current', curResp.data.rows || [], `${accountLabel} — ${a.current.dateFrom} a ${a.current.dateTo}`);
+      runCompareAnalysisFromApiRows('previous', prevResp.data.rows || [], `${accountLabel} — ${a.previous.dateFrom} a ${a.previous.dateTo}`);
+      state.compare.campaignFilter = 'all';
+      state.compare.campaignTypeFilter = 'all';
+      render();
+    })
+    .catch((err) => {
+      a.error = err.message || String(err);
+      state.compare.current.status = 'idle';
+      state.compare.previous.status = 'idle';
+      render();
+    });
+}
+
+function renderCompareApiPanel() {
+  const a = state.compare.api;
+
+  if (!a.statusChecked) {
+    return `<div class="field"><p class="footnote">Consultando la conexión con Google Ads…</p></div>`;
+  }
+
+  const simulatedNotice = a.simulated ? `
+    <div class="ok-panel" style="margin:10px 0">
+      <strong>Modo simulado.</strong> La API de Google Ads todavía no está configurada en el servidor
+      (falta la aprobación del developer token de Google) — estos son datos de ejemplo, no de una cuenta real.
+    </div>` : '';
+
+  if (a.accountsStatus === 'idle') {
+    return `
+      <div class="field">
+        <p class="footnote">${a.configured ? 'Conectado a la API de Google Ads.' : 'La API de Google Ads aún no está configurada — se usarán datos simulados para probar el flujo.'}</p>
+        <button class="btn-outline" data-action="compare-api-load-accounts">Ver cuentas disponibles</button>
+      </div>`;
+  }
+  if (a.accountsStatus === 'loading') {
+    return `<div class="field"><p class="footnote">Cargando cuentas…</p></div>`;
+  }
+  if (a.accountsStatus === 'error') {
+    return `<div class="error-panel"><strong>No se pudieron cargar las cuentas.</strong> ${escapeHtml(a.error)}</div>`;
+  }
+
+  const accountOptions = ['<option value="">Elige una cuenta…</option>']
+    .concat(a.accounts.map((acc) => `<option value="${escapeHtml(acc.id)}" ${a.accountId === acc.id ? 'selected' : ''}>${escapeHtml(acc.name)} (${escapeHtml(acc.id)})</option>`))
+    .join('');
+
+  return `
+    ${simulatedNotice}
+    <div class="field">
+      <label>Cuenta</label>
+      <select id="compare-api-account" style="width:320px">${accountOptions}</select>
+    </div>
+    <div class="field">
+      <label>...o escribe el ID de la cuenta</label>
+      <input type="text" id="compare-api-account-manual" value="${escapeHtml(a.accountIdManual)}" placeholder="ej. 6862893390" style="width:160px" />
+    </div>
+    <div class="field">
+      <label>Periodo actual — desde/hasta</label>
+      <div style="display:flex;gap:10px;flex-wrap:nowrap">
+        <input type="date" id="compare-api-current-date-from" value="${escapeHtml(a.current.dateFrom)}" />
+        <input type="date" id="compare-api-current-date-to" value="${escapeHtml(a.current.dateTo)}" />
+      </div>
+    </div>
+    <div class="field">
+      <label>Periodo anterior — desde/hasta</label>
+      <div style="display:flex;gap:10px;flex-wrap:nowrap">
+        <input type="date" id="compare-api-previous-date-from" value="${escapeHtml(a.previous.dateFrom)}" />
+        <input type="date" id="compare-api-previous-date-to" value="${escapeHtml(a.previous.dateTo)}" />
+      </div>
+    </div>
+    <div class="field">
+      <label style="display:flex;align-items:center;gap:8px;font-weight:400">
+        <input type="checkbox" id="compare-api-only-active" ${a.onlyActive ? 'checked' : ''} />
+        Solo campañas activas
+      </label>
+    </div>
+    <button class="btn-accent" data-action="compare-api-fetch">Traer ambos periodos de Google Ads</button>
+    ${a.error ? `<div class="error-panel" style="margin-top:10px"><strong>No se pudo traer el reporte.</strong> ${escapeHtml(a.error)}</div>` : ''}
+  `;
 }
 
 // mode: 'good_up' (subir es mejora, ej. conversiones/CTR/ROAS), 'good_down'
@@ -781,19 +974,34 @@ function renderComparePage() {
   const s = state.compare;
   const bothReady = s.current.status === 'ready' && s.previous.status === 'ready';
 
+  // El campo de palabras de marca solo se muestra subiendo archivo — en modo
+  // API se usa el valor que ya tenga guardado, mismo criterio que Rendimiento.
+  const brandKeywordsField = s.source === 'file' ? `
+      <div class="field">
+        <label>Palabras que identifican una campaña de marca (separadas por coma)</label>
+        <input type="text" id="compare-brand-keywords" value="${escapeHtml(s.brandKeywords)}" style="width:320px" />
+      </div>` : '';
+
   const uploadPanel = `
     <div class="card control-panel align-end">
-      <div class="field">
-        <label>Periodo actual (CSV o Excel)</label>
-        <input type="file" id="compare-current-file" accept=".csv,.xlsx,.xls" />
-        ${s.current.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.current.fileName)}</strong></div>` : ''}
+      ${brandKeywordsField}
+      <div class="seg-control">
+        <button class="seg-btn ${s.source === 'file' ? 'active' : ''}" data-action="compare-source-file">Subir archivo</button>
+        <button class="seg-btn ${s.source === 'api' ? 'active' : ''}" data-action="compare-source-api">Conectar Google Ads</button>
       </div>
-      <div class="field">
-        <label>Periodo anterior (CSV o Excel)</label>
-        <input type="file" id="compare-previous-file" accept=".csv,.xlsx,.xls" />
-        ${s.previous.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.previous.fileName)}</strong></div>` : ''}
-      </div>
-      <button class="btn-outline" data-action="compare-demo">Usar ejemplo (dos periodos)</button>
+      ${s.source === 'file' ? `
+        <div class="field">
+          <label>Periodo actual (CSV o Excel)</label>
+          <input type="file" id="compare-current-file" accept=".csv,.xlsx,.xls" />
+          ${s.current.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.current.fileName)}</strong></div>` : ''}
+        </div>
+        <div class="field">
+          <label>Periodo anterior (CSV o Excel)</label>
+          <input type="file" id="compare-previous-file" accept=".csv,.xlsx,.xls" />
+          ${s.previous.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.previous.fileName)}</strong></div>` : ''}
+        </div>
+        <button class="btn-outline" data-action="compare-demo">Usar ejemplo (dos periodos)</button>
+      ` : renderCompareApiPanel()}
     </div>`;
 
   let errorHtml = '';
@@ -806,20 +1014,29 @@ function renderComparePage() {
       ${errorHtml}
       <div class="card state-panel idle">
         ${icon('git-compare', 30)}
-        <p>Sube el export del periodo actual y del periodo anterior (o usa el ejemplo) para ver la comparativa.</p>
+        <p>Sube el export del periodo actual y del periodo anterior, o conecta Google Ads, para ver la comparativa.</p>
       </div>`;
   }
 
   const allCampaignNames = [...new Set([...s.current.rows.map((r) => r.campaign), ...s.previous.rows.map((r) => r.campaign)])].sort((a, b) => a.localeCompare(b));
+  const allCampaignTypes = [...new Set([...s.current.rows.map((r) => r.campaign_type), ...s.previous.rows.map((r) => r.campaign_type)])].filter(Boolean);
   const campaignFilterHtml = `
     <div class="card control-panel align-end">
       <div class="field">
         <label>Ver solo esta campaña</label>
-        <select id="compare-campaign-filter" style="width:320px">
+        <select id="compare-campaign-filter" style="width:280px">
           <option value="all" ${s.campaignFilter === 'all' ? 'selected' : ''}>Todas las campañas</option>
           ${allCampaignNames.map((c) => `<option value="${escapeHtml(c)}" ${s.campaignFilter === c ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}
         </select>
       </div>
+      ${allCampaignTypes.length > 1 ? `
+      <div class="field">
+        <label>Ver solo este tipo de campaña</label>
+        <select id="compare-campaign-type-filter" style="width:220px">
+          <option value="all" ${s.campaignTypeFilter === 'all' ? 'selected' : ''}>Todos los tipos</option>
+          ${allCampaignTypes.map((t) => `<option value="${escapeHtml(t)}" ${s.campaignTypeFilter === t ? 'selected' : ''}>${escapeHtml(engine.CAMPAIGN_TYPE_LABELS[t] || t)}</option>`).join('')}
+        </select>
+      </div>` : ''}
     </div>`;
 
   const { currentRows, previousRows } = getCompareFilteredRows();
@@ -2865,6 +3082,28 @@ function bindEvents() {
     state.compare.campaignFilter = e.target.value;
     render();
   });
+  const compareCampaignTypeFilter = document.getElementById('compare-campaign-type-filter');
+  if (compareCampaignTypeFilter) compareCampaignTypeFilter.addEventListener('change', (e) => {
+    state.compare.campaignTypeFilter = e.target.value;
+    render();
+  });
+  const compareBrandInput = document.getElementById('compare-brand-keywords');
+  if (compareBrandInput) compareBrandInput.addEventListener('input', (e) => { state.compare.brandKeywords = e.target.value; });
+
+  const compareApiAccount = document.getElementById('compare-api-account');
+  if (compareApiAccount) compareApiAccount.addEventListener('change', (e) => { state.compare.api.accountId = e.target.value; });
+  const compareApiAccountManual = document.getElementById('compare-api-account-manual');
+  if (compareApiAccountManual) compareApiAccountManual.addEventListener('input', (e) => { state.compare.api.accountIdManual = e.target.value; });
+  const compareApiCurrentDateFrom = document.getElementById('compare-api-current-date-from');
+  if (compareApiCurrentDateFrom) compareApiCurrentDateFrom.addEventListener('change', (e) => { state.compare.api.current.dateFrom = e.target.value; });
+  const compareApiCurrentDateTo = document.getElementById('compare-api-current-date-to');
+  if (compareApiCurrentDateTo) compareApiCurrentDateTo.addEventListener('change', (e) => { state.compare.api.current.dateTo = e.target.value; });
+  const compareApiPreviousDateFrom = document.getElementById('compare-api-previous-date-from');
+  if (compareApiPreviousDateFrom) compareApiPreviousDateFrom.addEventListener('change', (e) => { state.compare.api.previous.dateFrom = e.target.value; });
+  const compareApiPreviousDateTo = document.getElementById('compare-api-previous-date-to');
+  if (compareApiPreviousDateTo) compareApiPreviousDateTo.addEventListener('change', (e) => { state.compare.api.previous.dateTo = e.target.value; });
+  const compareApiOnlyActive = document.getElementById('compare-api-only-active');
+  if (compareApiOnlyActive) compareApiOnlyActive.addEventListener('change', (e) => { state.compare.api.onlyActive = e.target.checked; });
 
   // Oportunidad de ingresos
   const oppBrandInput = document.getElementById('opp-brand-keywords');
@@ -3131,6 +3370,15 @@ function handleAction(action) {
       }, 250);
       break;
     }
+    case 'compare-source-file': state.compare.source = 'file'; render(); break;
+    case 'compare-source-api': {
+      state.compare.source = 'api';
+      ensureCompareGoogleAdsStatusLoaded();
+      render();
+      break;
+    }
+    case 'compare-api-load-accounts': loadCompareGoogleAdsAccounts(); break;
+    case 'compare-api-fetch': fetchCompareGoogleAdsCampaigns(); break;
 
     case 'opp-demo': {
       state.opportunity.status = 'loading'; state.opportunity.error = null; state.opportunity.fileName = 'sample_data_oportunidad.csv';

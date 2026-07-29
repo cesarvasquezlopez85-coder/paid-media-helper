@@ -124,6 +124,12 @@ Campañas que solo existen en uno de los dos periodos (nuevas, pausadas, renombr
 
 Verificada con datos sintéticos de dos periodos (botón "Usar ejemplo"). Pendiente: probarla con dos exports reales del mismo cliente.
 
+**Conexión con la API de Google Ads (2026-07-29):** tercer lugar (después de Rendimiento y Negativización) con el toggle "Subir archivo" / "Conectar Google Ads". A diferencia de las otras dos funciones, acá hay **un solo selector de cuenta** (se compara la misma cuenta en dos rangos de fecha, no dos cuentas distintas) y **dos pares de fecha** — periodo actual y periodo anterior — con el periodo anterior precargado automáticamente al mismo número de días justo antes del periodo actual (ajustable a cualquier rango). Incluye el mismo checkbox "Solo campañas activas" que Rendimiento. Reutiliza `fetch_campaign_rows()` y `loadCampaignReportFromApi()` que ya existían — sin cambios de backend, solo se llama dos veces en paralelo (una por periodo).
+
+**Filtro por tipo de campaña, nuevo para toda la función (2026-07-29):** a pedido de cesar, junto con la conexión a la API se agregó un segundo filtro — "Ver solo este tipo de campaña" (Search marca / Search genérica / Performance Max / Demand Gen / Display) — que agrupa todas las campañas de un mismo tipo y compara ese grupo entre los dos periodos, en vez de una campaña puntual. Usa la misma clasificación (`deriveCampaignType`) que ya alimenta los umbrales de CTR/CPA% de Rendimiento, así que funciona igual con datos de CSV o de API. Se agregó también el campo de palabras de marca (antes ausente en esta función — el CSV se cargaba siempre con la clasificación por defecto), visible solo en modo "Subir archivo", igual que en Rendimiento.
+
+Verificado en modo simulado de punta a punta: selector de cuenta, ambos periodos con fechas por defecto correctas, filtro por campaña y por tipo recalculando correctamente (probado aislando solo Performance Max), y sin regresión en el modo CSV existente.
+
 ### Función 6 — Oportunidad de ingresos (nueva, 2026-07-14)
 
 Sección para responder una pregunta concreta que cesar necesitaba llevar a la empresa: ¿cuántos ingresos adicionales se habrían generado si las campañas limitadas por presupuesto no lo hubieran estado? Es un análisis retrospectivo (no una predicción) — asume, para cada campaña, el mismo Ad Auction Win Rate y la misma tasa de conversión que ya tiene, y calcula qué habría pasado con impresiones/clics/conversiones/ingresos sin el límite de presupuesto.
@@ -211,7 +217,7 @@ En ambos casos, la app pide iniciar sesión o crear cuenta antes de dejar entrar
 6. Probar la Función 6 (Oportunidad de ingresos) con más cuentas reales — ya validada con Estelar, falta confirmar con cuentas de más de una campaña limitada por presupuesto y más de un hotel.
 7. Probar la Función 7 (Proyección de ventas) con histórico real de un hotel, y validar con cesar si el margen de error (MAPE) es aceptable para planear presupuesto.
 8. Probar la escritura de negativos (Función 2) contra una cuenta real por primera vez — empezando por vista previa (`validateOnly`) en una campaña de bajo riesgo antes de confirmar cualquier subida real.
-9. Extender la conexión con la API de Google Ads (toggle archivo/API) a Comparar periodos y Oportunidad de ingresos.
+9. Extender la conexión con la API de Google Ads (toggle archivo/API) a Oportunidad de ingresos — ya está en Rendimiento, Negativización y Comparar periodos (2026-07-29).
 10. Decidir si el registro de usuarios sigue abierto o pasa a altas manuales, ahora que la app es alcanzable por internet.
 11. Comprar y conectar un dominio propio para reemplazar el de Railway.
 
