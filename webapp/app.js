@@ -27,6 +27,7 @@ const state = {
     exceptions: '',
     status: 'idle', error: null, fileName: null, rows: null,
     sortBy: 'cost', sortDir: 'desc',
+    campaignFilter: 'all', // por campaign_id — solo aplica con source==='api'
     source: 'file', // 'file' | 'api'
     api: {
       statusChecked: false, configured: false,
@@ -1698,6 +1699,24 @@ function renderNegPage() {
     body = renderNegReady();
   }
 
+  // Filtro por campaña — solo tiene sentido con source==='api', porque un
+  // CSV no trae campaign_id/campaign_name por fila. Deja ver solo los
+  // términos de una campaña puntual antes de decidir qué subir como negativo.
+  let campaignFilterHtml = '';
+  if (s.source === 'api' && s.status === 'ready' && s.rows && s.rows.length) {
+    const campaignsById = new Map();
+    s.rows.forEach((r) => { if (r.campaign_id) campaignsById.set(r.campaign_id, r.campaign_name || r.campaign_id); });
+    const campaigns = [...campaignsById.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+    const options = ['<option value="all">Todas las campañas</option>']
+      .concat(campaigns.map(([id, name]) => `<option value="${escapeHtml(id)}" ${s.campaignFilter === id ? 'selected' : ''}>${escapeHtml(name)}</option>`))
+      .join('');
+    campaignFilterHtml = `
+      <div class="field">
+        <label>Ver solo esta campaña</label>
+        <select id="neg-campaign-filter" style="width:320px">${options}</select>
+      </div>`;
+  }
+
   return `
     <div class="card control-panel">
       <div class="field" style="flex:1;min-width:240px">
@@ -1724,9 +1743,16 @@ function renderNegPage() {
         <button class="btn-outline" data-action="neg-demo">Usar datos de ejemplo</button>
         ${s.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.fileName)}</strong></div>` : ''}
       ` : renderNegApiPanel()}
+      ${campaignFilterHtml}
     </div>
     ${body}
   `;
+}
+
+function getNegFilteredRows() {
+  const s = state.neg;
+  if (!s.rows) return [];
+  return s.campaignFilter === 'all' ? s.rows : s.rows.filter((r) => r.campaign_id === s.campaignFilter);
 }
 
 // Mismo patrón que renderRendApiPanel (Rendimiento) — cuenta + rango de
@@ -1811,7 +1837,7 @@ function renderNegPushPanel() {
   const s = state.neg;
   const p = s.push;
   const selectedCount = p.selected.size;
-  const candidatesCount = (s.rows || []).filter((r) => r.clasificacion === 'negativizar').length;
+  const candidatesCount = getNegFilteredRows().filter((r) => r.clasificacion === 'negativizar').length;
   const busy = p.status === 'previewing' || p.status === 'pushing';
 
   return `
@@ -1851,7 +1877,7 @@ function renderNegPushPanel() {
 
 function renderNegReady() {
   const s = state.neg;
-  const rows = s.rows;
+  const rows = getNegFilteredRows();
   const summary = engine.summarizeClassification(rows);
   const maxCost = Math.max(1, summary.mantener.costo, summary.revisar.costo, summary.negativizar.costo);
   const hasCampaign = s.source === 'api';
@@ -1983,7 +2009,7 @@ function runNegAnalysis(text, fileName) {
     const exceptions = s.exceptions.split('\n').map((v) => v.trim()).filter(Boolean);
     const rows = engine.loadSearchTerms(text);
     const classified = engine.classifyTerms(rows, coreTerms, exceptions);
-    Object.assign(s, { status: 'ready', rows: classified, fileName });
+    Object.assign(s, { status: 'ready', rows: classified, fileName, campaignFilter: 'all' });
   } catch (err) {
     Object.assign(s, { status: 'error', error: err.message || String(err), fileName });
   }
@@ -1999,7 +2025,7 @@ function runNegAnalysisFromApiRows(apiRows, fileName) {
     const rows = engine.loadSearchTermsFromApi(apiRows);
     const classified = engine.classifyTerms(rows, coreTerms, exceptions);
     s.push.selected = new Set(); s.push.status = 'idle'; s.push.preview = null; s.push.result = null; s.push.error = null;
-    Object.assign(s, { status: 'ready', rows: classified, fileName });
+    Object.assign(s, { status: 'ready', rows: classified, fileName, campaignFilter: 'all' });
   } catch (err) {
     Object.assign(s, { status: 'error', error: err.message || String(err), fileName });
   }
@@ -2938,6 +2964,12 @@ function bindEvents() {
   const negApiDateTo = document.getElementById('neg-api-date-to');
   if (negApiDateTo) negApiDateTo.addEventListener('change', (e) => { state.neg.api.dateTo = e.target.value; });
 
+  const negCampaignFilter = document.getElementById('neg-campaign-filter');
+  if (negCampaignFilter) negCampaignFilter.addEventListener('change', (e) => {
+    state.neg.campaignFilter = e.target.value;
+    render();
+  });
+
   document.querySelectorAll('.neg-push-checkbox').forEach((cb) => {
     cb.addEventListener('change', (e) => {
       const key = e.target.dataset.key;
@@ -3120,7 +3152,7 @@ function handleAction(action) {
     case 'neg-api-fetch': fetchGoogleAdsSearchTerms(); break;
 
     case 'neg-push-select-all': {
-      const candidates = (state.neg.rows || []).filter((r) => r.clasificacion === 'negativizar');
+      const candidates = getNegFilteredRows().filter((r) => r.clasificacion === 'negativizar');
       state.neg.push.selected = new Set(candidates.map((r) => `${r.term}::${r.campaign_id}`));
       render();
       break;
@@ -3135,7 +3167,7 @@ function handleAction(action) {
     }
     case 'download-neg-candidatos': {
       const hasCampaign = state.neg.source === 'api';
-      const rows = state.neg.rows.filter((r) => r.clasificacion === 'negativizar').sort((a, b) => b.cost - a.cost);
+      const rows = getNegFilteredRows().filter((r) => r.clasificacion === 'negativizar').sort((a, b) => b.cost - a.cost);
       const header = ['Término', ...(hasCampaign ? ['Campaña'] : []), 'Clics', 'Impresiones', 'Costo', 'Conversiones'];
       const data = [header, ...rows.map((r) => [r.term, ...(hasCampaign ? [r.campaign_name || 'N/D'] : []), r.clicks, r.impr, r.cost.toFixed(2), r.conversions || 0])];
       engine.downloadCsv('negativos_candidatos.csv', data);
@@ -3143,7 +3175,7 @@ function handleAction(action) {
     }
     case 'download-neg-revisar': {
       const hasCampaign = state.neg.source === 'api';
-      const rows = state.neg.rows.filter((r) => r.clasificacion === 'revisar').sort((a, b) => b.cost - a.cost);
+      const rows = getNegFilteredRows().filter((r) => r.clasificacion === 'revisar').sort((a, b) => b.cost - a.cost);
       const header = ['Término', ...(hasCampaign ? ['Campaña'] : []), 'Clics', 'Impresiones', 'Costo', 'Conversiones'];
       const data = [header, ...rows.map((r) => [r.term, ...(hasCampaign ? [r.campaign_name || 'N/D'] : []), r.clicks, r.impr, r.cost.toFixed(2), r.conversions || 0])];
       engine.downloadCsv('negativos_revisar.csv', data);
