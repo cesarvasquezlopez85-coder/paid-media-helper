@@ -185,6 +185,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_impression_share_daily(parse_qs(parsed.query))
             return
 
+        if path == "/api/google-ads/roas":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_roas(parse_qs(parsed.query))
+            return
+
         filename = STATIC_FILES.get(path)
         if filename is None:
             self.send_error(404, "No encontrado")
@@ -218,6 +224,10 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_google_ads_negative_keywords(payload)
+        elif path == "/api/google-ads/roas-adjust":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_roas_adjust(payload)
         else:
             self.send_error(404, "No encontrado")
 
@@ -496,6 +506,32 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_json(502, {"error": str(e)})
 
+    def _handle_google_ads_roas(self, query):
+        # ROAS logrado + ROAS objetivo por campaña, para la sección ROAS.
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        date_from = (query.get("date_from") or [""])[0].strip()
+        date_to = (query.get("date_to") or [""])[0].strip()
+        only_active = (query.get("only_active") or [""])[0].strip() == "1"
+        date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+        if not date_pattern.match(date_from) or not date_pattern.match(date_to):
+            self._send_json(400, {"error": "date_from y date_to deben tener formato AAAA-MM-DD."})
+            return
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, {"rows": google_ads_client.simulated_roas_by_campaign(only_active), "simulated": True})
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+
+        try:
+            rows = google_ads_client.fetch_roas_by_campaign(customer_id, date_from, date_to, only_active)
+            self._send_json(200, {"rows": rows, "simulated": False})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_json(502, {"error": str(e)})
+
     # Escritura real sobre la cuenta del cliente — a diferencia de todos los
     # demás endpoints de /api/google-ads/, este modifica Google Ads. Por
     # default (validate_only ausente o true) SIEMPRE valida sin aplicar; el
@@ -526,6 +562,44 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             result = google_ads_client.push_negative_keywords(customer_id, items, validate_only)
             self._send_json(200, result)
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_json(502, {"error": str(e)})
+
+    # Escritura real sobre la cuenta del cliente — ajusta el ROAS objetivo de
+    # una campaña. Igual que negative-keywords, por default (validate_only
+    # ausente o true) SIEMPRE valida sin aplicar.
+    def _handle_google_ads_roas_adjust(self, payload):
+        customer_id = str(payload.get("customer_id") or "").strip()
+        campaign_id = str(payload.get("campaign_id") or "").strip()
+        bidding_strategy_type = str(payload.get("bidding_strategy_type") or "").strip()
+        validate_only = payload.get("validate_only", True) is not False
+        try:
+            target_roas = float(payload.get("target_roas"))
+        except (TypeError, ValueError):
+            self._send_json(400, {"error": "target_roas debe ser un número."})
+            return
+
+        if not campaign_id or not bidding_strategy_type:
+            self._send_json(400, {"error": "Faltan campaign_id o bidding_strategy_type."})
+            return
+
+        if not google_ads_client.is_configured():
+            try:
+                result = google_ads_client.simulated_update_campaign_target_roas(campaign_id, bidding_strategy_type, target_roas, validate_only)
+                self._send_json(200, result)
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+
+        try:
+            result = google_ads_client.update_campaign_target_roas(customer_id, campaign_id, bidding_strategy_type, target_roas, validate_only)
+            self._send_json(200, result)
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_json(502, {"error": str(e)})
 

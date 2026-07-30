@@ -102,6 +102,32 @@ const state = {
     investmentRows: null, investmentFileName: null, investmentError: null,
     growthGoalPct: '',
   },
+
+  // Sección ROAS — solo existe conectada a Google Ads (el ROAS objetivo de
+  // la estrategia de puja no viene en ningún CSV, y ajustarlo necesita
+  // escribir a la cuenta real), así que no hay modo "Subir archivo" acá.
+  roas: {
+    status: 'idle', error: null, rows: null,
+    api: {
+      statusChecked: false, configured: false,
+      accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
+      dateFrom: '', dateTo: '', onlyActive: false,
+      simulated: false, error: null,
+    },
+    // Ajuste de ROAS objetivo — un solo campaign_id "en edición" a la vez.
+    // Nunca hay un solo clic entre decidir el nuevo valor y escribirlo en
+    // la cuenta real: siempre pasa por vista previa (validateOnly) antes de
+    // que el botón de confirmar quede disponible — mismo patrón que
+    // Negativización, aunque acá la vista previa de Google es menos
+    // confiable (ver nota en google_ads_client.py sobre ROAS_ADJUSTABLE_STRATEGIES),
+    // así que el filtro real de seguridad es el chequeo de estrategia
+    // compatible antes de construir la operación, no la vista previa en sí.
+    adjust: {
+      campaignId: null, newTargetRoas: '',
+      status: 'idle', // idle | previewing | preview_ready | applying | done | error
+      preview: null, result: null, error: null,
+    },
+  },
 };
 
 const PAGE_META = {
@@ -132,6 +158,10 @@ const PAGE_META = {
   proyeccion: {
     title: 'Proyección de ventas',
     caption: 'Sube el histórico mensual de ingresos del hotel (mínimo 12 meses, idealmente 24+) y obtén una proyección a futuro que combina tendencia y temporada alta/baja.',
+  },
+  roas: {
+    title: 'ROAS',
+    caption: 'Compara el ROAS logrado contra el ROAS objetivo configurado en la estrategia de puja de cada campaña, y ajústalo directo desde acá cuando la estrategia lo permita.',
   },
 };
 
@@ -204,6 +234,7 @@ function render() {
   else if (state.page === 'comparativa') pageHtml = renderComparePage();
   else if (state.page === 'oportunidad') pageHtml = renderOpportunityPage();
   else if (state.page === 'proyeccion') pageHtml = renderForecastPage();
+  else if (state.page === 'roas') pageHtml = renderRoasPage();
   else pageHtml = renderBookPage();
 
   root.innerHTML = `
@@ -3316,6 +3347,325 @@ function runBookAnalysisFromRows(rows2D, fileName) {
 }
 
 // ---------------------------------------------------------------------------
+// Sección ROAS — solo modo API (el ROAS objetivo de la estrategia de puja
+// no existe en ningún CSV). Trae, por campaña: ROAS logrado (gasto vs.
+// valor de conversión real) y ROAS objetivo configurado, y permite
+// ajustarlo cuando la estrategia de puja lo soporta (TARGET_ROAS o
+// Maximizar valor de conversión, sin compartir la estrategia con otras
+// campañas). Ver google_ads_client.py → ROAS_ADJUSTABLE_STRATEGIES para
+// por qué el chequeo de compatibilidad se hace en la plataforma y no se
+// deja en manos de validateOnly de Google (confirmado con una cuenta real
+// que es más permisivo de lo que parece).
+// ---------------------------------------------------------------------------
+
+const BID_STRATEGY_LABELS_ES = {
+  TARGET_ROAS: 'ROAS objetivo',
+  MAXIMIZE_CONVERSION_VALUE: 'Maximizar valor de conversión',
+  MAXIMIZE_CONVERSIONS: 'Maximizar conversiones',
+  TARGET_CPA: 'CPA objetivo',
+  MAXIMIZE_CLICKS: 'Maximizar clics',
+  TARGET_SPEND: 'Gasto objetivo',
+  MANUAL_CPC: 'CPC manual',
+  MANUAL_CPM: 'CPM manual',
+  MANUAL_CPV: 'CPV manual',
+  TARGET_IMPRESSION_SHARE: 'Cuota de impresiones objetivo',
+  PERCENT_CPC: 'CPC por porcentaje',
+  COMMISSION: 'Comisión',
+};
+
+function ensureRoasGoogleAdsStatusLoaded() {
+  const a = state.roas.api;
+  if (a.statusChecked) return;
+  fetch('/api/google-ads/status')
+    .then((r) => r.json())
+    .then((data) => { a.statusChecked = true; a.configured = !!data.configured; render(); })
+    .catch(() => { a.statusChecked = true; a.configured = false; render(); });
+}
+
+function loadRoasGoogleAdsAccounts() {
+  const a = state.roas.api;
+  a.accountsStatus = 'loading'; a.error = null;
+  render();
+  fetch('/api/google-ads/accounts')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.accounts = data.accounts || [];
+      a.simulated = !!data.simulated;
+      if (!a.dateFrom || !a.dateTo) {
+        const today = new Date();
+        const monthAgo = new Date(today);
+        monthAgo.setDate(monthAgo.getDate() - 30);
+        a.dateTo = today.toISOString().slice(0, 10);
+        a.dateFrom = monthAgo.toISOString().slice(0, 10);
+      }
+      a.accountsStatus = 'ready';
+      render();
+    })
+    .catch((err) => {
+      a.accountsStatus = 'error'; a.error = err.message || String(err);
+      render();
+    });
+}
+
+function fetchRoasByCampaign() {
+  const s = state.roas;
+  const a = s.api;
+  const manualId = (a.accountIdManual || '').replace(/[^0-9]/g, '');
+  const customerId = manualId || a.accountId;
+  if (!customerId && !a.simulated) { a.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
+  if (!a.dateFrom || !a.dateTo) { a.error = 'Elige el rango de fechas primero.'; render(); return; }
+
+  a.error = null;
+  s.status = 'loading'; s.error = null;
+  render();
+
+  const params = new URLSearchParams({ customer_id: customerId || '', date_from: a.dateFrom, date_to: a.dateTo, only_active: a.onlyActive ? '1' : '0' });
+  fetch(`/api/google-ads/roas?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.simulated = !!data.simulated;
+      s.rows = data.rows || [];
+      s.status = 'ready';
+      s.adjust = { campaignId: null, newTargetRoas: '', status: 'idle', preview: null, result: null, error: null };
+      render();
+    })
+    .catch((err) => {
+      a.error = err.message || String(err);
+      s.status = 'idle';
+      render();
+    });
+}
+
+// preview=true valida sin aplicar; preview=false escribe de verdad en la
+// cuenta. El chequeo de "esta estrategia sí soporta ROAS objetivo" ya pasó
+// en el cliente antes de mostrar el botón "Ajustar" — este llamado repite
+// el chequeo también del lado del servidor (google_ads_client.py), por si
+// la fila quedó desactualizada.
+function adjustRoasTarget(preview) {
+  const s = state.roas;
+  const adj = s.adjust;
+  const row = (s.rows || []).find((r) => r.campaign_id === adj.campaignId);
+  if (!row) { adj.error = 'No se encontró la campaña.'; render(); return; }
+
+  const pct = parseFloat(adj.newTargetRoas);
+  if (Number.isNaN(pct) || pct <= 0) { adj.error = 'Escribe un ROAS objetivo válido, mayor que cero (ej. 350 para 350%).'; render(); return; }
+
+  const a = s.api;
+  const manualId = (a.accountIdManual || '').replace(/[^0-9]/g, '');
+  const customerId = manualId || a.accountId;
+
+  adj.status = preview ? 'previewing' : 'applying';
+  adj.error = null;
+  render();
+
+  fetch('/api/google-ads/roas-adjust', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customer_id: customerId,
+      campaign_id: row.campaign_id,
+      bidding_strategy_type: row.bidding_strategy_type,
+      target_roas: pct / 100, // la API espera un ratio (3.5 = 350%), no un porcentaje
+      validate_only: preview,
+    }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      if (preview) {
+        adj.status = 'preview_ready';
+        adj.preview = { targetRoasPct: pct, campaignName: row.campaign_name };
+      } else {
+        adj.status = 'done';
+        adj.result = { targetRoasPct: pct, campaignName: row.campaign_name };
+        row.target_roas = pct / 100; // refleja el nuevo valor en la tabla sin tener que volver a traer todo
+      }
+      render();
+    })
+    .catch((err) => {
+      adj.status = 'error';
+      adj.error = err.message || String(err);
+      render();
+    });
+}
+
+function renderRoasApiPanel() {
+  const a = state.roas.api;
+
+  if (!a.statusChecked) {
+    return `<div class="field"><p class="footnote">Consultando la conexión con Google Ads…</p></div>`;
+  }
+
+  const simulatedNotice = a.simulated ? `
+    <div class="ok-panel" style="margin:10px 0">
+      <strong>Modo simulado.</strong> La API de Google Ads todavía no está configurada en el servidor
+      (falta la aprobación del developer token de Google) — estos son datos de ejemplo, no de una cuenta real.
+    </div>` : '';
+
+  if (a.accountsStatus === 'idle') {
+    return `
+      <div class="card control-panel align-end">
+        <div class="field">
+          <p class="footnote">${a.configured ? 'Conectado a la API de Google Ads.' : 'La API de Google Ads aún no está configurada — se usarán datos simulados para probar el flujo.'}</p>
+          <button class="btn-outline" data-action="roas-api-load-accounts">Ver cuentas disponibles</button>
+        </div>
+      </div>`;
+  }
+  if (a.accountsStatus === 'loading') {
+    return `<div class="card control-panel align-end"><div class="field"><p class="footnote">Cargando cuentas…</p></div></div>`;
+  }
+  if (a.accountsStatus === 'error') {
+    return `<div class="error-panel"><strong>No se pudieron cargar las cuentas.</strong> ${escapeHtml(a.error)}</div>`;
+  }
+
+  const accountOptions = ['<option value="">Elige una cuenta…</option>']
+    .concat(a.accounts.map((acc) => `<option value="${escapeHtml(acc.id)}" ${a.accountId === acc.id ? 'selected' : ''}>${escapeHtml(acc.name)} (${escapeHtml(acc.id)})</option>`))
+    .join('');
+
+  return `
+    <div class="card control-panel align-end">
+      ${simulatedNotice}
+      <div class="field">
+        <label>Cuenta</label>
+        <select id="roas-api-account" style="width:320px">${accountOptions}</select>
+      </div>
+      <div class="field">
+        <label>...o escribe el ID de la cuenta</label>
+        <input type="text" id="roas-api-account-manual" value="${escapeHtml(a.accountIdManual)}" placeholder="ej. 6862893390" style="width:160px" />
+      </div>
+      <div style="display:flex;gap:24px;flex-wrap:nowrap">
+        <div class="field">
+          <label>Desde</label>
+          <input type="date" id="roas-api-date-from" value="${escapeHtml(a.dateFrom)}" />
+        </div>
+        <div class="field">
+          <label>Hasta</label>
+          <input type="date" id="roas-api-date-to" value="${escapeHtml(a.dateTo)}" />
+        </div>
+      </div>
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:8px;font-weight:400">
+          <input type="checkbox" id="roas-api-only-active" ${a.onlyActive ? 'checked' : ''} />
+          Solo campañas activas
+        </label>
+      </div>
+      <button class="btn-accent" data-action="roas-api-fetch">Traer ROAS de Google Ads</button>
+      ${a.error ? `<div class="error-panel" style="margin-top:10px"><strong>No se pudo traer el reporte.</strong> ${escapeHtml(a.error)}</div>` : ''}
+    </div>`;
+}
+
+function renderRoasAdjustRow(row) {
+  const s = state.roas;
+  const adj = s.adjust;
+  const isEditing = adj.campaignId === row.campaign_id;
+  const strategyLabel = BID_STRATEGY_LABELS_ES[row.bidding_strategy_type] || row.bidding_strategy_type;
+
+  if (!isEditing) {
+    if (row.is_portfolio) {
+      return `<span class="footnote" title="Esta campaña usa una estrategia de puja compartida con otras campañas — ajustarla desde acá afectaría a todas, así que se deja en solo lectura.">Estrategia compartida — solo lectura</span>`;
+    }
+    if (!row.adjustable) {
+      return `<span class="footnote" title="La estrategia ${escapeHtml(strategyLabel)} no tiene un ROAS objetivo — habría que cambiar de estrategia de puja primero.">No ajustable desde acá</span>`;
+    }
+    return `<button class="btn-outline sm" data-action="roas-edit-start" data-campaign="${escapeHtml(row.campaign_id)}">Ajustar</button>`;
+  }
+
+  const busy = adj.status === 'previewing' || adj.status === 'applying';
+
+  if (adj.status === 'idle' || adj.status === 'error') {
+    return `
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="text" id="roas-adjust-input" value="${escapeHtml(adj.newTargetRoas)}" placeholder="ej. 350" style="width:80px" />
+        <span class="footnote">%</span>
+        <button class="btn-accent sm" data-action="roas-edit-preview" ${busy ? 'disabled' : ''}>Vista previa</button>
+        <button class="btn-outline sm" data-action="roas-edit-cancel">Cancelar</button>
+      </div>
+      ${adj.error ? `<div class="error-panel" style="margin-top:6px;font-size:12px">${escapeHtml(adj.error)}</div>` : ''}`;
+  }
+
+  if (busy) {
+    return `<p class="footnote">${adj.status === 'previewing' ? 'Validando con Google Ads (vista previa, no aplica nada todavía)…' : 'Aplicando el cambio en Google Ads…'}</p>`;
+  }
+
+  if (adj.status === 'preview_ready' && adj.preview) {
+    return `
+      <div class="ok-panel" style="margin:6px 0;padding:10px 12px;font-size:12.5px">
+        <strong>Vista previa lista.</strong> Vas a cambiar el ROAS objetivo de "${escapeHtml(adj.preview.campaignName)}" a <strong>${adj.preview.targetRoasPct}%</strong> — esto cambia cómo puja Google en una campaña real y en producción.
+        <div style="margin-top:8px;display:flex;gap:8px">
+          <button class="btn-accent sm" data-action="roas-edit-confirm">Confirmar y aplicar</button>
+          <button class="btn-outline sm" data-action="roas-edit-cancel">Cancelar</button>
+        </div>
+      </div>`;
+  }
+
+  if (adj.status === 'done' && adj.result) {
+    return `<div class="ok-panel" style="margin:6px 0;padding:8px 12px;font-size:12.5px"><strong>Listo.</strong> ROAS objetivo actualizado a ${adj.result.targetRoasPct}%.</div>`;
+  }
+
+  return '';
+}
+
+function renderRoasPage() {
+  const s = state.roas;
+  // No hay modo "Subir archivo" en esta sección (el ROAS objetivo no viene
+  // en ningún CSV), así que a diferencia de las páginas con toggle, acá
+  // hay que disparar la consulta de estado apenas se entra a la página —
+  // idempotente, ensureRoasGoogleAdsStatusLoaded() no repite la llamada
+  // una vez que ya tiene respuesta.
+  ensureRoasGoogleAdsStatusLoaded();
+
+  const controlPanel = renderRoasApiPanel();
+
+  let body = '';
+  if (s.status === 'idle') {
+    body = `
+      <div class="card state-panel idle">
+        ${icon('percent', 30)}
+        <p>Conecta una cuenta de Google Ads y trae el rango de fechas para ver el ROAS logrado y el ROAS objetivo de cada campaña.</p>
+      </div>`;
+  } else if (s.status === 'loading') {
+    body = `
+      <div class="card state-panel loading">
+        <div class="spinner"></div>
+        <p>Trayendo ROAS por campaña…</p>
+      </div>`;
+  } else if (s.status === 'ready') {
+    const rows = [...(s.rows || [])].sort((a, b) => (b.roas ?? -1) - (a.roas ?? -1));
+    const rowsHtml = rows.map((r) => `
+      <tr>
+        <td>${escapeHtml(r.campaign_name)}</td>
+        <td>${BID_STRATEGY_LABELS_ES[r.bidding_strategy_type] || escapeHtml(r.bidding_strategy_type)}</td>
+        <td>${r.roas != null ? (r.roas * 100).toFixed(0) + '%' : 'N/D'}</td>
+        <td>${r.target_roas != null ? (r.target_roas * 100).toFixed(0) + '%' : 'N/D'}</td>
+        <td>${renderRoasAdjustRow(r)}</td>
+      </tr>`).join('');
+
+    body = rows.length ? `
+      <div class="card table-panel">
+        <div class="table-panel-head">
+          <h3>ROAS por campaña (${rows.length})</h3>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Campaña</th><th>Estrategia de puja</th><th>ROAS logrado</th><th>ROAS objetivo</th><th>Ajustar</th></tr></thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+        </div>
+        <p class="footnote" style="margin-top:14px">
+          El ROAS logrado es gasto real vs. valor de conversión real, en el rango de fechas elegido. El ROAS objetivo solo existe para campañas con estrategia "ROAS objetivo" o "Maximizar valor de conversión" — el resto de estrategias no tienen ese concepto y no se pueden ajustar desde acá.
+          Ajustar el ROAS objetivo cambia de verdad cómo puja Google en la cuenta real — la vista previa de Google para este cambio en particular es menos confiable que la de negativos (validó sin error incluso una estrategia incompatible en una prueba), así que el chequeo de "esta campaña sí admite ROAS objetivo" lo hace la plataforma antes de dejar ajustar, no solo Google.
+        </p>
+      </div>` : `<div class="error-panel">No se encontraron campañas con datos en este rango de fechas.</div>`;
+  } else if (s.status === 'error') {
+    body = `<div class="error-panel"><strong>No se pudo traer el reporte.</strong> ${escapeHtml(s.error)}</div>`;
+  }
+
+  return `${controlPanel}${body}`;
+}
+
+// ---------------------------------------------------------------------------
 // Eventos
 // ---------------------------------------------------------------------------
 
@@ -3446,6 +3796,26 @@ function bindEvents() {
   if (oppApiDateTo) oppApiDateTo.addEventListener('change', (e) => { state.opportunity.api.dateTo = e.target.value; });
   const oppApiOnlyActive = document.getElementById('opp-api-only-active');
   if (oppApiOnlyActive) oppApiOnlyActive.addEventListener('change', (e) => { state.opportunity.api.onlyActive = e.target.checked; });
+
+  // ROAS
+  const roasApiAccount = document.getElementById('roas-api-account');
+  if (roasApiAccount) roasApiAccount.addEventListener('change', (e) => { state.roas.api.accountId = e.target.value; });
+  const roasApiAccountManual = document.getElementById('roas-api-account-manual');
+  if (roasApiAccountManual) roasApiAccountManual.addEventListener('input', (e) => { state.roas.api.accountIdManual = e.target.value; });
+  const roasApiDateFrom = document.getElementById('roas-api-date-from');
+  if (roasApiDateFrom) roasApiDateFrom.addEventListener('change', (e) => { state.roas.api.dateFrom = e.target.value; });
+  const roasApiDateTo = document.getElementById('roas-api-date-to');
+  if (roasApiDateTo) roasApiDateTo.addEventListener('change', (e) => { state.roas.api.dateTo = e.target.value; });
+  const roasApiOnlyActive = document.getElementById('roas-api-only-active');
+  if (roasApiOnlyActive) roasApiOnlyActive.addEventListener('change', (e) => { state.roas.api.onlyActive = e.target.checked; });
+  const roasAdjustInput = document.getElementById('roas-adjust-input');
+  if (roasAdjustInput) roasAdjustInput.addEventListener('input', (e) => { state.roas.adjust.newTargetRoas = e.target.value; });
+  document.querySelectorAll('[data-action="roas-edit-start"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.roas.adjust = { campaignId: btn.dataset.campaign, newTargetRoas: '', status: 'idle', preview: null, result: null, error: null };
+      render();
+    });
+  });
 
   document.querySelectorAll('[data-opp-sort]').forEach((th) => {
     th.addEventListener('click', () => {
@@ -3703,6 +4073,16 @@ function handleAction(action) {
     }
     case 'opp-api-load-accounts': loadOpportunityGoogleAdsAccounts(); break;
     case 'opp-api-fetch': fetchOpportunityGoogleAdsCampaigns(); break;
+
+    case 'roas-api-load-accounts': loadRoasGoogleAdsAccounts(); break;
+    case 'roas-api-fetch': fetchRoasByCampaign(); break;
+    case 'roas-edit-cancel': {
+      state.roas.adjust = { campaignId: null, newTargetRoas: '', status: 'idle', preview: null, result: null, error: null };
+      render();
+      break;
+    }
+    case 'roas-edit-preview': adjustRoasTarget(true); break;
+    case 'roas-edit-confirm': adjustRoasTarget(false); break;
 
     case 'forecast-demo': {
       state.forecast.status = 'loading'; state.forecast.error = null; state.forecast.fileName = 'ingresos_ejemplo.csv';

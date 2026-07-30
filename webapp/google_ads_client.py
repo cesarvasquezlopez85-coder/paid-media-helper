@@ -446,6 +446,136 @@ def fetch_impression_share_daily(customer_id, date_from, date_to):
     return rows
 
 
+# Etiquetas en español de las estrategias de puja — solo para mostrar en la
+# interfaz, el valor real que llega de la API es el nombre en inglés
+# (bidding_strategy_type).
+BID_STRATEGY_LABELS = {
+    "TARGET_ROAS": "ROAS objetivo",
+    "MAXIMIZE_CONVERSION_VALUE": "Maximizar valor de conversión",
+    "MAXIMIZE_CONVERSIONS": "Maximizar conversiones",
+    "TARGET_CPA": "CPA objetivo",
+    "MAXIMIZE_CLICKS": "Maximizar clics",
+    "TARGET_SPEND": "Gasto objetivo",
+    "MANUAL_CPC": "CPC manual",
+    "MANUAL_CPM": "CPM manual",
+    "MANUAL_CPV": "CPV manual",
+    "TARGET_IMPRESSION_SHARE": "Cuota de impresiones objetivo",
+    "PERCENT_CPC": "CPC por porcentaje",
+    "COMMISSION": "Comisión",
+}
+
+# Solo estas dos estrategias tienen un ROAS objetivo que se pueda leer o
+# ajustar — el resto (Maximizar conversiones, CPA objetivo, CPC manual, etc.)
+# no tienen ese concepto en absoluto. Importante: confirmado con una prueba
+# real (validateOnly) que Google Ads NO rechaza escribir target_roas sobre
+# una campaña con una estrategia incompatible (ej. MAXIMIZE_CONVERSIONS) —
+# la validación de Google es más permisiva de lo que parece, así que este
+# set se usa para bloquear el ajuste del lado de la plataforma ANTES de
+# construir la operación, en vez de confiar en que Google la rechace.
+ROAS_ADJUSTABLE_STRATEGIES = {"TARGET_ROAS", "MAXIMIZE_CONVERSION_VALUE"}
+
+
+def fetch_roas_by_campaign(customer_id, date_from, date_to, only_active=False):
+    """Por campaña: el ROAS logrado (valor de conversión ÷ gasto, del
+    rango de fechas) junto con la estrategia de puja actual y su ROAS
+    objetivo configurado (si la estrategia lo soporta) — para la sección
+    ROAS, que compara ambos y permite ajustar el objetivo.
+
+    campaign.bidding_strategy (no confundir con bidding_strategy_type) es
+    el resource name de una estrategia de puja COMPARTIDA/portfolio, si la
+    campaña usa una en vez de su propia estrategia — en ese caso el ROAS
+    objetivo real vive en el recurso bidding_strategy, no en la campaña, y
+    ajustarlo afectaría a todas las campañas que comparten esa estrategia
+    (se marca is_portfolio=True para que la interfaz lo deje en solo
+    lectura, en vez de ofrecer un ajuste que en realidad tocaría más de
+    una campaña sin que quede claro)."""
+    status_filter = "campaign.status = 'ENABLED'" if only_active else "campaign.status != 'REMOVED'"
+    query = f"""
+        SELECT campaign.id, campaign.name, campaign.status,
+               campaign.bidding_strategy_type,
+               campaign.bidding_strategy,
+               campaign.target_roas.target_roas,
+               campaign.maximize_conversion_value.target_roas,
+               metrics.cost_micros, metrics.conversions_value
+        FROM campaign
+        WHERE segments.date BETWEEN '{date_from}' AND '{date_to}'
+          AND {status_filter}
+    """
+    results = _search(customer_id, query)
+    rows = []
+    for r in results:
+        campaign = r.get("campaign", {})
+        metrics = r.get("metrics", {})
+        strategy_type = campaign.get("biddingStrategyType") or "UNSPECIFIED"
+        cost = _micros_to_units(_int_or_none(metrics.get("costMicros"))) or 0
+        conv_value = _float_or_none(metrics.get("conversionsValue")) or 0
+        target_roas = campaign.get("targetRoas", {}).get("targetRoas")
+        if target_roas is None:
+            target_roas = campaign.get("maximizeConversionValue", {}).get("targetRoas")
+        rows.append({
+            "campaign_id": str(campaign.get("id")) if campaign.get("id") is not None else None,
+            "campaign_name": campaign.get("name") or "(sin nombre)",
+            "status": campaign.get("status") or "UNKNOWN",
+            "bidding_strategy_type": strategy_type,
+            "is_portfolio": bool(campaign.get("biddingStrategy")),
+            "cost": cost,
+            "conv_value": conv_value if conv_value > 0 else None,
+            "roas": (conv_value / cost) if cost > 0 and conv_value > 0 else None,
+            "target_roas": target_roas,
+            "adjustable": strategy_type in ROAS_ADJUSTABLE_STRATEGIES and not campaign.get("biddingStrategy"),
+        })
+    return rows
+
+
+def update_campaign_target_roas(customer_id, campaign_id, bidding_strategy_type, target_roas, validate_only=True):
+    """Ajusta el ROAS objetivo de una campaña. Solo aplica a campañas con
+    estrategia propia (no compartida) TARGET_ROAS o MAXIMIZE_CONVERSION_VALUE
+    — se valida ANTES de construir la operación (ver nota en
+    ROAS_ADJUSTABLE_STRATEGIES sobre por qué no basta con confiar en
+    validateOnly). target_roas es un ratio (3.5 = 350%), no un porcentaje.
+
+    validate_only=True (vista previa): Google valida la operación sin
+    aplicarla. Solo con validate_only=False el cambio queda escrito de
+    verdad en la cuenta."""
+    if bidding_strategy_type not in ROAS_ADJUSTABLE_STRATEGIES:
+        label = BID_STRATEGY_LABELS.get(bidding_strategy_type, bidding_strategy_type)
+        raise ValueError(
+            f"Esta campaña usa la estrategia \"{label}\", que no tiene un ROAS objetivo — "
+            "habría que cambiar de estrategia de puja primero, algo que esta plataforma no hace."
+        )
+    if not target_roas or target_roas <= 0:
+        raise ValueError("El ROAS objetivo debe ser un número mayor que cero.")
+
+    if bidding_strategy_type == "TARGET_ROAS":
+        mutate_field = {"targetRoas": {"targetRoas": target_roas}}
+        update_mask = "target_roas.target_roas"
+    else:  # MAXIMIZE_CONVERSION_VALUE
+        mutate_field = {"maximizeConversionValue": {"targetRoas": target_roas}}
+        update_mask = "maximize_conversion_value.target_roas"
+
+    url = f"{BASE_URL}/customers/{customer_id}/campaigns:mutate"
+    body = {
+        "operations": [{
+            "update": {"resourceName": f"customers/{customer_id}/campaigns/{campaign_id}", **mutate_field},
+            "updateMask": update_mask,
+        }],
+        "validateOnly": validate_only,
+    }
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Google Ads API respondió {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"No se pudo conectar a la API de Google Ads: {e.reason}") from e
+
+    return {"validate_only": validate_only, "applied": not validate_only, "target_roas": target_roas}
+
+
 def push_negative_keywords(customer_id, items, validate_only=True):
     """Sube palabras clave negativas de concordancia exacta a nivel de
     campaña. items: lista de {"campaign_id": ..., "term": ...}.
@@ -528,6 +658,62 @@ def simulated_campaign_rows(only_active=False):
     if only_active:
         return [c for c in SIMULATED_CAMPAIGNS if c["status"] == "ENABLED"]
     return SIMULATED_CAMPAIGNS
+
+
+# IDs consistentes con SIMULATED_ACCOUNT_CAMPAIGNS donde coinciden, más uno
+# nuevo para la campaña pausada — para que el flujo de ajuste (que necesita
+# un campaign_id real para armar el resourceName) también se pueda probar
+# en modo simulado.
+_SIMULATED_CAMPAIGN_IDS_BY_NAME = {
+    "Estelar Hoteles - CO:es - PMAX Corpo": "1111111103",
+    "Estelar Hoteles - CO:es - Search Marca": "1111111102",
+    "Estelar Hoteles - CO:es - Search Genérica": "1111111101",
+    "Estelar Hoteles - CO:es - Display Remarketing": "1111111104",
+    "Estelar Hoteles - CO:es - Search Temporada Baja (pausada)": "1111111105",
+}
+
+# target_roas simulado: dos campañas SÍ tienen un objetivo configurado (una
+# por cada estrategia ajustable), las demás no — mismo mix que se encontró
+# en la cuenta real (algunas campañas en Maximizar valor de conversión sin
+# objetivo puesto).
+_SIMULATED_TARGET_ROAS_BY_NAME = {
+    "Estelar Hoteles - CO:es - PMAX Corpo": 6.0,
+    "Estelar Hoteles - CO:es - Search Marca": 15.0,
+}
+
+
+def simulated_roas_by_campaign(only_active=False):
+    rows = simulated_campaign_rows(only_active)
+    out = []
+    for c in rows:
+        cost = c["cost"]
+        conv_value = c.get("conv_value")
+        strategy = c["bid_strategy"]
+        out.append({
+            "campaign_id": _SIMULATED_CAMPAIGN_IDS_BY_NAME.get(c["campaign"], c["campaign"]),
+            "campaign_name": c["campaign"],
+            "status": c["status"],
+            "bidding_strategy_type": strategy,
+            "is_portfolio": False,
+            "cost": cost,
+            "conv_value": conv_value,
+            "roas": (conv_value / cost) if cost and conv_value else None,
+            "target_roas": _SIMULATED_TARGET_ROAS_BY_NAME.get(c["campaign"]),
+            "adjustable": strategy in ROAS_ADJUSTABLE_STRATEGIES,
+        })
+    return out
+
+
+def simulated_update_campaign_target_roas(campaign_id, bidding_strategy_type, target_roas, validate_only=True):
+    if bidding_strategy_type not in ROAS_ADJUSTABLE_STRATEGIES:
+        label = BID_STRATEGY_LABELS.get(bidding_strategy_type, bidding_strategy_type)
+        raise ValueError(
+            f"Esta campaña usa la estrategia \"{label}\", que no tiene un ROAS objetivo — "
+            "habría que cambiar de estrategia de puja primero, algo que esta plataforma no hace."
+        )
+    if not target_roas or target_roas <= 0:
+        raise ValueError("El ROAS objetivo debe ser un número mayor que cero.")
+    return {"validate_only": validate_only, "applied": not validate_only, "target_roas": target_roas, "simulated": True}
 
 
 # Términos de búsqueda de ejemplo, con su campaña — para probar el flujo de
