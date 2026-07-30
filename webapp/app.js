@@ -128,7 +128,25 @@ const state = {
       preview: null, result: null, error: null,
     },
   },
+
+  // Solo visible/usable para usuarios con is_admin=1 (el servidor también
+  // lo exige en cada endpoint /api/admin/*, esto es solo la UI).
+  admin: {
+    usersStatus: 'idle', users: [], usersError: null,
+    accessStatus: 'idle', access: [], accessError: null,
+    deleteStatus: 'idle', deleteError: null,
+    revokeStatus: 'idle', revokeError: null,
+    grant: {
+      userId: '', customerId: '', accountName: '',
+      accountsStatus: 'idle', accounts: [], accountsError: null, accountFilter: '',
+      status: 'idle', error: null, // idle | granting | error
+    },
+  },
 };
+
+// Se completa con la respuesta de /api/me al cargar la página — controla
+// si se muestra el botón "Administración" del sidebar.
+const currentUser = { username: null, isAdmin: false };
 
 const PAGE_META = {
   rendimiento: {
@@ -162,6 +180,10 @@ const PAGE_META = {
   roas: {
     title: 'ROAS',
     caption: 'Compara el ROAS logrado contra el ROAS objetivo configurado en la estrategia de puja de cada campaña, y ajústalo directo desde acá cuando la estrategia lo permita.',
+  },
+  administracion: {
+    title: 'Administración',
+    caption: 'Gestiona quién tiene cuenta en la plataforma y a qué cuentas de Google Ads puede acceder cada usuario.',
   },
 };
 
@@ -235,6 +257,7 @@ function render() {
   else if (state.page === 'oportunidad') pageHtml = renderOpportunityPage();
   else if (state.page === 'proyeccion') pageHtml = renderForecastPage();
   else if (state.page === 'roas') pageHtml = renderRoasPage();
+  else if (state.page === 'administracion') pageHtml = renderAdminPage();
   else pageHtml = renderBookPage();
 
   root.innerHTML = `
@@ -3681,6 +3704,290 @@ function renderRoasPage() {
 }
 
 // ---------------------------------------------------------------------------
+// Página — Administración (solo is_admin)
+// ---------------------------------------------------------------------------
+
+function fmtDateTime(epochSeconds) {
+  if (!epochSeconds) return 'N/D';
+  return new Date(epochSeconds * 1000).toLocaleString('es-CO', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function ensureAdminDataLoaded() {
+  if (state.admin.usersStatus === 'idle') loadAdminUsers();
+  if (state.admin.accessStatus === 'idle') loadAdminAccess();
+}
+
+function loadAdminUsers() {
+  const a = state.admin;
+  a.usersStatus = 'loading'; a.usersError = null;
+  render();
+  fetch('/api/admin/users')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.users = data.users || [];
+      a.usersStatus = 'ready';
+      render();
+    })
+    .catch((err) => {
+      a.usersStatus = 'error'; a.usersError = err.message || String(err);
+      render();
+    });
+}
+
+function loadAdminAccess() {
+  const a = state.admin;
+  a.accessStatus = 'loading'; a.accessError = null;
+  render();
+  fetch('/api/admin/access')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.access = data.access || [];
+      a.accessStatus = 'ready';
+      render();
+    })
+    .catch((err) => {
+      a.accessStatus = 'error'; a.accessError = err.message || String(err);
+      render();
+    });
+}
+
+function deleteAdminUser(username) {
+  if (!window.confirm(`¿Borrar la cuenta "${username}"? Esto también cierra cualquier sesión activa de inmediato. No se puede deshacer.`)) return;
+  const a = state.admin;
+  a.deleteStatus = 'loading'; a.deleteError = null;
+  render();
+  fetch('/api/admin/users/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.deleteStatus = 'idle';
+      loadAdminUsers();
+      loadAdminAccess();
+    })
+    .catch((err) => {
+      a.deleteStatus = 'error'; a.deleteError = err.message || String(err);
+      render();
+    });
+}
+
+function loadAdminGrantAccounts() {
+  const g = state.admin.grant;
+  g.accountsStatus = 'loading'; g.accountsError = null;
+  render();
+  fetch('/api/google-ads/accounts')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      g.accounts = data.accounts || [];
+      g.accountsStatus = 'ready';
+      render();
+    })
+    .catch((err) => {
+      g.accountsStatus = 'error'; g.accountsError = err.message || String(err);
+      render();
+    });
+}
+
+function pickAdminGrantAccount(id, name) {
+  const g = state.admin.grant;
+  g.customerId = id;
+  g.accountName = name;
+  render();
+}
+
+function grantAdminAccess() {
+  const g = state.admin.grant;
+  const customerId = (g.customerId || '').replace(/[^0-9]/g, '');
+  if (!g.userId) { g.error = 'Elige a qué usuario le vas a dar acceso.'; render(); return; }
+  if (!customerId) { g.error = 'Escribe o elige el customer_id de la cuenta (solo números).'; render(); return; }
+
+  g.status = 'granting'; g.error = null;
+  render();
+  fetch('/api/admin/access/grant', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user_id: Number(g.userId), customer_id: customerId, account_name: g.accountName || null }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      g.status = 'idle';
+      g.customerId = ''; g.accountName = '';
+      loadAdminAccess();
+    })
+    .catch((err) => {
+      g.status = 'error'; g.error = err.message || String(err);
+      render();
+    });
+}
+
+function revokeAdminAccess(userId, customerId) {
+  if (!window.confirm('¿Quitarle el acceso a esta cuenta de Google Ads?')) return;
+  const a = state.admin;
+  a.revokeStatus = 'loading'; a.revokeError = null;
+  render();
+  fetch('/api/admin/access/revoke', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user_id: userId, customer_id: customerId }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.revokeStatus = 'idle';
+      loadAdminAccess();
+    })
+    .catch((err) => {
+      a.revokeStatus = 'error'; a.revokeError = err.message || String(err);
+      render();
+    });
+}
+
+function renderAdminPage() {
+  if (!currentUser.isAdmin) {
+    return `<div class="error-panel">Esta sección requiere permisos de administrador.</div>`;
+  }
+  ensureAdminDataLoaded();
+  const a = state.admin;
+
+  // Panel de usuarios ---------------------------------------------------
+  let usersBody = '';
+  if (a.usersStatus === 'loading') {
+    usersBody = `<div class="card state-panel loading"><div class="spinner"></div><p>Cargando usuarios…</p></div>`;
+  } else if (a.usersStatus === 'error') {
+    usersBody = `<div class="error-panel">${escapeHtml(a.usersError)}</div>`;
+  } else if (a.usersStatus === 'ready') {
+    const rows = a.users.map((u) => `
+      <tr>
+        <td>${escapeHtml(u.username)}</td>
+        <td>${u.is_admin ? '<span class="delta-badge good">Administrador</span>' : '<span class="delta-badge neutral">Usuario</span>'}</td>
+        <td>${fmtDateTime(u.created_at)}</td>
+        <td>${u.username === currentUser.username
+          ? '<span class="footnote">Tu cuenta</span>'
+          : `<button class="btn-outline xs" data-admin-delete-user="${escapeHtml(u.username)}">Eliminar</button>`}</td>
+      </tr>`).join('');
+    usersBody = `
+      <div class="card table-panel">
+        <div class="table-panel-head"><h3>Usuarios registrados (${a.users.length})</h3></div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Usuario</th><th>Rol</th><th>Creada</th><th></th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+        <p class="footnote" style="margin-top:14px">
+          Los administradores (definidos por <code>PMH_ADMIN_USERNAMES</code> en el servidor) tienen acceso a todas las cuentas de Google Ads sin restricción. El resto de usuarios solo pueden tocar las cuentas que les asignes abajo.
+        </p>
+      </div>`;
+  } else {
+    usersBody = '';
+  }
+
+  // Panel de otorgar acceso ---------------------------------------------
+  const g = a.grant;
+  const nonAdminUsers = (a.users || []).filter((u) => !u.is_admin);
+  const userOptions = nonAdminUsers.map((u) => `<option value="${u.id}" ${String(u.id) === String(g.userId) ? 'selected' : ''}>${escapeHtml(u.username)}</option>`).join('');
+
+  let accountPicker = '';
+  if (g.accountsStatus === 'idle') {
+    accountPicker = `<button class="btn-outline sm" data-action="admin-grant-load-accounts">Buscar en las cuentas del MCC</button>`;
+  } else if (g.accountsStatus === 'loading') {
+    accountPicker = `<p class="footnote">Cargando cuentas del MCC…</p>`;
+  } else if (g.accountsStatus === 'error') {
+    accountPicker = `<div class="error-panel">${escapeHtml(g.accountsError)}</div>`;
+  } else if (g.accountsStatus === 'ready') {
+    const filter = (g.accountFilter || '').trim().toLowerCase();
+    let matches = [];
+    if (filter.length >= 2) {
+      matches = g.accounts.filter((acc) => acc.id.includes(filter) || (acc.name || '').toLowerCase().includes(filter)).slice(0, 25);
+    }
+    const matchesHtml = matches.length
+      ? `<div class="table-scroll" style="max-height:220px;margin-top:8px">
+          <table>
+            <tbody>
+              ${matches.map((acc) => `
+                <tr>
+                  <td>${escapeHtml(acc.name)}</td>
+                  <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(acc.id)}</td>
+                  <td><button class="btn-outline xs" data-admin-pick-account="${escapeHtml(acc.id)}" data-admin-pick-name="${escapeHtml(acc.name)}">Elegir</button></td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>`
+      : (filter.length >= 2 ? `<p class="footnote" style="margin-top:8px">Sin resultados para "${escapeHtml(filter)}".</p>` : '');
+    accountPicker = `
+      <input type="text" id="admin-grant-account-filter" placeholder="Busca por nombre o ID de cuenta (${g.accounts.length} cuentas)…" value="${escapeHtml(g.accountFilter)}" style="width:100%" />
+      ${matchesHtml}`;
+  }
+
+  const grantForm = `
+    <div class="card control-panel" style="flex-direction:column;align-items:stretch;gap:16px">
+      <h3 class="section-title" style="margin:0">Otorgar acceso a una cuenta</h3>
+      ${nonAdminUsers.length === 0 ? '<p class="footnote">No hay usuarios no-administradores registrados todavía.</p>' : `
+      <div class="field">
+        <label>Usuario</label>
+        <select id="admin-grant-user">
+          <option value="">Elige un usuario…</option>
+          ${userOptions}
+        </select>
+      </div>
+      <div class="field">
+        <label>Cuenta de Google Ads</label>
+        ${accountPicker}
+      </div>
+      <div class="field">
+        <label>customer_id (solo números)</label>
+        <input type="text" id="admin-grant-customer-id" placeholder="ej. 1234567890" value="${escapeHtml(g.customerId)}" style="max-width:220px" />
+      </div>
+      <div class="field">
+        <label>Nombre de la cuenta (opcional, solo para mostrar en la lista)</label>
+        <input type="text" id="admin-grant-account-name" value="${escapeHtml(g.accountName)}" style="max-width:400px" />
+      </div>
+      ${g.error ? `<div class="error-panel">${escapeHtml(g.error)}</div>` : ''}
+      <div>
+        <button class="btn-accent" data-action="admin-grant-submit" ${g.status === 'granting' ? 'disabled' : ''}>
+          ${g.status === 'granting' ? 'Otorgando…' : 'Otorgar acceso'}
+        </button>
+      </div>`}
+    </div>`;
+
+  // Panel de accesos otorgados -------------------------------------------
+  let accessBody = '';
+  if (a.accessStatus === 'loading') {
+    accessBody = `<div class="card state-panel loading"><div class="spinner"></div><p>Cargando accesos…</p></div>`;
+  } else if (a.accessStatus === 'error') {
+    accessBody = `<div class="error-panel">${escapeHtml(a.accessError)}</div>`;
+  } else if (a.accessStatus === 'ready') {
+    const rows = a.access.map((row) => `
+      <tr>
+        <td>${escapeHtml(row.username)}</td>
+        <td>${escapeHtml(row.account_name || 'N/D')}</td>
+        <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(row.customer_id)}</td>
+        <td>${fmtDateTime(row.created_at)}</td>
+        <td><button class="btn-outline xs" data-admin-revoke-user="${row.user_id}" data-admin-revoke-customer="${escapeHtml(row.customer_id)}">Revocar</button></td>
+      </tr>`).join('');
+    accessBody = `
+      <div class="card table-panel">
+        <div class="table-panel-head"><h3>Accesos otorgados (${a.access.length})</h3></div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Usuario</th><th>Cuenta</th><th>customer_id</th><th>Otorgado</th><th></th></tr></thead>
+            <tbody>${rows.length ? rows : '<tr><td colspan="5" class="footnote">Todavía no le diste acceso a ninguna cuenta a nadie.</td></tr>'}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }
+
+  return `${usersBody}${grantForm}${accessBody}`;
+}
+
+// ---------------------------------------------------------------------------
 // Eventos
 // ---------------------------------------------------------------------------
 
@@ -4025,6 +4332,29 @@ function bindEvents() {
     state.book.compare.hotelFilter = e.target.value;
     render();
   });
+  // Administración
+  const adminGrantUser = document.getElementById('admin-grant-user');
+  if (adminGrantUser) adminGrantUser.addEventListener('change', (e) => { state.admin.grant.userId = e.target.value; });
+  const adminGrantAccountFilter = document.getElementById('admin-grant-account-filter');
+  if (adminGrantAccountFilter) adminGrantAccountFilter.addEventListener('input', (e) => {
+    state.admin.grant.accountFilter = e.target.value;
+    render();
+  });
+  const adminGrantCustomerId = document.getElementById('admin-grant-customer-id');
+  if (adminGrantCustomerId) adminGrantCustomerId.addEventListener('input', (e) => { state.admin.grant.customerId = e.target.value; });
+  const adminGrantAccountName = document.getElementById('admin-grant-account-name');
+  if (adminGrantAccountName) adminGrantAccountName.addEventListener('input', (e) => { state.admin.grant.accountName = e.target.value; });
+
+  document.querySelectorAll('[data-admin-pick-account]').forEach((btn) => {
+    btn.addEventListener('click', () => pickAdminGrantAccount(btn.dataset.adminPickAccount, btn.dataset.adminPickName));
+  });
+  document.querySelectorAll('[data-admin-delete-user]').forEach((btn) => {
+    btn.addEventListener('click', () => deleteAdminUser(btn.dataset.adminDeleteUser));
+  });
+  document.querySelectorAll('[data-admin-revoke-user]').forEach((btn) => {
+    btn.addEventListener('click', () => revokeAdminAccess(Number(btn.dataset.adminRevokeUser), btn.dataset.adminRevokeCustomer));
+  });
+
   // Acciones (data-action)
   root.querySelectorAll('[data-action]').forEach((el) => {
     el.addEventListener('click', () => handleAction(el.dataset.action));
@@ -4251,6 +4581,9 @@ function handleAction(action) {
       }, 250);
       break;
     }
+
+    case 'admin-grant-load-accounts': loadAdminGrantAccounts(); break;
+    case 'admin-grant-submit': grantAdminAccess(); break;
   }
 }
 
@@ -4264,6 +4597,10 @@ fetch('/api/me').then((r) => r.json()).then((data) => {
   if (!data.authenticated) { window.location.href = '/login'; return; }
   const el = document.getElementById('sidebar-username');
   if (el) el.textContent = data.username;
+  currentUser.username = data.username;
+  currentUser.isAdmin = !!data.is_admin;
+  const navAdmin = document.getElementById('nav-admin');
+  if (navAdmin && currentUser.isAdmin) navAdmin.style.display = '';
 });
 
 document.getElementById('sidebar-logout')?.addEventListener('click', () => {

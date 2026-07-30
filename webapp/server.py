@@ -466,7 +466,7 @@ class Handler(SimpleHTTPRequestHandler):
     def _handle_me(self):
         user = self._get_current_user()
         if user:
-            self._send_json(200, {"authenticated": True, "username": user["username"]})
+            self._send_json(200, {"authenticated": True, "username": user["username"], "is_admin": user["is_admin"]})
         else:
             self._send_json(200, {"authenticated": False})
 
@@ -474,11 +474,14 @@ class Handler(SimpleHTTPRequestHandler):
         conn = get_db()
         try:
             rows = conn.execute(
-                "SELECT id, username, created_at FROM users ORDER BY created_at"
+                "SELECT id, username, created_at, is_admin FROM users ORDER BY created_at"
             ).fetchall()
         finally:
             conn.close()
-        users = [{"id": r["id"], "username": r["username"], "created_at": r["created_at"]} for r in rows]
+        users = [
+            {"id": r["id"], "username": r["username"], "created_at": r["created_at"], "is_admin": bool(r["is_admin"])}
+            for r in rows
+        ]
         self._send_json(200, {"users": users})
 
     # Borra una cuenta y cualquier sesión activa que tenga — sin la fila en
