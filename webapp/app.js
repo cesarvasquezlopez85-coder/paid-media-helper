@@ -3373,6 +3373,21 @@ const BID_STRATEGY_LABELS_ES = {
   COMMISSION: 'Comisión',
 };
 
+// Google Ads usa el mismo bidding_strategy_type (MAXIMIZE_CONVERSION_VALUE)
+// tanto para "Maximizar valor de conversión" sin objetivo como para "Target
+// ROAS" — la campaña de Maximizar valor de conversión CON un ROAS objetivo
+// configurado. La UI de Google solo la llama "Target ROAS" en el segundo
+// caso; confirmado contra una cuenta real (2026-07-30): la única campaña
+// con target_roas != null entre varias "Maximizar valor de conversión" era
+// justo la que cesar reportó como "Target ROAS" en Google Ads. Por eso la
+// etiqueta depende de si hay un objetivo configurado, no solo del tipo.
+function roasStrategyLabel(row) {
+  if (row.bidding_strategy_type === 'MAXIMIZE_CONVERSION_VALUE' && row.target_roas != null) {
+    return 'ROAS objetivo';
+  }
+  return BID_STRATEGY_LABELS_ES[row.bidding_strategy_type] || row.bidding_strategy_type;
+}
+
 function ensureRoasGoogleAdsStatusLoaded() {
   const a = state.roas.api;
   if (a.statusChecked) return;
@@ -3560,7 +3575,7 @@ function renderRoasAdjustRow(row) {
   const s = state.roas;
   const adj = s.adjust;
   const isEditing = adj.campaignId === row.campaign_id;
-  const strategyLabel = BID_STRATEGY_LABELS_ES[row.bidding_strategy_type] || row.bidding_strategy_type;
+  const strategyLabel = roasStrategyLabel(row);
 
   if (!isEditing) {
     if (row.is_portfolio) {
@@ -3636,7 +3651,7 @@ function renderRoasPage() {
     const rowsHtml = rows.map((r) => `
       <tr>
         <td>${escapeHtml(r.campaign_name)}</td>
-        <td>${BID_STRATEGY_LABELS_ES[r.bidding_strategy_type] || escapeHtml(r.bidding_strategy_type)}</td>
+        <td>${escapeHtml(roasStrategyLabel(r))}</td>
         <td>${r.roas != null ? (r.roas * 100).toFixed(0) + '%' : 'N/D'}</td>
         <td>${r.target_roas != null ? (r.target_roas * 100).toFixed(0) + '%' : 'N/D'}</td>
         <td>${renderRoasAdjustRow(r)}</td>
