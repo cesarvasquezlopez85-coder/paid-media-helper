@@ -239,6 +239,19 @@ function render() {
     btn.classList.toggle('active', btn.dataset.nav === state.page);
   });
 
+  // root.innerHTML se reemplaza entero en cada render — un input que dispara
+  // render() en cada tecla (ej. el buscador de cuentas de Administración)
+  // perdería el foco y el cursor a mitad de escritura si no se restaura acá.
+  const active = document.activeElement;
+  let focusId = null, selStart = null, selEnd = null;
+  if (active && root.contains(active) && active.id) {
+    focusId = active.id;
+    if (typeof active.selectionStart === 'number') {
+      selStart = active.selectionStart;
+      selEnd = active.selectionEnd;
+    }
+  }
+
   const meta = PAGE_META[state.page];
   let toggleHtml = '';
   if (state.page === 'rendimiento' && state.rend.status === 'ready') {
@@ -273,6 +286,16 @@ function render() {
 
   bindEvents();
   if (window.lucide) window.lucide.createIcons();
+
+  if (focusId) {
+    const el = document.getElementById(focusId);
+    if (el) {
+      el.focus();
+      if (selStart !== null && typeof el.setSelectionRange === 'function') {
+        el.setSelectionRange(selStart, selEnd);
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
