@@ -2449,6 +2449,26 @@ function renderNegPushPanel() {
   // por campaña) porque las claves seleccionadas son term::campaign_id.
   const selectedRows = (s.rows || []).filter((r) => p.selected.has(`${r.term}::${r.campaign_id}`));
 
+  // Ahorro estimado SOLO de lo que está marcado ahora mismo — distinto del
+  // "ahorro estimado" de arriba (que suma TODOS los candidatos a negativo,
+  // estén marcados o no). Las categorías de Performance Max no traen costo
+  // (cost_na) — se cuentan aparte para no inflar el número con "N/D" como si
+  // fuera $0.
+  const selectedWithCost = selectedRows.filter((r) => !r.cost_na);
+  const selectedCostNaCount = selectedRows.length - selectedWithCost.length;
+  const selectedSavings = selectedWithCost.reduce((sum, r) => sum + (r.cost || 0), 0);
+  const selectedConversions = selectedRows.reduce((sum, r) => sum + (r.conversions || 0), 0);
+
+  const savingsHtml = selectedCount > 0 ? `
+    <div class="ok-panel" style="margin-bottom:12px">
+      <strong>Ahorro estimado con estos ${selectedCount} término${selectedCount === 1 ? '' : 's'}: ${fmtMoney(selectedSavings)}</strong>
+      ${selectedCostNaCount > 0 ? `<div style="margin-top:4px;font-size:12px">${selectedCostNaCount} de los seleccionados son categorías de Performance Max sin costo reportado (N/D) — no están incluidas en este número.</div>` : ''}
+    </div>
+    ${selectedConversions > 0 ? `
+      <div class="error-panel" style="margin-bottom:12px">
+        <strong>Ojo:</strong> lo seleccionado también generó ${fmtInt(selectedConversions)} conversión${selectedConversions === 1 ? '' : 'es'}. Revisa antes de confirmar — negativizar a ciegas también corta esas conversiones.
+      </div>` : ''}` : '';
+
   const selectedListHtml = selectedCount > 0 ? `
     <div class="table-scroll" style="max-height:200px;border:1px solid var(--color-border);border-radius:var(--radius-sm);margin-bottom:12px">
       <table>
@@ -2472,6 +2492,7 @@ function renderNegPushPanel() {
         <span style="font-size:12.5px;color:var(--color-text-muted)">${selectedCount} seleccionado${selectedCount === 1 ? '' : 's'}</span>
       </div>
 
+      ${savingsHtml}
       ${selectedListHtml}
 
       ${p.status === 'idle' || p.status === 'error' ? `
