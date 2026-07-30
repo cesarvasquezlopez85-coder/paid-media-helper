@@ -297,6 +297,10 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_google_ads_roas_adjust(payload)
+        elif path == "/api/admin/users/delete":
+            if not self._require_auth_json():
+                return
+            self._handle_admin_delete_user(payload)
         else:
             self.send_error(404, "No encontrado")
 
@@ -385,6 +389,30 @@ class Handler(SimpleHTTPRequestHandler):
             conn.close()
         users = [{"id": r["id"], "username": r["username"], "created_at": r["created_at"]} for r in rows]
         self._send_json(200, {"users": users})
+
+    # Borra una cuenta y cualquier sesión activa que tenga — sin la fila en
+    # `users`, _get_current_user() ya no puede resolver esa sesión (el JOIN
+    # con sessions deja de matchear), así que el logout es inmediato aunque
+    # tenga el navegador abierto. Con el registro cerrado (PMH_REGISTRATION_CODE),
+    # la única forma de volver a entrar es que alguien la registre de nuevo
+    # con el código de invitación.
+    def _handle_admin_delete_user(self, payload):
+        username = (payload.get("username") or "").strip().lower()
+        if not username:
+            self._send_json(400, {"error": "Falta el username a borrar."})
+            return
+        conn = get_db()
+        try:
+            row = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
+            if not row:
+                self._send_json(404, {"error": "No existe esa cuenta."})
+                return
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (row["id"],))
+            conn.execute("DELETE FROM users WHERE id = ?", (row["id"],))
+            conn.commit()
+        finally:
+            conn.close()
+        self._send_json(200, {"ok": True, "deleted": username})
 
     def _handle_register(self, payload):
         if not _register_limiter.allow(self._client_ip(), *REGISTER_RATE_LIMIT):
