@@ -479,7 +479,7 @@ class Handler(SimpleHTTPRequestHandler):
             accounts = google_ads_client.list_client_accounts()
             self._send_json(200, {"accounts": accounts, "simulated": False})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
-            self._send_json(502, {"error": str(e)})
+            self._send_google_ads_error(e)
 
     def _handle_google_ads_campaigns(self, query):
         customer_id = (query.get("customer_id") or [""])[0].strip()
@@ -503,7 +503,7 @@ class Handler(SimpleHTTPRequestHandler):
             rows = google_ads_client.fetch_campaign_rows(customer_id, date_from, date_to, only_active)
             self._send_json(200, {"rows": rows, "simulated": False})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
-            self._send_json(502, {"error": str(e)})
+            self._send_google_ads_error(e)
 
     def _handle_google_ads_search_terms(self, query):
         customer_id = (query.get("customer_id") or [""])[0].strip()
@@ -526,7 +526,7 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             rows = google_ads_client.fetch_search_terms(customer_id, date_from, date_to)
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
-            self._send_json(502, {"error": str(e)})
+            self._send_google_ads_error(e)
             return
 
         # Categorías de Performance Max — recurso distinto (ver
@@ -559,7 +559,7 @@ class Handler(SimpleHTTPRequestHandler):
             campaigns = google_ads_client.fetch_account_campaigns(customer_id)
             self._send_json(200, {"campaigns": campaigns, "simulated": False})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
-            self._send_json(502, {"error": str(e)})
+            self._send_google_ads_error(e)
 
     def _handle_google_ads_impression_share_daily(self, query):
         # Serie diaria de Impression Share a nivel de cuenta, para el
@@ -585,7 +585,7 @@ class Handler(SimpleHTTPRequestHandler):
             rows = google_ads_client.fetch_impression_share_daily(customer_id, date_from, date_to)
             self._send_json(200, {"rows": rows, "simulated": False})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
-            self._send_json(502, {"error": str(e)})
+            self._send_google_ads_error(e)
 
     def _handle_google_ads_roas(self, query):
         # ROAS logrado + ROAS objetivo por campaña, para la sección ROAS.
@@ -611,7 +611,7 @@ class Handler(SimpleHTTPRequestHandler):
             rows = google_ads_client.fetch_roas_by_campaign(customer_id, date_from, date_to, only_active)
             self._send_json(200, {"rows": rows, "simulated": False})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
-            self._send_json(502, {"error": str(e)})
+            self._send_google_ads_error(e)
 
     # Escritura real sobre la cuenta del cliente — a diferencia de todos los
     # demás endpoints de /api/google-ads/, este modifica Google Ads. Por
@@ -651,7 +651,7 @@ class Handler(SimpleHTTPRequestHandler):
             result = google_ads_client.push_negative_keywords(customer_id, items, validate_only)
             self._send_json(200, result)
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
-            self._send_json(502, {"error": str(e)})
+            self._send_google_ads_error(e)
 
     # Escritura real sobre la cuenta del cliente — ajusta el ROAS objetivo de
     # una campaña. Igual que negative-keywords, por default (validate_only
@@ -696,7 +696,7 @@ class Handler(SimpleHTTPRequestHandler):
         except ValueError as e:
             self._send_json(400, {"error": str(e)})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
-            self._send_json(502, {"error": str(e)})
+            self._send_google_ads_error(e)
 
     # ------------------------------------------------- Generador de copys ---
     def _handle_fetch(self, query):
@@ -733,6 +733,34 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(504, {"error": "El sitio tardó demasiado en responder."})
         except Exception as e:  # noqa: BLE001 — este endpoint siempre debe responder JSON, nunca tumbar el server
             self._send_json(502, {"error": f"No se pudo descargar la página: {e}"})
+
+    # El error crudo que devuelve google_ads_client.py (RuntimeError con el
+    # cuerpo completo de la respuesta de Google) puede traer texto de la
+    # consulta GAQL, nombres de recursos internos, IDs de campaña, etc. —
+    # nunca se le manda tal cual al navegador. Se imprime completo acá (queda
+    # en los logs del servidor — `railway logs` en producción, la consola en
+    # local) y al cliente se le manda un mensaje genérico, categorizado por
+    # el código de estado HTTP de Google cuando se puede identificar en el
+    # texto de la excepción (ver el formato "Google Ads API respondió {code}:
+    # ..." en google_ads_client.py).
+    def _send_google_ads_error(self, exc):
+        detail = str(exc)
+        print(f"[google-ads-error] {detail}", flush=True)
+        match = re.search(r"respondió (\d{3})", detail)
+        status = match.group(1) if match else None
+        if status == "400":
+            message = "Google Ads rechazó la solicitud — revisa el ID de la cuenta y el rango de fechas."
+        elif status in ("401", "403"):
+            message = "La cuenta de Google Ads no tiene permiso para esta operación, o la conexión con Google expiró."
+        elif status == "404":
+            message = "No se encontró la cuenta o campaña indicada."
+        elif status == "429":
+            message = "Google Ads está limitando las solicitudes ahora mismo — espera un momento e intenta de nuevo."
+        elif status and status.startswith("5"):
+            message = "Google Ads tuvo un problema temporal — intenta de nuevo en unos minutos."
+        else:
+            message = "No se pudo completar la operación con Google Ads. Si el problema sigue, revisa los logs del servidor."
+        self._send_json(502, {"error": message})
 
     # --------------------------------------------------------------- json ---
     def _send_json(self, status, payload, extra_headers=None):
