@@ -63,6 +63,14 @@ PBKDF2_ITERATIONS = 200_000
 # una contraseña de 10+ caracteres hace que la fuerza bruta, incluso
 # offline si algún día se filtrara la base, tome muchísimo más tiempo.
 MIN_PASSWORD_LENGTH = 10
+# El username se pinta sin más filtro que escapeHtml() en varias pantallas
+# (Administración, sidebar). escapeHtml() ya neutraliza cualquier intento de
+# XSS ahí, pero esto es una segunda capa: sin esta validación, cualquiera
+# podría registrar un username con comillas/backticks/espacios raros — no
+# es explotable hoy, pero alcanza con que un futuro cambio olvide escapar en
+# algún lugar nuevo. Se permiten letras, números, y . _ @ + - (cubre tanto
+# usuarios tipo "cesar.vasquez" como usernames que son un email).
+USERNAME_RE = re.compile(r"^[a-zA-Z0-9._@+-]{3,100}$")
 
 # Código de invitación para poder registrarse — ahora que la API de Google
 # Ads está conectada de verdad (lectura Y escritura sobre cuentas reales de
@@ -132,7 +140,7 @@ _write_limiter = RateLimiter()
 WRITE_RATE_LIMIT = (30, 60)
 
 # Rutas que no requieren sesión (la pantalla de login/registro y sus llamadas).
-PUBLIC_PATHS = {"/login", "/login.html", "/styles.css"}
+PUBLIC_PATHS = {"/login", "/login.html", "/login.js", "/styles.css"}
 
 # Único listado de archivos servibles — evita que SimpleHTTPRequestHandler
 # exponga por accidente server.py, data.db (tiene los hashes de contraseña)
@@ -145,6 +153,7 @@ STATIC_FILES = {
     "/styles.css": "styles.css",
     "/login": "login.html",
     "/login.html": "login.html",
+    "/login.js": "login.js",
 }
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -363,6 +372,29 @@ class Handler(SimpleHTTPRequestHandler):
             self.send_error(404, "No encontrado")
 
     # --------------------------------------------------------- estáticos ---
+    # Segunda capa de defensa además de escapeHtml() en el JS: aunque algún
+    # render se le olvidara escapar un valor, esta CSP bloquea <script>,
+    # atributos onerror=/onclick=, y javascript: URLs igual (no permite
+    # 'unsafe-inline' en script-src). style-src sí necesita 'unsafe-inline'
+    # por el <style> embebido de login.html. frame-ancestors 'none' impide
+    # que otra página te meta en un iframe (clickjacking).
+    def _send_security_headers(self):
+        csp = (
+            "default-src 'self'; "
+            "script-src 'self' https://unpkg.com https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+            "font-src 'self' https://fonts.gstatic.com; "
+            "img-src 'self' data:; "
+            "connect-src 'self'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'none'; "
+            "form-action 'self'"
+        )
+        self.send_header("Content-Security-Policy", csp)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
+
     def _serve_file(self, filename):
         path = os.path.join(BASE_DIR, filename)
         try:
@@ -376,6 +408,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
+        self._send_security_headers()
         self.end_headers()
         self.wfile.write(content)
 
@@ -461,6 +494,7 @@ class Handler(SimpleHTTPRequestHandler):
             return True
         self.send_response(302)
         self.send_header("Location", "/login")
+        self._send_security_headers()
         self.end_headers()
         return False
 
@@ -611,8 +645,8 @@ class Handler(SimpleHTTPRequestHandler):
         if not REGISTRATION_CODE or not secrets.compare_digest(code, REGISTRATION_CODE):
             self._send_json(403, {"error": "Código de invitación inválido o registro cerrado. Pide el código a quien administra la plataforma."})
             return
-        if len(username) < 3:
-            self._send_json(400, {"error": "El usuario debe tener al menos 3 caracteres."})
+        if not USERNAME_RE.match(username):
+            self._send_json(400, {"error": "El usuario debe tener entre 3 y 100 caracteres, y solo letras, números, o . _ @ + -"})
             return
         if len(password) < MIN_PASSWORD_LENGTH:
             self._send_json(400, {"error": f"La contraseña debe tener al menos {MIN_PASSWORD_LENGTH} caracteres."})
@@ -1058,6 +1092,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        self._send_security_headers()
         for key, value in extra_headers or []:
             self.send_header(key, value)
         self.end_headers()
