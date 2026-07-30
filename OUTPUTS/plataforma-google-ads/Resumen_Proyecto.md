@@ -12,12 +12,14 @@ Ya no es solo un prototipo de Streamlit, y ya no corre solo local: existe una im
 
 El sidebar de la app ya lo muestra así. El salto de V1 a V2 marca el paso de "solo archivos subidos a mano" a **conexión real con la API de Google Ads**, tanto de lectura como de escritura:
 
-- **Lectura**, en Rendimiento y Negativización: un toggle "Subir archivo" / "Conectar Google Ads" reemplaza la carga manual — se elige la cuenta (con buscador por ID para no perderse entre las 1105 cuentas reales del MCC), el rango de fechas y, en Rendimiento, un checkbox para traer solo campañas activas.
-- **Escritura**, solo en Negativización por ahora: subir palabras clave negativas de verdad a la cuenta, por campaña específica y concordancia exacta — siempre con una vista previa que Google Ads valida sin aplicar el cambio, antes de que el botón de confirmar quede disponible.
+- **Lectura, en las cuatro funciones que dependen de un export de campañas** (Rendimiento, Negativización, Comparar periodos, Oportunidad de ingresos — completado 2026-07-29): un toggle "Subir archivo" / "Conectar Google Ads" reemplaza la carga manual — se elige la cuenta (con buscador por ID para no perderse entre las 1105 cuentas reales del MCC), el rango de fechas (o dos rangos, en Comparar periodos) y, donde aplica, un checkbox para traer solo campañas activas.
+- **Escritura**, solo en Negativización por ahora: subir palabras clave negativas de verdad a la cuenta, por campaña específica y concordancia exacta — siempre con una vista previa que Google Ads valida sin aplicar el cambio, antes de que el botón de confirmar quede disponible. Confirmado también para campañas Performance Max (2026-07-29), que tienen restricciones distintas a Search.
 - **Conectada de verdad desde el 2026-07-28** (no solo en modo simulado): la primera prueba contra una cuenta real de la agencia encontró y corrigió varios bugs reales (versión de API retirada, un parámetro no soportado, un nombre de campo equivocado, un filtro que dejaba fuera la mayoría de las cuentas del MCC) — ver el detalle completo en la sección de Función 1 más abajo y en `roadmap.md`.
 - Mientras las credenciales de Google no estén configuradas (o para cualquier cuenta de prueba), todo sigue funcionando en **modo simulado** — mismos botones, mismo flujo, datos de ejemplo en vez de reales.
 
 ## Estado: V2 — siete funciones construidas, seis activas en el menú (Función 3, copys, en pausa para v2)
+
+**Menú reordenado (2026-07-29):** las cuatro funciones conectadas a Google Ads quedan agrupadas arriba — Rendimiento, Comparar periodos, Oportunidad de ingresos, Negativización — y las dos que no dependen de Google Ads (Bookings, Proyección de ventas) quedan abajo.
 
 ### Función 1 — Análisis de rendimiento
 
@@ -83,6 +85,10 @@ Verificado de punta a punta en modo simulado (traer términos → clasificar →
 
 **Escritura de negativos confirmada también para PMax, contra la cuenta real (2026-07-29).** No estaba garantizado que Google aceptara un negativo de concordancia exacta sobre una campaña Performance Max — hay restricciones documentadas para este tipo de campaña. Con autorización explícita de cesar: vista previa (`validateOnly`) sin error, y luego una escritura real de un solo término de bajo riesgo (`"dann carlton cali"`, nombre de un hotel competidor) sobre esa misma campaña PMax — confirmado con una consulta a `campaign_criterion` que el negativo quedó `ENABLED` de verdad en la cuenta. Mismo `push_negative_keywords()` que ya existía, sin cambios de código.
 
+**Ajustes de interfaz encontrados usando la función (2026-07-29):**
+- **Cuadro con los términos ya seleccionados:** antes había que buscar cuáles checkboxes estaban marcados dentro de la tabla completa de candidatos. Se agregó una tabla chica, con scroll, justo debajo de los botones de selección, que lista los términos marcados con su campaña y costo — se actualiza en vivo con cada clic.
+- **Bug: el botón "Vista previa" no volvía a aparecer al cambiar de campaña.** Después de subir negativos en una campaña, el panel de subida quedaba pegado en el estado "Listo" al cambiar el filtro a otra campaña — ese estado solo se limpiaba con una recarga completa. Corregido: cambiar de campaña ahora reinicia la selección y el estado del panel de subida.
+
 ### Función 3 — Generador de copys desde URL (construida, oculta del menú — pendiente para v2)
 
 **Estado actual: fuera del menú de v1.** Se construyó por completo y se corrigieron varios bugs reales encontrados al probarla con datos reales (ver detalle abajo), pero al revisarla de nuevo cesar decidió que el resultado no lo convence lo suficiente para dejarla activa en v1 ("definitivamente no me convence, dejemos esta parte para la versión 2" — 2026-07-13). El código sigue completo en `webapp/engine.js` (`extractSignals`, `generateHeadlines`, `generateDescriptions`) y `webapp/app.js` (`renderCopyPage`) — solo se quitó el botón de navegación en `webapp/index.html`, no se borró nada. Reactivarla en v2 es tan simple como devolver ese botón al sidebar, o retomarla con generación vía modelo de lenguaje (ver "Por qué ninguna de las funciones..." más abajo, y el backlog en `roadmap.md`).
@@ -130,6 +136,8 @@ Verificada con datos sintéticos de dos periodos (botón "Usar ejemplo"). Pendie
 
 Verificado en modo simulado de punta a punta: selector de cuenta, ambos periodos con fechas por defecto correctas, filtro por campaña y por tipo recalculando correctamente (probado aislando solo Performance Max), y sin regresión en el modo CSV existente.
 
+**Tarjeta y columna de CPA % (2026-07-29):** misma métrica que ya existe en Rendimiento (gasto ÷ valor de conversión), agregada acá en dos lugares — una tarjeta de cuenta (actual vs. anterior, con badge de cambio, igual que el resto de tarjetas de la pantalla) y, a pedido de cesar, la columna "CPA" de la tabla "Campañas comparadas" se cambió por CPA % por campaña, en vez del CPA en $.
+
 ### Función 6 — Oportunidad de ingresos (nueva, 2026-07-14)
 
 Sección para responder una pregunta concreta que cesar necesitaba llevar a la empresa: ¿cuántos ingresos adicionales se habrían generado si las campañas limitadas por presupuesto no lo hubieran estado? Es un análisis retrospectivo (no una predicción) — asume, para cada campaña, el mismo Ad Auction Win Rate y la misma tasa de conversión que ya tiene, y calcula qué habría pasado con impresiones/clics/conversiones/ingresos sin el límite de presupuesto.
@@ -150,7 +158,11 @@ Verificada con datos sintéticos y con el archivo real de Estelar: en ese archiv
 
 **Conexión con la API de Google Ads (2026-07-29):** cuarta y última función con el toggle "Subir archivo" / "Conectar Google Ads" — completa la integración iniciada en Rendimiento. Mismo patrón: selector de cuenta, rango de fechas, checkbox "Solo campañas activas". Sin cambios de backend, reutiliza `fetch_campaign_rows()` y `loadCampaignReportFromApi()` que ya existían. Verificado en modo simulado de punta a punta: el embudo, la gráfica de Impression Share y la tabla de acción calculan igual que con un CSV, incluida la campaña Performance Max con sus datos reales de Impression Share.
 
-**Gráfico de tendencia de Impression Share día a día (2026-07-29):** a partir de una referencia externa que trajo cesar, se agregó un gráfico de líneas (Search Lost IS por presupuesto, Search Lost IS por ranking, Search Impr. Share) día a día — misma técnica ya usada en Proyección de ventas: SVG puro, sin librería de gráficas, con tooltip al pasar el mouse. Requirió una consulta nueva a la API (`fetch_impression_share_daily()`, nuevo endpoint `GET /api/google-ads/impression-share-daily`) porque el reporte de campañas existente agrega todo el rango de fechas en una sola fila por campaña — acá se necesita el desglose por día, agregado a nivel de cuenta y ponderado por impresiones de Search (mismo criterio que usa Google para el Impression Share de cuenta). Validado contra una cuenta real. Solo aparece en modo "Conectar Google Ads" — un CSV nativo de campañas no trae ese desglose por día.
+**Checkbox "Excluir campañas de marca" oculto en modo API (2026-07-29):** mismo criterio que ya se usa con el campo de palabras de marca — en modo "Conectar Google Ads" se oculta y se aplica el valor por defecto (excluir marca = sí) sin pedírselo al usuario en esa pantalla; en modo "Subir archivo" sigue visible y editable.
+
+**Gráfico de tendencia de Impression Share día a día (2026-07-29):** a partir de una referencia externa que trajo cesar, se agregó un gráfico de líneas (Search Lost IS por presupuesto, Search Lost IS por ranking, Search Impr. Share) día a día — misma técnica ya usada en Proyección de ventas: SVG puro, sin librería de gráficas, con tooltip al pasar el mouse. Requirió una consulta nueva a la API (`fetch_impression_share_daily()`, nuevo endpoint `GET /api/google-ads/impression-share-daily`) porque el reporte de campañas existente agrega todo el rango de fechas en una sola fila por campaña — acá se necesita el desglose por día. Solo aparece en modo "Conectar Google Ads" — un CSV nativo de campañas no trae ese desglose por día.
+
+**Bug encontrado por cesar el mismo día: el gráfico no se actualizaba al cambiar de campaña.** La primera versión agregaba la serie diaria a nivel de toda la cuenta del lado del servidor, así que ningún filtro de la pantalla (campaña, hotel, excluir marca) tenía forma de afectarlo. Corregido: el servidor ahora devuelve una fila por campaña y día (sin agregar); el agregado ponderado por impresiones se calcula en el cliente sobre las campañas que ya pasaron los filtros activos — mismo patrón que usa el resto de la pantalla (traer una vez, filtrar/agregar en el cliente). Verificado que el gráfico cambia al elegir una campaña específica.
 
 ### Función 7 — Proyección de ventas (nueva, 2026-07-27)
 
@@ -208,8 +220,9 @@ En ambos casos, la app pide iniciar sesión o crear cuenta antes de dejar entrar
 - La Función 5 (Comparar periodos) solo se probó con datos sintéticos — falta validarla con dos exports reales del mismo cliente. Lo mismo aplica al modo "Comparar periodos" de la Función 4 (Bookings).
 - La Función 6 (Oportunidad de ingresos) calcula el presupuesto extra necesario con el ROAS promedio del conjunto de campañas seleccionado — un promedio distorsionado (por ejemplo, por no excluir marca) cambia ese número; el checkbox "Excluir campañas de marca" mitiga esto pero depende de que el usuario lo revise.
 - La Función 7 (Proyección de ventas) solo se probó con un dataset sintético — el índice de temporada se calcula sobre los datos que traiga el archivo, así que con menos de 24 meses de histórico real (o con meses atípicos, ej. una remodelación o un evento puntual) la proyección puede ser menos confiable de lo que sugiere el MAPE del ajuste histórico. No es un modelo estadístico riguroso (no es ARIMA/Holt-Winters) — es tendencia + estacionalidad simple, elegido a propósito por ser explicable.
-- La conexión con la API de Google Ads (Función 1 y 2) solo está construida para Rendimiento y Negativización — Comparar periodos y Oportunidad de ingresos siguen dependiendo de subir un archivo.
-- La **escritura** de negativos hacia Google Ads (Función 2) solo se probó en modo simulado — todavía no se probó la primera vez contra una cuenta real (ni siquiera en vista previa), así que es probable que aparezca algún ajuste de nombre de campo, igual que pasó en cada pieza de la integración de solo lectura.
+- La conexión con la API de Google Ads (lectura) ya cubre las cuatro funciones que dependen de un export de campañas (Rendimiento, Negativización, Comparar periodos, Oportunidad de ingresos) — **ya no es una limitación**, completado 2026-07-29.
+- La **escritura** de negativos hacia Google Ads (Función 2) ya se probó contra una cuenta real, tanto para Search como para Performance Max (2026-07-29) — **ya no es una limitación** de "solo probado en modo simulado". Sigue pendiente probarla en más cuentas y con más volumen de términos a la vez.
+- Las categorías de búsqueda de Performance Max en Negativización (`campaign_search_term_insight`) no son el término literal exacto de búsqueda — son categorías que Google arma agrupando búsquedas parecidas, y no traen costo por categoría (el ahorro estimado de la pantalla no las incluye).
 
 ## Próximos pasos
 
@@ -220,7 +233,7 @@ En ambos casos, la app pide iniciar sesión o crear cuenta antes de dejar entrar
 5. Probar la Función 5 (Comparar periodos) con dos exports reales del mismo cliente.
 6. Probar la Función 6 (Oportunidad de ingresos) con más cuentas reales — ya validada con Estelar, falta confirmar con cuentas de más de una campaña limitada por presupuesto y más de un hotel.
 7. Probar la Función 7 (Proyección de ventas) con histórico real de un hotel, y validar con cesar si el margen de error (MAPE) es aceptable para planear presupuesto.
-8. Probar la escritura de negativos (Función 2) contra una cuenta real por primera vez — empezando por vista previa (`validateOnly`) en una campaña de bajo riesgo antes de confirmar cualquier subida real.
+8. ~~Probar la escritura de negativos (Función 2) contra una cuenta real por primera vez~~ — completado 2026-07-29 (Search y Performance Max). Sigue pendiente probar con más volumen de términos a la vez.
 9. ~~Extender la conexión con la API de Google Ads a todas las funciones de campañas~~ — completado 2026-07-29 (Rendimiento, Negativización, Comparar periodos, Oportunidad de ingresos).
 10. Decidir si el registro de usuarios sigue abierto o pasa a altas manuales, ahora que la app es alcanzable por internet.
 11. Comprar y conectar un dominio propio para reemplazar el de Railway.
