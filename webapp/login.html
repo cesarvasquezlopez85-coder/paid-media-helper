@@ -73,17 +73,23 @@
         <label>Contraseña</label>
         <input type="password" id="login-password" autocomplete="current-password" required minlength="6" />
       </div>
+      <div class="login-field" id="login-code-field" style="display:none">
+        <label>Código de invitación</label>
+        <input type="text" id="login-code" autocomplete="off" />
+      </div>
       <button type="submit" class="login-submit" id="login-submit">Iniciar sesión</button>
     </form>
   </div>
 
-  <p class="login-hint" id="login-hint">¿Primera vez? Usa "Crear cuenta" — cualquiera con este link puede registrarse.</p>
+  <p class="login-hint" id="login-hint">¿No tienes cuenta? Usa "Crear cuenta" arriba.</p>
 </div>
 
 <script>
   const form = document.getElementById('login-form');
   const usernameInput = document.getElementById('login-username');
   const passwordInput = document.getElementById('login-password');
+  const codeField = document.getElementById('login-code-field');
+  const codeInput = document.getElementById('login-code');
   const submitBtn = document.getElementById('login-submit');
   const errorBox = document.getElementById('login-error');
   const hint = document.getElementById('login-hint');
@@ -95,9 +101,10 @@
     tabs.forEach((t) => t.classList.toggle('active', t.dataset.mode === mode));
     submitBtn.textContent = mode === 'login' ? 'Iniciar sesión' : 'Crear cuenta';
     passwordInput.autocomplete = mode === 'login' ? 'current-password' : 'new-password';
+    codeField.style.display = mode === 'login' ? 'none' : 'flex';
     hint.textContent = mode === 'login'
       ? '¿No tienes cuenta? Usa "Crear cuenta" arriba.'
-      : 'Cualquiera con este link puede registrarse — es de uso interno del equipo.';
+      : 'Registro cerrado — pide el código de invitación a quien administra la plataforma.';
     errorBox.classList.remove('visible');
   }
   tabs.forEach((t) => t.addEventListener('click', () => setMode(t.dataset.mode)));
@@ -107,10 +114,12 @@
     errorBox.classList.remove('visible');
     submitBtn.disabled = true;
     const endpoint = mode === 'login' ? '/api/login' : '/api/register';
+    const body = { username: usernameInput.value.trim(), password: passwordInput.value };
+    if (mode === 'register') body.code = codeInput.value.trim();
     fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: usernameInput.value.trim(), password: passwordInput.value }),
+      body: JSON.stringify(body),
     })
       .then((resp) => resp.json().then((data) => ({ ok: resp.ok, data })))
       .then(({ ok, data }) => {

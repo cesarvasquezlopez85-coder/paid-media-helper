@@ -58,6 +58,15 @@ SESSION_COOKIE = "pmh_session"
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 14  # 14 días
 PBKDF2_ITERATIONS = 200_000
 
+# Código de invitación para poder registrarse — ahora que la API de Google
+# Ads está conectada de verdad (lectura Y escritura sobre cuentas reales de
+# clientes), el registro abierto dejó de ser aceptable: cualquiera con el
+# link podía crear una cuenta y, sin ningún control adicional, leer/escribir
+# en cualquiera de las 1100+ cuentas del MCC. Fail-secure: si esta variable
+# no está configurada, el registro queda CERRADO (no hay registro abierto
+# por default) — hay que setearla explícitamente para permitir altas nuevas.
+REGISTRATION_CODE = os.environ.get("PMH_REGISTRATION_CODE")
+
 # Rutas que no requieren sesión (la pantalla de login/registro y sus llamadas).
 PUBLIC_PATHS = {"/login", "/login.html", "/styles.css"}
 
@@ -300,6 +309,13 @@ class Handler(SimpleHTTPRequestHandler):
     def _handle_register(self, payload):
         username = (payload.get("username") or "").strip().lower()
         password = payload.get("password") or ""
+        code = str(payload.get("code") or "")
+        # secrets.compare_digest evita filtrar por temporización si el código
+        # es correcto o no (aunque acá el impacto es menor, es el mismo
+        # criterio que ya se usa para comparar contraseñas).
+        if not REGISTRATION_CODE or not secrets.compare_digest(code, REGISTRATION_CODE):
+            self._send_json(403, {"error": "Código de invitación inválido o registro cerrado. Pide el código a quien administra la plataforma."})
+            return
         if len(username) < 3:
             self._send_json(400, {"error": "El usuario debe tener al menos 3 caracteres."})
             return
