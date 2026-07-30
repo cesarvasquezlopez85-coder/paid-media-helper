@@ -32,6 +32,7 @@ con una cuenta real, correr una consulta de prueba y confirmar contra
 https://developers.google.com/google-ads/api/fields/latest/metrics.
 """
 
+import datetime
 import json
 import os
 import time
@@ -401,6 +402,56 @@ def fetch_account_campaigns(customer_id, only_active=True):
     return campaigns
 
 
+def fetch_impression_share_daily(customer_id, date_from, date_to):
+    """Evolución día a día de Impression Share a nivel de cuenta — para el
+    gráfico de tendencia de Oportunidad de ingresos (mismo tipo de gráfica de
+    referencia que trajo cesar: Search Lost IS budget/rank + Search Impr.
+    Share, una línea por día). Estos campos solo existen para campañas
+    Search — igual que en fetch_campaign_rows, combinarlos con
+    metrics.impressions restringe el resultado a esas campañas, lo cual acá
+    es lo correcto: se pondera por impresiones de Search, la única fuente
+    real de oportunidad de Impression Share. Se agrega por día, ponderado
+    por impresiones (mismo criterio que usa Google Ads para el IS de
+    cuenta), en vez de un promedio simple entre campañas."""
+    query = f"""
+        SELECT segments.date, campaign.id,
+               metrics.impressions,
+               metrics.search_impression_share,
+               metrics.search_budget_lost_impression_share,
+               metrics.search_rank_lost_impression_share
+        FROM campaign
+        WHERE segments.date BETWEEN '{date_from}' AND '{date_to}'
+    """
+    results = _search(customer_id, query)
+    by_date = {}
+    for r in results:
+        date = r.get("segments", {}).get("date")
+        if not date:
+            continue
+        metrics = r.get("metrics", {})
+        impr = _int_or_none(metrics.get("impressions")) or 0
+        impr_share = _float_or_none(metrics.get("searchImpressionShare"))
+        lost_budget = _float_or_none(metrics.get("searchBudgetLostImpressionShare"))
+        lost_rank = _float_or_none(metrics.get("searchRankLostImpressionShare"))
+        bucket = by_date.setdefault(date, {"impr": 0, "is_w": 0.0, "budget_w": 0.0, "rank_w": 0.0})
+        bucket["impr"] += impr
+        bucket["is_w"] += (impr_share or 0) * impr
+        bucket["budget_w"] += (lost_budget or 0) * impr
+        bucket["rank_w"] += (lost_rank or 0) * impr
+
+    rows = []
+    for date in sorted(by_date.keys()):
+        b = by_date[date]
+        impr = b["impr"]
+        rows.append({
+            "date": date,
+            "impr_share": (b["is_w"] / impr) if impr > 0 else None,
+            "lost_is_budget": (b["budget_w"] / impr) if impr > 0 else None,
+            "lost_is_rank": (b["rank_w"] / impr) if impr > 0 else None,
+        })
+    return rows
+
+
 def push_negative_keywords(customer_id, items, validate_only=True):
     """Sube palabras clave negativas de concordancia exacta a nivel de
     campaña. items: lista de {"campaign_id": ..., "term": ...}.
@@ -534,6 +585,34 @@ SIMULATED_ACCOUNT_CAMPAIGNS = [
 
 def simulated_account_campaigns():
     return SIMULATED_ACCOUNT_CAMPAIGNS
+
+
+def simulated_impression_share_daily(date_from, date_to):
+    """Serie diaria simulada de Impression Share — con algo de variación
+    día a día (semilla determinística por fecha) para que el gráfico de
+    tendencia se vea realista sin depender de datos reales."""
+    try:
+        start = datetime.date.fromisoformat(date_from)
+        end = datetime.date.fromisoformat(date_to)
+    except ValueError:
+        return []
+    rows = []
+    day = start
+    i = 0
+    while day <= end:
+        wobble = ((i * 37) % 23) / 100.0  # 0.00–0.22, determinístico
+        lost_budget = round(0.15 + wobble, 3)
+        lost_rank = round(0.10 + ((i * 17) % 19) / 100.0, 3)
+        impr_share = round(max(0.0, 1 - lost_budget - lost_rank + 0.05), 3)
+        rows.append({
+            "date": day.isoformat(),
+            "impr_share": min(impr_share, 1.0),
+            "lost_is_budget": lost_budget,
+            "lost_is_rank": lost_rank,
+        })
+        day += datetime.timedelta(days=1)
+        i += 1
+    return rows
 
 
 def simulated_push_negative_keywords(items, validate_only=True):

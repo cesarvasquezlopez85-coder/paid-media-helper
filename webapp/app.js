@@ -91,6 +91,9 @@ const state = {
       dateFrom: '', dateTo: '', onlyActive: false,
       simulated: false, error: null,
     },
+    // Serie diaria de Impression Share para el gráfico de tendencia — solo
+    // existe en modo API (necesita granularidad por día, que un CSV no trae).
+    isTrend: { status: 'idle', rows: null, error: null },
   },
 
   forecast: {
@@ -1256,6 +1259,30 @@ function fetchOpportunityGoogleAdsCampaigns() {
       state.opportunity.status = 'idle';
       render();
     });
+
+  fetchOpportunityImpressionShareTrend(customerId, a.dateFrom, a.dateTo);
+}
+
+// Serie diaria de Impression Share para el gráfico de tendencia — llamada
+// aparte de fetchOpportunityGoogleAdsCampaigns() para que, si esta falla,
+// no tumbe el embudo/tabla principal (que sí funcionó). Solo tiene sentido
+// en modo API: un CSV nativo de campañas no trae desglose día a día.
+function fetchOpportunityImpressionShareTrend(customerId, dateFrom, dateTo) {
+  const t = state.opportunity.isTrend;
+  t.status = 'loading'; t.error = null;
+  render();
+  const params = new URLSearchParams({ customer_id: customerId || '', date_from: dateFrom, date_to: dateTo });
+  fetch(`/api/google-ads/impression-share-daily?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      t.status = 'ready'; t.rows = data.rows || [];
+      render();
+    })
+    .catch((err) => {
+      t.status = 'error'; t.error = err.message || String(err);
+      render();
+    });
 }
 
 function renderOpportunityApiPanel() {
@@ -1508,6 +1535,86 @@ function renderOpportunityFunnel(f) {
     </div>`;
 }
 
+// Gráfica de tendencia de Impression Share día a día — mismo estilo SVG sin
+// librerías externas que el gráfico de Proyección de ventas (renderForecastChart),
+// simplificado: tres líneas en escala 0-100%, sin banda de rango ni
+// proyección. Reutiliza las clases .forecast-hover-col/.forecast-tooltip/
+// .forecast-hover-guide tal cual — el wiring de hover en bindEvents ya es
+// genérico (busca esas clases en cualquier parte de la página), así que no
+// hace falta JS nuevo para el tooltip. Solo existe en modo API: un CSV
+// nativo de campañas no trae desglose por día.
+function renderImpressionShareTrendChart(dailyRows) {
+  const rows = (dailyRows || []).filter((r) => r.impr_share != null || r.lost_is_budget != null || r.lost_is_rank != null);
+  if (rows.length < 2) return '';
+
+  const W = 680, H = 220, ML = 40, MR = 16, MT = 16, MB = 26;
+  const plotW = W - ML - MR, plotH = H - MT - MB;
+  const n = rows.length;
+
+  const x = (i) => ML + (n > 1 ? (i / (n - 1)) * plotW : plotW / 2);
+  const y = (v) => MT + plotH - (Math.max(0, Math.min(1, v || 0)) * plotH);
+
+  const series = [
+    { key: 'lost_is_budget', label: 'Perdido por presupuesto', color: 'var(--danger)' },
+    { key: 'lost_is_rank', label: 'Perdido por ranking', color: '#3b82f6' },
+    { key: 'impr_share', label: 'Impr. Share', color: 'var(--gray-500)' },
+  ];
+
+  const linesHtml = series.map((s) => {
+    const pts = rows.map((r, i) => ({ i, v: r[s.key] })).filter((p) => p.v != null);
+    if (pts.length < 2) return '';
+    const path = pts.map((p, idx) => `${idx === 0 ? 'M' : 'L'} ${x(p.i).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
+    return `<path d="${path}" fill="none" stroke="${s.color}" stroke-width="2.5" />`;
+  }).join('');
+
+  const gridLines = [0, 0.25, 0.5, 0.75, 1].map((frac) => {
+    const yy = y(frac);
+    return `<line x1="${ML}" y1="${yy.toFixed(1)}" x2="${W - MR}" y2="${yy.toFixed(1)}" stroke="var(--color-border)" stroke-width="1" />
+      <text x="${ML - 6}" y="${(yy + 3).toFixed(1)}" font-size="10" fill="var(--color-text-muted)" text-anchor="end">${(frac * 100).toFixed(0)}%</text>`;
+  }).join('');
+
+  const labelEvery = Math.max(1, Math.ceil(n / 8));
+  const xLabels = rows.map((r, i) => ({ r, i })).filter(({ i }) => i % labelEvery === 0).map(({ r, i }) => {
+    const d = new Date(`${r.date}T00:00:00`);
+    const label = Number.isNaN(d.getTime()) ? r.date : d.toLocaleDateString('es-CO', { day: 'numeric', month: 'short' });
+    return `<text x="${x(i).toFixed(1)}" y="${H - 6}" font-size="10" fill="var(--color-text-muted)" text-anchor="middle">${escapeHtml(label)}</text>`;
+  }).join('');
+
+  const colStep = n > 1 ? plotW / (n - 1) : plotW;
+  const hoverCols = rows.map((r, i) => {
+    const d = new Date(`${r.date}T00:00:00`);
+    const dateLabel = Number.isNaN(d.getTime()) ? r.date : d.toLocaleDateString('es-CO', { day: 'numeric', month: 'short', year: 'numeric' });
+    const lines = [dateLabel];
+    if (r.impr_share != null) lines.push(`Impr. Share: ${(r.impr_share * 100).toFixed(1)}%`);
+    if (r.lost_is_rank != null) lines.push(`Perdido por ranking: ${(r.lost_is_rank * 100).toFixed(1)}%`);
+    if (r.lost_is_budget != null) lines.push(`Perdido por presupuesto: ${(r.lost_is_budget * 100).toFixed(1)}%`);
+    const rectX = (x(i) - colStep / 2).toFixed(1);
+    return `<rect class="forecast-hover-col" x="${rectX}" y="${MT}" width="${colStep.toFixed(1)}" height="${plotH}" fill="transparent" data-x="${x(i).toFixed(1)}" data-tooltip="${escapeHtml(lines.join('\n'))}"></rect>`;
+  }).join('');
+
+  const legendHtml = series.map((s) => `
+    <span style="display:inline-flex;align-items:center;gap:6px;margin-right:16px;font-size:12px;color:var(--color-text-body)">
+      <span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${s.color}"></span>${escapeHtml(s.label)}
+    </span>`).join('');
+
+  return `
+    <div class="card chart-card">
+      <h3 class="dense-chart-title">Evolución de Impression Share</h3>
+      <p style="font-size:12.5px;color:var(--color-text-muted);margin-bottom:10px">Vista de cuenta día a día, ponderada por impresiones de campañas Search (Impression Share solo existe para ese tipo de campaña).</p>
+      <div style="margin-bottom:10px">${legendHtml}</div>
+      <div style="position:relative">
+        <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;max-height:240px;display:block" xmlns="http://www.w3.org/2000/svg">
+          ${gridLines}
+          ${linesHtml}
+          <line class="forecast-hover-guide" x1="0" y1="${MT}" x2="0" y2="${H - MB}" stroke="var(--navy-800)" stroke-width="1" style="opacity:0" />
+          ${xLabels}
+          ${hoverCols}
+        </svg>
+        <div class="forecast-tooltip"></div>
+      </div>
+    </div>`;
+}
+
 // Gráfica de Impression Share por campaña: Impr. Share vs. % perdido por
 // ranking vs. % perdido por presupuesto — la campaña con el rojo más alto
 // es donde está la oportunidad de subir presupuesto (mismo criterio que
@@ -1661,10 +1768,25 @@ function renderOpportunityReady() {
 
   const funnel = engine.buildOpportunityFunnel(summary.opportunities);
 
+  // Tendencia diaria de Impression Share — solo en modo API (necesita
+  // granularidad por día, que un CSV nativo de campañas no trae).
+  let isTrendHtml = '';
+  if (s.source === 'api') {
+    const t = s.isTrend;
+    if (t.status === 'loading') {
+      isTrendHtml = `<div class="card state-panel loading"><div class="spinner"></div><p>Cargando evolución de Impression Share…</p></div>`;
+    } else if (t.status === 'error') {
+      isTrendHtml = `<div class="error-panel"><strong>No se pudo cargar la evolución de Impression Share.</strong> ${escapeHtml(t.error)}</div>`;
+    } else if (t.status === 'ready' && t.rows) {
+      isTrendHtml = renderImpressionShareTrendChart(t.rows);
+    }
+  }
+
   return `
     ${filterPanel}
     ${headline}
     ${renderOpportunityFunnel(funnel)}
+    ${isTrendHtml}
     ${renderImprShareChart(withData)}
     <div class="card chart-card">
       <h3 class="dense-chart-title">Campañas con mayor oportunidad de presupuesto sin límite</h3>

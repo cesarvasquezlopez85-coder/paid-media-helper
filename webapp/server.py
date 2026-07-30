@@ -179,6 +179,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_campaign_list(parse_qs(parsed.query))
             return
 
+        if path == "/api/google-ads/impression-share-daily":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_impression_share_daily(parse_qs(parsed.query))
+            return
+
         filename = STATIC_FILES.get(path)
         if filename is None:
             self.send_error(404, "No encontrado")
@@ -461,6 +467,32 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             campaigns = google_ads_client.fetch_account_campaigns(customer_id)
             self._send_json(200, {"campaigns": campaigns, "simulated": False})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_json(502, {"error": str(e)})
+
+    def _handle_google_ads_impression_share_daily(self, query):
+        # Serie diaria de Impression Share a nivel de cuenta, para el
+        # gráfico de tendencia de Oportunidad de ingresos.
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        date_from = (query.get("date_from") or [""])[0].strip()
+        date_to = (query.get("date_to") or [""])[0].strip()
+        date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+        if not date_pattern.match(date_from) or not date_pattern.match(date_to):
+            self._send_json(400, {"error": "date_from y date_to deben tener formato AAAA-MM-DD."})
+            return
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, {"rows": google_ads_client.simulated_impression_share_daily(date_from, date_to), "simulated": True})
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+
+        try:
+            rows = google_ads_client.fetch_impression_share_daily(customer_id, date_from, date_to)
+            self._send_json(200, {"rows": rows, "simulated": False})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_json(502, {"error": str(e)})
 
