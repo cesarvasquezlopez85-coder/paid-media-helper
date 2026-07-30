@@ -80,6 +80,13 @@ REGISTRATION_CODE = os.environ.get("PMH_REGISTRATION_CODE")
 # esta variable en Railway y redesplegar para agregar o quitar admins.
 ADMIN_USERNAMES = {u.strip().lower() for u in os.environ.get("PMH_ADMIN_USERNAMES", "").split(",") if u.strip()}
 
+# Cualquier admin puede borrar a otro admin (protección contra eso: ninguna,
+# es un modelo de confianza entre pares) — EXCEPTO a las cuentas listadas
+# acá, que /api/admin/users/delete rechaza siempre sin importar quién esté
+# logueado. La única forma de borrarlas de verdad es sacarlas primero de
+# esta variable en Railway y redesplegar.
+SUPER_ADMIN_USERNAMES = {u.strip().lower() for u in os.environ.get("PMH_SUPER_ADMIN_USERNAMES", "").split(",") if u.strip()}
+
 
 # ---------------------------------------------------------------------------
 # Rate limiting — en memoria, ventana deslizante. Suficiente para un solo
@@ -479,7 +486,10 @@ class Handler(SimpleHTTPRequestHandler):
         finally:
             conn.close()
         users = [
-            {"id": r["id"], "username": r["username"], "created_at": r["created_at"], "is_admin": bool(r["is_admin"])}
+            {
+                "id": r["id"], "username": r["username"], "created_at": r["created_at"],
+                "is_admin": bool(r["is_admin"]), "is_super_admin": r["username"].lower() in SUPER_ADMIN_USERNAMES,
+            }
             for r in rows
         ]
         self._send_json(200, {"users": users})
@@ -494,6 +504,9 @@ class Handler(SimpleHTTPRequestHandler):
         username = (payload.get("username") or "").strip().lower()
         if not username:
             self._send_json(400, {"error": "Falta el username a borrar."})
+            return
+        if username in SUPER_ADMIN_USERNAMES:
+            self._send_json(403, {"error": "Esta cuenta es super administrador y no se puede borrar."})
             return
         conn = get_db()
         try:

@@ -3889,11 +3889,13 @@ function renderAdminPage() {
     const rows = a.users.map((u) => `
       <tr>
         <td>${escapeHtml(u.username)}</td>
-        <td>${u.is_admin ? '<span class="delta-badge good">Administrador</span>' : '<span class="delta-badge neutral">Usuario</span>'}</td>
+        <td>${u.is_super_admin ? '<span class="delta-badge good">Super admin</span>' : (u.is_admin ? '<span class="delta-badge good">Administrador</span>' : '<span class="delta-badge neutral">Usuario</span>')}</td>
         <td>${fmtDateTime(u.created_at)}</td>
-        <td>${u.username === currentUser.username
-          ? '<span class="footnote">Tu cuenta</span>'
-          : `<button class="btn-outline xs" data-admin-delete-user="${escapeHtml(u.username)}">Eliminar</button>`}</td>
+        <td>${u.is_super_admin
+          ? '<span class="footnote">No se puede borrar</span>'
+          : u.username === currentUser.username
+            ? '<span class="footnote">Tu cuenta</span>'
+            : `<button class="btn-outline xs" data-admin-delete-user="${escapeHtml(u.username)}">Eliminar</button>`}</td>
       </tr>`).join('');
     usersBody = `
       <div class="card table-panel">
