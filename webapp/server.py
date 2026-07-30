@@ -73,6 +73,13 @@ MIN_PASSWORD_LENGTH = 10
 # por default) — hay que setearla explícitamente para permitir altas nuevas.
 REGISTRATION_CODE = os.environ.get("PMH_REGISTRATION_CODE")
 
+# Usuarios con acceso a TODAS las cuentas del MCC sin restricción — el resto
+# de usuarios (por default, cualquiera nuevo) solo puede leer/escribir en
+# las cuentas que se le asignen explícitamente en user_account_access (ver
+# init_db). Se sincroniza en cada arranque, así que basta con actualizar
+# esta variable en Railway y redesplegar para agregar o quitar admins.
+ADMIN_USERNAMES = {u.strip().lower() for u in os.environ.get("PMH_ADMIN_USERNAMES", "").split(",") if u.strip()}
+
 
 # ---------------------------------------------------------------------------
 # Rate limiting — en memoria, ventana deslizante. Suficiente para un solo
@@ -174,6 +181,38 @@ def init_db():
             )
             """
         )
+        # is_admin no estaba en el esquema original — las bases ya existentes
+        # (producción incluida) necesitan la migración explícita; CREATE
+        # TABLE IF NOT EXISTS no le agrega columnas a una tabla que ya existe.
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # ya existe, de un arranque anterior
+        # Qué cuenta de Google Ads (customer_id) puede tocar cada usuario que
+        # NO sea admin — sin ninguna fila acá, un usuario no-admin no puede
+        # leer ni escribir en ninguna cuenta (fail-secure: antes de esto,
+        # cualquier usuario autenticado podía tocar cualquiera de las 1100+
+        # cuentas del MCC con solo mandar el customer_id).
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_account_access (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                customer_id TEXT NOT NULL,
+                account_name TEXT,
+                created_at REAL NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                UNIQUE(user_id, customer_id)
+            )
+            """
+        )
+        # Sincroniza is_admin con PMH_ADMIN_USERNAMES en cada arranque — tanto
+        # para dar de alta admins nuevos como para bajarle el flag a alguien
+        # que ya no debería tenerlo, sin necesidad de tocar la base a mano.
+        if ADMIN_USERNAMES:
+            placeholders = ",".join("?" for _ in ADMIN_USERNAMES)
+            conn.execute(f"UPDATE users SET is_admin = 1 WHERE username IN ({placeholders})", tuple(ADMIN_USERNAMES))
+            conn.execute(f"UPDATE users SET is_admin = 0 WHERE username NOT IN ({placeholders})", tuple(ADMIN_USERNAMES))
         conn.commit()
     finally:
         conn.close()
@@ -250,14 +289,18 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_roas(parse_qs(parsed.query))
             return
 
-        # Listado de cuentas registradas (sin contraseñas) — para poder ver
-        # quién tiene acceso hoy, de cara a construir el control de acceso
-        # por cuenta (todavía cualquier usuario autenticado puede consultar
-        # esto, igual que el resto de endpoints; falta el sistema de roles).
+        # Listado de cuentas registradas (sin contraseñas) — solo admins.
         if path == "/api/admin/users":
-            if not self._require_auth_json():
+            if not self._require_admin_json():
                 return
             self._handle_admin_users()
+            return
+
+        # Qué customer_id de Google Ads puede tocar un usuario — solo admins.
+        if path == "/api/admin/access":
+            if not self._require_admin_json():
+                return
+            self._handle_admin_access(parse_qs(parsed.query))
             return
 
         filename = STATIC_FILES.get(path)
@@ -298,9 +341,17 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             self._handle_google_ads_roas_adjust(payload)
         elif path == "/api/admin/users/delete":
-            if not self._require_auth_json():
+            if not self._require_admin_json():
                 return
             self._handle_admin_delete_user(payload)
+        elif path == "/api/admin/access/grant":
+            if not self._require_admin_json():
+                return
+            self._handle_admin_access_grant(payload)
+        elif path == "/api/admin/access/revoke":
+            if not self._require_admin_json():
+                return
+            self._handle_admin_access_revoke(payload)
         else:
             self.send_error(404, "No encontrado")
 
@@ -347,7 +398,8 @@ class Handler(SimpleHTTPRequestHandler):
         conn = get_db()
         try:
             row = conn.execute(
-                "SELECT users.id AS id, users.username AS username, sessions.expires_at AS expires_at "
+                "SELECT users.id AS id, users.username AS username, users.is_admin AS is_admin, "
+                "sessions.expires_at AS expires_at "
                 "FROM sessions JOIN users ON users.id = sessions.user_id "
                 "WHERE sessions.token = ?",
                 (token,),
@@ -356,7 +408,46 @@ class Handler(SimpleHTTPRequestHandler):
             conn.close()
         if not row or row["expires_at"] < time.time():
             return None
-        return {"id": row["id"], "username": row["username"]}
+        return {"id": row["id"], "username": row["username"], "is_admin": bool(row["is_admin"])}
+
+    # Un usuario admin (PMH_ADMIN_USERNAMES) puede tocar cualquier cuenta;
+    # el resto solo las que tenga en user_account_access. Sin filas ahí,
+    # no puede tocar ninguna — fail-secure.
+    def _user_can_access_account(self, user, customer_id):
+        if user["is_admin"]:
+            return True
+        conn = get_db()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM user_account_access WHERE user_id = ? AND customer_id = ?",
+                (user["id"], customer_id),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row is not None
+
+    def _get_user_account_ids(self, user_id):
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT customer_id FROM user_account_access WHERE user_id = ?", (user_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+        return {r["customer_id"] for r in rows}
+
+    # Como _require_auth_json, pero además exige is_admin — para los
+    # endpoints de administración (usuarios, permisos de cuenta). Devuelve
+    # el usuario si pasa, o None (y ya mandó la respuesta de error) si no.
+    def _require_admin_json(self):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return None
+        if not user["is_admin"]:
+            self._send_json(403, {"error": "Esta acción requiere permisos de administrador."})
+            return None
+        return user
 
     def _require_auth_redirect(self):
         if self._get_current_user():
@@ -413,6 +504,83 @@ class Handler(SimpleHTTPRequestHandler):
         finally:
             conn.close()
         self._send_json(200, {"ok": True, "deleted": username})
+
+    # Lista los grants de acceso a cuentas de Google Ads — de un usuario si
+    # se pasa user_id, o todos los grants de todos los usuarios si no (para
+    # tener una vista completa de "quién puede tocar qué" de un vistazo).
+    def _handle_admin_access(self, query):
+        user_id = (query.get("user_id") or [""])[0].strip()
+        conn = get_db()
+        try:
+            if user_id:
+                rows = conn.execute(
+                    "SELECT user_account_access.user_id, users.username, user_account_access.customer_id, "
+                    "user_account_access.account_name, user_account_access.created_at "
+                    "FROM user_account_access JOIN users ON users.id = user_account_access.user_id "
+                    "WHERE user_account_access.user_id = ? ORDER BY user_account_access.created_at",
+                    (user_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT user_account_access.user_id, users.username, user_account_access.customer_id, "
+                    "user_account_access.account_name, user_account_access.created_at "
+                    "FROM user_account_access JOIN users ON users.id = user_account_access.user_id "
+                    "ORDER BY users.username, user_account_access.created_at"
+                ).fetchall()
+        finally:
+            conn.close()
+        access = [
+            {
+                "user_id": r["user_id"], "username": r["username"],
+                "customer_id": r["customer_id"], "account_name": r["account_name"],
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
+        self._send_json(200, {"access": access})
+
+    # Le da a un usuario acceso a una cuenta de Google Ads puntual —
+    # account_name es opcional, solo para que la lista de arriba sea legible
+    # sin tener que volver a consultar la API por el nombre.
+    def _handle_admin_access_grant(self, payload):
+        user_id = payload.get("user_id")
+        customer_id = str(payload.get("customer_id") or "").strip()
+        account_name = payload.get("account_name")
+        if not user_id or not customer_id.isdigit():
+            self._send_json(400, {"error": "Faltan user_id o customer_id (customer_id debe ser numérico)."})
+            return
+        conn = get_db()
+        try:
+            exists = conn.execute("SELECT id FROM users WHERE id = ?", (user_id,)).fetchone()
+            if not exists:
+                self._send_json(404, {"error": "No existe ese usuario."})
+                return
+            conn.execute(
+                "INSERT OR IGNORE INTO user_account_access (user_id, customer_id, account_name, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (user_id, customer_id, account_name, time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._send_json(200, {"ok": True})
+
+    def _handle_admin_access_revoke(self, payload):
+        user_id = payload.get("user_id")
+        customer_id = str(payload.get("customer_id") or "").strip()
+        if not user_id or not customer_id:
+            self._send_json(400, {"error": "Faltan user_id o customer_id."})
+            return
+        conn = get_db()
+        try:
+            conn.execute(
+                "DELETE FROM user_account_access WHERE user_id = ? AND customer_id = ?",
+                (user_id, customer_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._send_json(200, {"ok": True})
 
     def _handle_register(self, payload):
         if not _register_limiter.allow(self._client_ip(), *REGISTER_RATE_LIMIT):
@@ -524,8 +692,19 @@ class Handler(SimpleHTTPRequestHandler):
         if not google_ads_client.is_configured():
             self._send_json(200, {"accounts": google_ads_client.SIMULATED_ACCOUNTS, "simulated": True})
             return
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
         try:
             accounts = google_ads_client.list_client_accounts()
+            # Un usuario no-admin solo ve, en el selector, las cuentas que ya
+            # tiene asignadas — evita que navegue/descubra IDs de cuentas de
+            # clientes a las que no tiene acceso, aunque igual no podría usarlos
+            # (los demás endpoints los rechazan por separado).
+            if not user["is_admin"]:
+                allowed_ids = self._get_user_account_ids(user["id"])
+                accounts = [a for a in accounts if a["id"] in allowed_ids]
             self._send_json(200, {"accounts": accounts, "simulated": False})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)
@@ -546,6 +725,14 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if not date_pattern.match(date_from) or not date_pattern.match(date_to):
             self._send_json(400, {"error": "date_from y date_to deben tener formato AAAA-MM-DD."})
+            return
+
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
             return
 
         try:
@@ -570,6 +757,14 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if not date_pattern.match(date_from) or not date_pattern.match(date_to):
             self._send_json(400, {"error": "date_from y date_to deben tener formato AAAA-MM-DD."})
+            return
+
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
             return
 
         try:
@@ -604,6 +799,14 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
             return
 
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
         try:
             campaigns = google_ads_client.fetch_account_campaigns(customer_id)
             self._send_json(200, {"campaigns": campaigns, "simulated": False})
@@ -630,6 +833,14 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
             return
 
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
         try:
             rows = google_ads_client.fetch_impression_share_daily(customer_id, date_from, date_to)
             self._send_json(200, {"rows": rows, "simulated": False})
@@ -654,6 +865,14 @@ class Handler(SimpleHTTPRequestHandler):
 
         if not customer_id.isdigit():
             self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
             return
 
         try:
@@ -694,6 +913,9 @@ class Handler(SimpleHTTPRequestHandler):
 
         if not customer_id.isdigit():
             self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
             return
 
         try:
@@ -737,6 +959,9 @@ class Handler(SimpleHTTPRequestHandler):
 
         if not customer_id.isdigit():
             self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
             return
 
         try:
