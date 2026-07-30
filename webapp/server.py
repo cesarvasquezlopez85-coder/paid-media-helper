@@ -250,6 +250,16 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_roas(parse_qs(parsed.query))
             return
 
+        # Listado de cuentas registradas (sin contraseñas) — para poder ver
+        # quién tiene acceso hoy, de cara a construir el control de acceso
+        # por cuenta (todavía cualquier usuario autenticado puede consultar
+        # esto, igual que el resto de endpoints; falta el sistema de roles).
+        if path == "/api/admin/users":
+            if not self._require_auth_json():
+                return
+            self._handle_admin_users()
+            return
+
         filename = STATIC_FILES.get(path)
         if filename is None:
             self.send_error(404, "No encontrado")
@@ -364,6 +374,17 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(200, {"authenticated": True, "username": user["username"]})
         else:
             self._send_json(200, {"authenticated": False})
+
+    def _handle_admin_users(self):
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT id, username, created_at FROM users ORDER BY created_at"
+            ).fetchall()
+        finally:
+            conn.close()
+        users = [{"id": r["id"], "username": r["username"], "created_at": r["created_at"]} for r in rows]
+        self._send_json(200, {"users": users})
 
     def _handle_register(self, payload):
         if not _register_limiter.allow(self._client_ip(), *REGISTER_RATE_LIMIT):
