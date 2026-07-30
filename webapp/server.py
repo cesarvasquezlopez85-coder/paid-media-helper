@@ -72,6 +72,14 @@ MIN_PASSWORD_LENGTH = 10
 # usuarios tipo "cesar.vasquez" como usernames que son un email).
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9._@+-]{3,100}$")
 
+# El rate limiting de login (_login_limiter) es por IP y vive en memoria —
+# no protege contra fuerza bruta distribuida (muchas IPs distintas probando
+# la misma cuenta) y se resetea en cada redeploy. Este bloqueo es por
+# cuenta, se guarda en la base (sobrevive redeploys), y es independiente
+# de la IP de quien lo intente.
+LOGIN_LOCKOUT_THRESHOLD = 5
+LOGIN_LOCKOUT_SECONDS = 15 * 60
+
 # Código de invitación para poder registrarse — ahora que la API de Google
 # Ads está conectada de verdad (lectura Y escritura sobre cuentas reales de
 # clientes), el registro abierto dejó de ser aceptable: cualquiera con el
@@ -204,6 +212,16 @@ def init_db():
             conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass  # ya existe, de un arranque anterior
+        # Bloqueo de cuenta tras varios intentos fallidos de login seguidos —
+        # ver LOGIN_LOCKOUT_THRESHOLD/LOGIN_LOCKOUT_SECONDS y _handle_login.
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN failed_login_attempts INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN locked_until REAL")
+        except sqlite3.OperationalError:
+            pass
         # Qué cuenta de Google Ads (customer_id) puede tocar cada usuario que
         # NO sea admin — sin ninguna fila acá, un usuario no-admin no puede
         # leer ni escribir en ninguna cuenta (fail-secure: antes de esto,
@@ -678,13 +696,43 @@ class Handler(SimpleHTTPRequestHandler):
         conn = get_db()
         try:
             row = conn.execute(
-                "SELECT id, salt, password_hash FROM users WHERE username = ?", (username,)
+                "SELECT id, salt, password_hash, failed_login_attempts, locked_until FROM users WHERE username = ?",
+                (username,),
             ).fetchone()
+            now = time.time()
+            locked = bool(row and row["locked_until"] and row["locked_until"] > now)
+            # verify_password corre siempre que el usuario existe, esté
+            # bloqueado o no — si se saltara la verificación solo cuando está
+            # bloqueado, el tiempo de respuesta (PBKDF2 es la parte lenta)
+            # delataría qué cuentas existen y cuáles están bloqueadas, el
+            # mismo problema de enumeración que el mensaje genérico de abajo
+            # ya evita.
+            verified = bool(row) and verify_password(password, row["salt"], row["password_hash"])
+            ok = verified and not locked
+            if row and not locked:
+                if verified:
+                    conn.execute(
+                        "UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = ?",
+                        (row["id"],),
+                    )
+                else:
+                    attempts = row["failed_login_attempts"] + 1
+                    if attempts >= LOGIN_LOCKOUT_THRESHOLD:
+                        conn.execute(
+                            "UPDATE users SET failed_login_attempts = 0, locked_until = ? WHERE id = ?",
+                            (now + LOGIN_LOCKOUT_SECONDS, row["id"]),
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE users SET failed_login_attempts = ? WHERE id = ?", (attempts, row["id"])
+                        )
+                conn.commit()
         finally:
             conn.close()
-        # Mismo mensaje si el usuario no existe o si la contraseña está mal,
-        # para no filtrar qué usuarios existen (enumeración de cuentas).
-        if not row or not verify_password(password, row["salt"], row["password_hash"]):
+        # Mismo mensaje si el usuario no existe, la contraseña está mal, o la
+        # cuenta está bloqueada por intentos fallidos — para no filtrar ni
+        # qué usuarios existen ni cuáles están bloqueados ahora mismo.
+        if not ok:
             self._send_json(401, {"error": "Usuario o contraseña incorrectos."})
             return
         self._start_session(row["id"], username)
