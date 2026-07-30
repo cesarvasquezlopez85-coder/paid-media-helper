@@ -59,6 +59,10 @@ SECURE_COOKIES = os.environ.get("PMH_SECURE_COOKIES") == "1"
 SESSION_COOKIE = "pmh_session"
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 14  # 14 días
 PBKDF2_ITERATIONS = 200_000
+# 6 era muy corto — con el rate limiting ya puesto (8 intentos/5min por IP)
+# una contraseña de 10+ caracteres hace que la fuerza bruta, incluso
+# offline si algún día se filtrara la base, tome muchísimo más tiempo.
+MIN_PASSWORD_LENGTH = 10
 
 # Código de invitación para poder registrarse — ahora que la API de Google
 # Ads está conectada de verdad (lectura Y escritura sobre cuentas reales de
@@ -377,8 +381,8 @@ class Handler(SimpleHTTPRequestHandler):
         if len(username) < 3:
             self._send_json(400, {"error": "El usuario debe tener al menos 3 caracteres."})
             return
-        if len(password) < 6:
-            self._send_json(400, {"error": "La contraseña debe tener al menos 6 caracteres."})
+        if len(password) < MIN_PASSWORD_LENGTH:
+            self._send_json(400, {"error": f"La contraseña debe tener al menos {MIN_PASSWORD_LENGTH} caracteres."})
             return
 
         conn = get_db()
