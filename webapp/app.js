@@ -1778,7 +1778,13 @@ function renderOpportunityReady() {
     } else if (t.status === 'error') {
       isTrendHtml = `<div class="error-panel"><strong>No se pudo cargar la evolución de Impression Share.</strong> ${escapeHtml(t.error)}</div>`;
     } else if (t.status === 'ready' && t.rows) {
-      isTrendHtml = renderImpressionShareTrendChart(t.rows);
+      // t.rows viene sin agregar (una fila por campaña y día) — se agrega acá
+      // según las campañas que quedaron después de los filtros de hotel/
+      // campaña/marca ya aplicados (mismo `rows` de arriba), para que el
+      // gráfico se recalcule al cambiar cualquiera de esos filtros.
+      const campaignNames = new Set(rows.map((r) => r.campaign));
+      const aggregated = engine.aggregateImpressionShareDaily(t.rows, campaignNames);
+      isTrendHtml = renderImpressionShareTrendChart(aggregated);
     }
   }
 

@@ -403,18 +403,23 @@ def fetch_account_campaigns(customer_id, only_active=True):
 
 
 def fetch_impression_share_daily(customer_id, date_from, date_to):
-    """Evolución día a día de Impression Share a nivel de cuenta — para el
-    gráfico de tendencia de Oportunidad de ingresos (mismo tipo de gráfica de
-    referencia que trajo cesar: Search Lost IS budget/rank + Search Impr.
-    Share, una línea por día). Estos campos solo existen para campañas
-    Search — igual que en fetch_campaign_rows, combinarlos con
-    metrics.impressions restringe el resultado a esas campañas, lo cual acá
-    es lo correcto: se pondera por impresiones de Search, la única fuente
-    real de oportunidad de Impression Share. Se agrega por día, ponderado
-    por impresiones (mismo criterio que usa Google Ads para el IS de
-    cuenta), en vez de un promedio simple entre campañas."""
+    """Evolución día a día de Impression Share, una fila por campaña y día
+    (sin agregar) — para el gráfico de tendencia de Oportunidad de ingresos
+    (mismo tipo de gráfica de referencia que trajo cesar: Search Lost IS
+    budget/rank + Search Impr. Share, una línea por día). Estos campos solo
+    existen para campañas Search — igual que en fetch_campaign_rows,
+    combinarlos con metrics.impressions restringe el resultado a esas
+    campañas, lo cual acá es correcto: la ponderación es por impresiones de
+    Search, la única fuente real de oportunidad de Impression Share.
+
+    A propósito NO se agrega por cuenta acá — se devuelve una fila por
+    campaña y día, con campaign_name, para que el agregado (ponderado por
+    impresiones, mismo criterio que usa Google Ads para el IS de cuenta) se
+    calcule en el cliente según el filtro de campaña/hotel/marca que esté
+    activo en pantalla (engine.aggregateImpressionShareDaily). Si se
+    agregara acá, cambiar de campaña en el filtro no movería el gráfico."""
     query = f"""
-        SELECT segments.date, campaign.id,
+        SELECT segments.date, campaign.id, campaign.name,
                metrics.impressions,
                metrics.search_impression_share,
                metrics.search_budget_lost_impression_share,
@@ -423,31 +428,20 @@ def fetch_impression_share_daily(customer_id, date_from, date_to):
         WHERE segments.date BETWEEN '{date_from}' AND '{date_to}'
     """
     results = _search(customer_id, query)
-    by_date = {}
+    rows = []
     for r in results:
         date = r.get("segments", {}).get("date")
         if not date:
             continue
+        campaign = r.get("campaign", {})
         metrics = r.get("metrics", {})
-        impr = _int_or_none(metrics.get("impressions")) or 0
-        impr_share = _float_or_none(metrics.get("searchImpressionShare"))
-        lost_budget = _float_or_none(metrics.get("searchBudgetLostImpressionShare"))
-        lost_rank = _float_or_none(metrics.get("searchRankLostImpressionShare"))
-        bucket = by_date.setdefault(date, {"impr": 0, "is_w": 0.0, "budget_w": 0.0, "rank_w": 0.0})
-        bucket["impr"] += impr
-        bucket["is_w"] += (impr_share or 0) * impr
-        bucket["budget_w"] += (lost_budget or 0) * impr
-        bucket["rank_w"] += (lost_rank or 0) * impr
-
-    rows = []
-    for date in sorted(by_date.keys()):
-        b = by_date[date]
-        impr = b["impr"]
         rows.append({
             "date": date,
-            "impr_share": (b["is_w"] / impr) if impr > 0 else None,
-            "lost_is_budget": (b["budget_w"] / impr) if impr > 0 else None,
-            "lost_is_rank": (b["rank_w"] / impr) if impr > 0 else None,
+            "campaign_name": campaign.get("name") or "(sin nombre)",
+            "impr": _int_or_none(metrics.get("impressions")) or 0,
+            "impr_share": _float_or_none(metrics.get("searchImpressionShare")),
+            "lost_is_budget": _float_or_none(metrics.get("searchBudgetLostImpressionShare")),
+            "lost_is_rank": _float_or_none(metrics.get("searchRankLostImpressionShare")),
         })
     return rows
 
@@ -588,28 +582,37 @@ def simulated_account_campaigns():
 
 
 def simulated_impression_share_daily(date_from, date_to):
-    """Serie diaria simulada de Impression Share — con algo de variación
-    día a día (semilla determinística por fecha) para que el gráfico de
-    tendencia se vea realista sin depender de datos reales."""
+    """Serie diaria simulada de Impression Share, una fila por campaña Search
+    y día — con variación determinística por fecha/campaña, para poder
+    probar en modo simulado que el gráfico de tendencia sí se recalcula al
+    cambiar el filtro de campaña (mismo formato que fetch_impression_share_daily,
+    sin agregar por cuenta)."""
     try:
         start = datetime.date.fromisoformat(date_from)
         end = datetime.date.fromisoformat(date_to)
     except ValueError:
         return []
+    campaigns = [
+        ("Estelar Hoteles - CO:es - Search Marca", 3),
+        ("Estelar Hoteles - CO:es - Search Genérica", 5),
+        ("Estelar Hoteles - CO:es - Search Temporada Baja (pausada)", 7),
+    ]
     rows = []
     day = start
     i = 0
     while day <= end:
-        wobble = ((i * 37) % 23) / 100.0  # 0.00–0.22, determinístico
-        lost_budget = round(0.15 + wobble, 3)
-        lost_rank = round(0.10 + ((i * 17) % 19) / 100.0, 3)
-        impr_share = round(max(0.0, 1 - lost_budget - lost_rank + 0.05), 3)
-        rows.append({
-            "date": day.isoformat(),
-            "impr_share": min(impr_share, 1.0),
-            "lost_is_budget": lost_budget,
-            "lost_is_rank": lost_rank,
-        })
+        for name, seed in campaigns:
+            lost_budget = round(0.10 + ((i * 37 + seed * 11) % 23) / 100.0, 3)
+            lost_rank = round(0.08 + ((i * 17 + seed * 13) % 19) / 100.0, 3)
+            impr_share = round(max(0.0, min(1.0, 1 - lost_budget - lost_rank)), 3)
+            rows.append({
+                "date": day.isoformat(),
+                "campaign_name": name,
+                "impr": 150 + ((i * 13 + seed * 29) % 300),
+                "impr_share": impr_share,
+                "lost_is_budget": lost_budget,
+                "lost_is_rank": lost_rank,
+            })
         day += datetime.timedelta(days=1)
         i += 1
     return rows

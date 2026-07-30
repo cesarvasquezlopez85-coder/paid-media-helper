@@ -578,6 +578,37 @@ export function summarizeRevenueOpportunity(rows) {
   };
 }
 
+// Agrega la serie diaria de Impression Share (una fila por campaña y día,
+// ver fetch_impression_share_daily en google_ads_client.py) a una fila por
+// día, ponderada por impresiones — mismo criterio que usa Google Ads para
+// el Impression Share de cuenta. campaignNames, si se pasa (Set o array),
+// filtra a solo esas campañas antes de agregar — así el gráfico de
+// tendencia de Oportunidad de ingresos se recalcula al cambiar el filtro
+// de campaña/hotel/marca sin necesidad de volver a llamar la API.
+export function aggregateImpressionShareDaily(dailyRows, campaignNames) {
+  const filterSet = campaignNames ? new Set(campaignNames) : null;
+  const byDate = new Map();
+  for (const r of (dailyRows || [])) {
+    if (filterSet && !filterSet.has(r.campaign_name)) continue;
+    const impr = Number(r.impr) || 0;
+    if (!byDate.has(r.date)) byDate.set(r.date, { impr: 0, isW: 0, budgetW: 0, rankW: 0 });
+    const b = byDate.get(r.date);
+    b.impr += impr;
+    b.isW += (r.impr_share || 0) * impr;
+    b.budgetW += (r.lost_is_budget || 0) * impr;
+    b.rankW += (r.lost_is_rank || 0) * impr;
+  }
+  return [...byDate.keys()].sort().map((date) => {
+    const b = byDate.get(date);
+    return {
+      date,
+      impr_share: b.impr > 0 ? b.isW / b.impr : null,
+      lost_is_budget: b.impr > 0 ? b.budgetW / b.impr : null,
+      lost_is_rank: b.impr > 0 ? b.rankW / b.impr : null,
+    };
+  });
+}
+
 // Agrega el embudo completo (escenario actual vs. sin límite de
 // presupuesto) sobre el conjunto de campañas ya filtrado — para el
 // diagrama "de dónde venimos, a dónde podríamos llegar". Se suman las
