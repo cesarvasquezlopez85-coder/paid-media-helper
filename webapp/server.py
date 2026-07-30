@@ -30,9 +30,11 @@ import os
 import re
 import secrets
 import sqlite3
+import threading
 import time
 import urllib.error
 import urllib.request
+from collections import defaultdict
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -66,6 +68,50 @@ PBKDF2_ITERATIONS = 200_000
 # no está configurada, el registro queda CERRADO (no hay registro abierto
 # por default) — hay que setearla explícitamente para permitir altas nuevas.
 REGISTRATION_CODE = os.environ.get("PMH_REGISTRATION_CODE")
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting — en memoria, ventana deslizante. Suficiente para un solo
+# proceso (como corre hoy); si algún día esto corre con más de una réplica,
+# cada réplica llevaría su propia cuenta y el límite real efectivo sería
+# más alto — para eso haría falta un store compartido (ej. Redis), no vale
+# la pena la dependencia mientras siga siendo un solo proceso.
+# ---------------------------------------------------------------------------
+
+class RateLimiter:
+    def __init__(self):
+        self._hits = defaultdict(list)
+        self._lock = threading.Lock()
+
+    def allow(self, key, max_requests, window_seconds):
+        now = time.time()
+        with self._lock:
+            hits = self._hits[key]
+            cutoff = now - window_seconds
+            while hits and hits[0] < cutoff:
+                hits.pop(0)
+            if len(hits) >= max_requests:
+                return False
+            hits.append(now)
+            return True
+
+
+# Login/registro: por IP, porque todavía no hay sesión con la que identificar
+# a quién está intentando entrar. Límite generoso para no estorbar a alguien
+# que se equivoca de contraseña un par de veces, pero suficiente para frenar
+# fuerza bruta automatizada (8 intentos / 5 min ≈ 96/hora como máximo).
+_login_limiter = RateLimiter()
+_register_limiter = RateLimiter()
+LOGIN_RATE_LIMIT = (8, 300)
+REGISTER_RATE_LIMIT = (5, 300)
+
+# Endpoints de escritura real (negativos, ajuste de ROAS): por usuario ya
+# autenticado, no por IP — para que una sesión comprometida o un script
+# desatendido no pueda automatizar cambios reales sobre las cuentas de
+# clientes sin límite. 30/min alcanza de sobra para uso normal (cada llamada
+# ya sube una lista completa de términos, no una por término).
+_write_limiter = RateLimiter()
+WRITE_RATE_LIMIT = (30, 60)
 
 # Rutas que no requieren sesión (la pantalla de login/registro y sus llamadas).
 PUBLIC_PATHS = {"/login", "/login.html", "/styles.css"}
@@ -257,6 +303,15 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
+    # Railway (y cualquier proxy/balanceador delante del proceso) hace que
+    # self.client_address sea la IP del proxy, no la del visitante real —
+    # X-Forwarded-For trae la IP real como primer valor de la lista.
+    def _client_ip(self):
+        fwd = self.headers.get("X-Forwarded-For")
+        if fwd:
+            return fwd.split(",")[0].strip()
+        return self.client_address[0]
+
     # -------------------------------------------------------------- auth ---
     def _get_session_token(self):
         raw = self.headers.get("Cookie")
@@ -307,6 +362,9 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(200, {"authenticated": False})
 
     def _handle_register(self, payload):
+        if not _register_limiter.allow(self._client_ip(), *REGISTER_RATE_LIMIT):
+            self._send_json(429, {"error": "Demasiados intentos de registro. Espera unos minutos y vuelve a intentar."})
+            return
         username = (payload.get("username") or "").strip().lower()
         password = payload.get("password") or ""
         code = str(payload.get("code") or "")
@@ -341,6 +399,9 @@ class Handler(SimpleHTTPRequestHandler):
         self._start_session(user_id, username)
 
     def _handle_login(self, payload):
+        if not _login_limiter.allow(self._client_ip(), *LOGIN_RATE_LIMIT):
+            self._send_json(429, {"error": "Demasiados intentos. Espera unos minutos y vuelve a intentar."})
+            return
         username = (payload.get("username") or "").strip().lower()
         password = payload.get("password") or ""
         conn = get_db()
@@ -554,6 +615,13 @@ class Handler(SimpleHTTPRequestHandler):
     # llamador tiene que pedir explícitamente validate_only=false para que
     # el cambio quede escrito de verdad.
     def _handle_google_ads_negative_keywords(self, payload):
+        user = self._get_current_user()
+        if not user:  # la sesión se venció justo entre el chequeo de auth y acá — caso raro
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not _write_limiter.allow(f"user:{user['id']}", *WRITE_RATE_LIMIT):
+            self._send_json(429, {"error": "Demasiadas escrituras seguidas. Espera un minuto y vuelve a intentar."})
+            return
         customer_id = str(payload.get("customer_id") or "").strip()
         items = payload.get("items") or []
         validate_only = payload.get("validate_only", True) is not False
@@ -585,6 +653,13 @@ class Handler(SimpleHTTPRequestHandler):
     # una campaña. Igual que negative-keywords, por default (validate_only
     # ausente o true) SIEMPRE valida sin aplicar.
     def _handle_google_ads_roas_adjust(self, payload):
+        user = self._get_current_user()
+        if not user:  # la sesión se venció justo entre el chequeo de auth y acá — caso raro
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not _write_limiter.allow(f"user:{user['id']}", *WRITE_RATE_LIMIT):
+            self._send_json(429, {"error": "Demasiadas escrituras seguidas. Espera un minuto y vuelve a intentar."})
+            return
         customer_id = str(payload.get("customer_id") or "").strip()
         campaign_id = str(payload.get("campaign_id") or "").strip()
         bidding_strategy_type = str(payload.get("bidding_strategy_type") or "").strip()
