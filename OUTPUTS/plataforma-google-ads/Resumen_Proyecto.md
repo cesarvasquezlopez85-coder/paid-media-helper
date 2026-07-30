@@ -2,7 +2,7 @@
 
 ## Qué es
 
-Una herramienta interna para que cualquier persona del equipo suba archivos de una cuenta de Google Ads (o del PMS del hotel) y reciba sin intervención manual: (1) gráficas de rendimiento y recomendaciones de optimización, (2) comparación de rendimiento entre dos periodos con recomendaciones por tendencia, (3) una lista de candidatos a palabra clave negativa, (4) análisis de reservas reales para cuentas de hotel (con modo de comparación entre dos periodos), (5) una estimación de ingresos adicionales perdidos por campañas limitadas por presupuesto, y (6) una proyección de ventas futuras combinando tendencia y temporada alta/baja. Pensada para cubrir 100+ cuentas de forma self-serve.
+Una herramienta interna para que cualquier persona del equipo suba archivos de una cuenta de Google Ads (o se conecte directo a la API) y reciba sin intervención manual: (1) gráficas de rendimiento y recomendaciones de optimización, (2) comparación de rendimiento entre dos periodos con recomendaciones por tendencia, (3) una lista de candidatos a palabra clave negativa, (4) análisis de reservas reales para cuentas de hotel (con modo de comparación entre dos periodos), (5) una estimación de ingresos adicionales perdidos por campañas limitadas por presupuesto, (6) una proyección de ventas futuras combinando tendencia y temporada alta/baja, y (7) el ROAS logrado vs. el ROAS objetivo de cada campaña, ajustable directo desde la plataforma. Pensada para cubrir 100+ cuentas de forma self-serve.
 
 Hay una función más ya construida — generador de copys de anuncio desde una URL — pero **está oculta del menú a pedido de cesar**: tras probarla con cuentas reales, el resultado no lo convenció lo suficiente para quedar en v1. Queda pendiente para v2 (ver "Función 3" más abajo y `roadmap.md`).
 
@@ -17,7 +17,7 @@ El sidebar de la app ya lo muestra así. El salto de V1 a V2 marca el paso de "s
 - **Conectada de verdad desde el 2026-07-28** (no solo en modo simulado): la primera prueba contra una cuenta real de la agencia encontró y corrigió varios bugs reales (versión de API retirada, un parámetro no soportado, un nombre de campo equivocado, un filtro que dejaba fuera la mayoría de las cuentas del MCC) — ver el detalle completo en la sección de Función 1 más abajo y en `roadmap.md`.
 - Mientras las credenciales de Google no estén configuradas (o para cualquier cuenta de prueba), todo sigue funcionando en **modo simulado** — mismos botones, mismo flujo, datos de ejemplo en vez de reales.
 
-## Estado: V2 — siete funciones construidas, seis activas en el menú (Función 3, copys, en pausa para v2)
+## Estado: V2 — ocho funciones construidas, siete activas en el menú (Función 3, copys, en pausa para v2)
 
 **Menú reordenado (2026-07-29):** las cuatro funciones conectadas a Google Ads quedan agrupadas arriba — Rendimiento, Comparar periodos, Oportunidad de ingresos, Negativización — y las dos que no dependen de Google Ads (Bookings, Proyección de ventas) quedan abajo.
 
@@ -187,6 +187,22 @@ Verificada con un dataset sintético de 30 meses con estacionalidad marcada (tem
 
 **Meta de crecimiento del gerente (agregado 2026-07-28):** campo opcional para responder "el gerente quiere crecer 20%, ¿qué significa eso en la data?". Se mide contra el mismo mes real del año anterior (confirmado con cesar antes de construir) — no contra la proyección del modelo, que sigue siendo "si nada cambia". Con el archivo de inversión ya cargado, también calcula cuánto habría que invertir para llegar a esa meta, con el mismo ROAS combinado. Se ve en el gráfico como una tercera línea (punteada, verde) que arranca del mismo punto que la proyección, y en dos columnas nuevas de la tabla/CSV. Si un mes del horizonte no tiene su mismo mes del año anterior en el histórico, queda como N/D en vez de inventar un número. Verificada con +20% sobre el dataset de ejemplo — consistente con el ROAS combinado ya validado.
 
+### Función 8 — ROAS (nueva, 2026-07-30)
+
+cesar preguntó si el ROAS de cada campaña es visible vía API y si se puede ajustar como optimización. Antes de construir nada se investigó contra la cuenta real de Spiwak Chipichape:
+
+1. **El ROAS logrado** (gasto vs. valor de conversión real) ya era visible y ya estaba en la plataforma — confirmado con cifras reales de 4 campañas (1046%, 787%, 233%, 202%).
+2. **El ROAS objetivo** de la estrategia de puja sí se puede leer y, técnicamente, sí se puede escribir vía la API (`campaigns:mutate`) — probado con `validateOnly` sobre una campaña real, sin error.
+3. **Hallazgo importante:** el mismo intento sobre una campaña con una estrategia de puja incompatible (`MAXIMIZE_CONVERSIONS`, que no tiene concepto de ROAS objetivo) **también validó sin error** — a diferencia de los negativos, acá `validateOnly` de Google no atrapa la incompatibilidad de estrategia. cesar pidió construir la sección con los cuidados que esto implica.
+
+Sección nueva en el menú, **solo modo API** (sin toggle de archivo — el ROAS objetivo vive en la estrategia de puja, no existe en ningún CSV):
+
+- Trae, por campaña: ROAS logrado, ROAS objetivo actual, y la estrategia de puja. Detecta si la campaña usa una estrategia **compartida** con otras campañas (portfolio) — en ese caso queda en solo lectura, porque ajustarla afectaría a más de una campaña a la vez sin que quede claro desde la pantalla de una sola.
+- El chequeo de "esta campaña sí admite ROAS objetivo" (solo `TARGET_ROAS` y `MAXIMIZE_CONVERSION_VALUE` lo tienen) se hace **en la plataforma, antes de construir la operación de escritura** — no se confía en que `validateOnly` de Google la rechace, por el hallazgo #3 de arriba.
+- El ajuste sigue el mismo patrón de "nunca un solo clic entre decidir y escribir" que Negativización: vista previa antes de que "Confirmar y aplicar" quede disponible, con una nota explícita en pantalla de que la vista previa acá es menos confiable y de que el cambio afecta cómo puja Google en la cuenta real ahora mismo.
+
+Verificado en modo simulado de punta a punta: 5 campañas (2 ajustables, 3 no por tipo de estrategia), ajuste de una campaña de 1500% a 1800% reflejado en la tabla sin recargar, "Cancelar" reseteando el flujo. Pendiente: primera prueba de escritura real (no solo `validateOnly`) contra una cuenta de verdad.
+
 ## Por qué ninguna de las funciones de Google Ads usa un modelo de lenguaje por análisis
 
 A 100+ cuentas, llamar a una API por cada archivo o URL tiene costo y latencia reales, y en el caso de negativización y copys implicaría que cada persona del equipo tenga su propia clave de API. Por eso la Función 2 compara contra términos núcleo/excepciones definidas por el usuario, y la Función 3 combina extracción real de la página con plantillas de copywriting de conversión. El costo de esta decisión: ninguna de las dos "entiende" el contenido como lo haría un modelo — solo detectan lo que ya se les definió o lo que literalmente está escrito en la página. Por eso ambas funciones piden revisión humana antes de publicar nada.
@@ -223,6 +239,8 @@ En ambos casos, la app pide iniciar sesión o crear cuenta antes de dejar entrar
 - La conexión con la API de Google Ads (lectura) ya cubre las cuatro funciones que dependen de un export de campañas (Rendimiento, Negativización, Comparar periodos, Oportunidad de ingresos) — **ya no es una limitación**, completado 2026-07-29.
 - La **escritura** de negativos hacia Google Ads (Función 2) ya se probó contra una cuenta real, tanto para Search como para Performance Max (2026-07-29) — **ya no es una limitación** de "solo probado en modo simulado". Sigue pendiente probarla en más cuentas y con más volumen de términos a la vez.
 - Las categorías de búsqueda de Performance Max en Negativización (`campaign_search_term_insight`) no son el término literal exacto de búsqueda — son categorías que Google arma agrupando búsquedas parecidas, y no traen costo por categoría (el ahorro estimado de la pantalla no las incluye).
+- La escritura de ROAS objetivo (Función 8) solo se probó con `validateOnly` contra una cuenta real y en modo simulado — todavía no se probó una escritura real (`validateOnly: false`) contra una cuenta de verdad, a diferencia de los negativos.
+- El ROAS objetivo solo se puede ajustar en campañas con estrategia de puja propia (`TARGET_ROAS` o `MAXIMIZE_CONVERSION_VALUE`) y no compartida con otras campañas — el resto de estrategias, y las campañas con una estrategia de puja compartida (portfolio), quedan en solo lectura desde esta pantalla.
 
 ## Próximos pasos
 
@@ -237,6 +255,7 @@ En ambos casos, la app pide iniciar sesión o crear cuenta antes de dejar entrar
 9. ~~Extender la conexión con la API de Google Ads a todas las funciones de campañas~~ — completado 2026-07-29 (Rendimiento, Negativización, Comparar periodos, Oportunidad de ingresos).
 10. Decidir si el registro de usuarios sigue abierto o pasa a altas manuales, ahora que la app es alcanzable por internet.
 11. Comprar y conectar un dominio propio para reemplazar el de Railway.
+12. Probar la escritura de ROAS objetivo (Función 8) contra una cuenta real por primera vez — empezando por una sola campaña de bajo riesgo, igual que se hizo con los negativos.
 
 ## Archivos del proyecto
 
