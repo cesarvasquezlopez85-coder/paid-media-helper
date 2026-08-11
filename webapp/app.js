@@ -137,6 +137,7 @@ const state = {
   // de Google no son por periodo.
   recs: {
     status: 'idle', error: null, rows: null, score: null,
+    campaignFilter: 'all', // 'all' | '__account__' (recomendaciones sin campaña) | nombre de campaña
     api: {
       statusChecked: false, configured: false,
       accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
@@ -3825,6 +3826,7 @@ function fetchRecommendations() {
       s.rows = data.rows || [];
       s.score = data.score || null;
       s.actions = {};
+      s.campaignFilter = 'all';
       s.status = 'ready';
       render();
     })
@@ -3833,6 +3835,20 @@ function fetchRecommendations() {
       s.status = 'idle';
       render();
     });
+}
+
+// Filtro por campaña — a diferencia de otras pantallas, acá no hace falta
+// una llamada aparte a la API para listar campañas: ya vienen en las
+// filas que trajo fetchRecommendations. Algunas recomendaciones no están
+// atadas a ninguna campaña (ej. "Mover presupuesto sin usar" es a nivel de
+// cuenta) — esas se agrupan bajo el valor especial '__account__' en vez de
+// perderse o mezclarse con "Todas".
+function getRecsFilteredRows() {
+  const s = state.recs;
+  const rows = s.rows || [];
+  if (s.campaignFilter === 'all') return rows;
+  if (s.campaignFilter === '__account__') return rows.filter((r) => !r.campaign_name);
+  return rows.filter((r) => r.campaign_name === s.campaignFilter);
 }
 
 // Aplicar/descartar no tienen vista previa de Google (a diferencia de
@@ -3974,7 +3990,22 @@ function renderRecsPage() {
         <p>Trayendo recomendaciones…</p>
       </div>`;
   } else if (s.status === 'ready') {
-    const rows = s.rows || [];
+    const allRows = s.rows || [];
+    const hasAccountLevel = allRows.some((r) => !r.campaign_name);
+    const campaignNames = [...new Set(allRows.map((r) => r.campaign_name).filter(Boolean))].sort();
+    const filterPanel = allRows.length ? `
+      <div class="card control-panel align-end" style="margin-bottom:20px">
+        <div class="field">
+          <label>Ver solo esta campaña</label>
+          <select id="recs-campaign-filter" style="width:320px">
+            <option value="all" ${s.campaignFilter === 'all' ? 'selected' : ''}>Todas las campañas</option>
+            ${hasAccountLevel ? `<option value="__account__" ${s.campaignFilter === '__account__' ? 'selected' : ''}>Toda la cuenta (sin campaña)</option>` : ''}
+            ${campaignNames.map((c) => `<option value="${escapeHtml(c)}" ${s.campaignFilter === c ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}
+          </select>
+        </div>
+      </div>` : '';
+
+    const rows = getRecsFilteredRows();
     const rowsHtml = rows.map((r) => {
       const action = s.actions[r.resource_name];
       const busy = action && action.status === 'busy';
@@ -3993,24 +4024,33 @@ function renderRecsPage() {
       </tr>`;
     }).join('');
 
-    body = rows.length ? `
-      ${scoreCard}
-      <div class="card table-panel">
-        <div class="table-panel-head">
-          <h3>Recomendaciones activas (${rows.length})</h3>
-        </div>
-        <div class="table-scroll">
-          <table>
-            <thead><tr><th>Recomendación</th><th>Campaña</th><th>Impacto estimado</th><th>Acción</th></tr></thead>
-            <tbody>${rowsHtml}</tbody>
-          </table>
-        </div>
-        <p class="footnote" style="margin-top:14px">
-          Estas son las recomendaciones y el puntaje que el motor propio de Google Ads ya calculó para la cuenta — no un análisis de IA generativa (eso es un plan aparte, todavía no construido). "Aplicar" y "Descartar" escriben en la cuenta real de inmediato — Google no ofrece vista previa para esta acción, así que la confirmación es la única red de seguridad. Las recomendaciones que piden un valor específico (presupuesto, palabra clave, texto de anuncio) van a fallar al aplicarlas — esas todavía hay que resolverlas directo en Google Ads.
-        </p>
-      </div>` : `
-      ${scoreCard}
-      <div class="card state-panel idle">${icon('check-circle', 30)}<p>Google Ads no tiene recomendaciones activas para esta cuenta ahora mismo.</p></div>`;
+    const countLabel = s.campaignFilter === 'all' ? `${rows.length}` : `${rows.length} de ${allRows.length}`;
+
+    if (!allRows.length) {
+      body = `
+        ${scoreCard}
+        <div class="card state-panel idle">${icon('check-circle', 30)}<p>Google Ads no tiene recomendaciones activas para esta cuenta ahora mismo.</p></div>`;
+    } else {
+      body = `
+        ${scoreCard}
+        ${filterPanel}
+        ${rows.length ? `
+        <div class="card table-panel">
+          <div class="table-panel-head">
+            <h3>Recomendaciones activas (${countLabel})</h3>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Recomendación</th><th>Campaña</th><th>Impacto estimado</th><th>Acción</th></tr></thead>
+              <tbody>${rowsHtml}</tbody>
+            </table>
+          </div>
+          <p class="footnote" style="margin-top:14px">
+            Estas son las recomendaciones y el puntaje que el motor propio de Google Ads ya calculó para la cuenta — no un análisis de IA generativa (eso es un plan aparte, todavía no construido). "Aplicar" y "Descartar" escriben en la cuenta real de inmediato — Google no ofrece vista previa para esta acción, así que la confirmación es la única red de seguridad. Las recomendaciones que piden un valor específico (presupuesto, palabra clave, texto de anuncio) van a fallar al aplicarlas — esas todavía hay que resolverlas directo en Google Ads.
+          </p>
+        </div>` : `
+        <div class="card state-panel idle">${icon('check-circle', 30)}<p>Ninguna recomendación activa para esta campaña.</p></div>`}`;
+    }
   } else if (s.status === 'error') {
     body = `<div class="error-panel"><strong>No se pudo traer las recomendaciones.</strong> ${escapeHtml(s.error)}</div>`;
   }
@@ -4461,6 +4501,11 @@ function bindEvents() {
   if (recsApiAccount) recsApiAccount.addEventListener('change', (e) => { state.recs.api.accountId = e.target.value; });
   const recsApiAccountManual = document.getElementById('recs-api-account-manual');
   if (recsApiAccountManual) recsApiAccountManual.addEventListener('input', (e) => { state.recs.api.accountIdManual = e.target.value; });
+  const recsCampaignFilter = document.getElementById('recs-campaign-filter');
+  if (recsCampaignFilter) recsCampaignFilter.addEventListener('change', (e) => {
+    state.recs.campaignFilter = e.target.value;
+    render();
+  });
   document.querySelectorAll('[data-rec-apply]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const row = (state.recs.rows || []).find((r) => r.resource_name === btn.dataset.recApply);
