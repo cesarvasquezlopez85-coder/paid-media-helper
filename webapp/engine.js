@@ -516,7 +516,19 @@ export function computeRevenueOpportunity(row) {
   const newLostIsRank = Math.max(0, 1 - potentialImprShare);
 
   const ctr = !Number.isNaN(row.ctr) ? row.ctr : (impressions > 0 ? clicks / impressions : 0);
-  const convRate = !Number.isNaN(row.conv_rate) ? row.conv_rate : (clicks > 0 ? conversions / clicks : 0);
+  // A propósito NUNCA se usa row.conv_rate acá — ese campo es "Conv. rate"
+  // de Google (conversions_from_interactions_rate = conversiones ÷
+  // interacciones, no ÷ clics). Para Search, interacciones ≈ clics, así que
+  // no se nota; para Performance Max/Video/Display, una interacción incluye
+  // vistas y otros engagements además de clics, así que ese campo sale
+  // mucho más chico que conversiones/clics real. Como potentialClicks de
+  // acá SÍ está en base clics (ctr = clics/impresiones), multiplicarlo por
+  // el conv_rate de Google subestimaba brutalmente las conversiones
+  // potenciales en PMax (bug real reportado por cesar 2026-08-11: una
+  // campaña con 30 conversiones reales proyectaba solo 1 conversión
+  // potencial). Acá siempre se deriva del mismo par clics/conversiones que
+  // ya se usa para todo lo demás del embudo.
+  const convRate = clicks > 0 ? conversions / clicks : 0;
   const validConvValue = !Number.isNaN(conv_value) ? conv_value : 0;
   const avgBasketSize = conversions > 0 ? validConvValue / conversions : 0;
 
