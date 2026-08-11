@@ -380,6 +380,14 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_google_ads_roas_adjust(payload)
+        elif path == "/api/google-ads/recommendations/apply":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_recommendation_apply(payload)
+        elif path == "/api/google-ads/recommendations/dismiss":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_recommendation_dismiss(payload)
         elif path == "/api/admin/users/delete":
             if not self._require_admin_json():
                 return
@@ -1016,6 +1024,74 @@ class Handler(SimpleHTTPRequestHandler):
             rows = google_ads_client.fetch_recommendations(customer_id)
             score = google_ads_client.fetch_optimization_score(customer_id)
             self._send_json(200, {"rows": rows, "score": score, "simulated": False})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    # Aplica/descarta una recomendación de Google Ads. A diferencia de
+    # negative-keywords y roas-adjust, la API de recomendaciones NO soporta
+    # validateOnly (confirmado contra el .proto real) — cada llamada aplica
+    # o descarta de inmediato, sin vista previa posible del lado del
+    # servidor. La confirmación por lo tanto corre del lado del cliente
+    # (app.js pide confirmación explícita antes de llamar acá).
+    def _handle_google_ads_recommendation_apply(self, payload):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not _write_limiter.allow(f"user:{user['id']}", *WRITE_RATE_LIMIT):
+            self._send_json(429, {"error": "Demasiadas escrituras seguidas. Espera un minuto y vuelve a intentar."})
+            return
+        customer_id = str(payload.get("customer_id") or "").strip()
+        resource_name = str(payload.get("resource_name") or "").strip()
+        if not resource_name:
+            self._send_json(400, {"error": "Falta resource_name."})
+            return
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, google_ads_client.simulated_apply_recommendation(resource_name))
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            result = google_ads_client.apply_recommendation(customer_id, resource_name)
+            self._send_json(200, result)
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    def _handle_google_ads_recommendation_dismiss(self, payload):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not _write_limiter.allow(f"user:{user['id']}", *WRITE_RATE_LIMIT):
+            self._send_json(429, {"error": "Demasiadas escrituras seguidas. Espera un minuto y vuelve a intentar."})
+            return
+        customer_id = str(payload.get("customer_id") or "").strip()
+        resource_name = str(payload.get("resource_name") or "").strip()
+        if not resource_name:
+            self._send_json(400, {"error": "Falta resource_name."})
+            return
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, google_ads_client.simulated_dismiss_recommendation(resource_name))
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            result = google_ads_client.dismiss_recommendation(customer_id, resource_name)
+            self._send_json(200, result)
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)
 

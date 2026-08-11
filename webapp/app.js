@@ -132,9 +132,9 @@ const state = {
   // Recomendaciones propias de Google Ads (RecommendationService) — el
   // motor de reglas/ML del propio Google, no un modelo de lenguaje (eso es
   // el "Ask Advisor" nuevo de Google, que no tiene API pública — ver
-  // Resumen_Proyecto.md). Solo lectura, sin toggle de archivo (no existe
-  // en ningún CSV), mismo patrón que ROAS pero sin rango de fechas — las
-  // recomendaciones de Google no son por periodo.
+  // Resumen_Proyecto.md). Sin toggle de archivo (no existe en ningún CSV),
+  // mismo patrón que ROAS pero sin rango de fechas — las recomendaciones
+  // de Google no son por periodo.
   recs: {
     status: 'idle', error: null, rows: null, score: null,
     api: {
@@ -142,6 +142,12 @@ const state = {
       accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
       simulated: false, error: null,
     },
+    // Aplicar/descartar no tienen vista previa de Google (a diferencia de
+    // negativos y ROAS) — cada clic ejecuta de inmediato, por eso la
+    // confirmación es del lado del cliente (confirm()) antes de llamar.
+    // Un estado por resource_name, no uno global — se puede aplicar una
+    // fila mientras otra sigue esperando.
+    actions: {}, // resource_name -> { status: 'idle'|'busy'|'error', error }
   },
 
   // Solo visible/usable para usuarios con is_admin=1 (el servidor también
@@ -198,7 +204,7 @@ const PAGE_META = {
   },
   recomendaciones: {
     title: 'Recomendaciones de Google',
-    caption: 'El puntaje de optimización y las recomendaciones que Google Ads ya generó para la cuenta — de solo lectura, para revisar de un vistazo qué encontró Google.',
+    caption: 'El puntaje de optimización y las recomendaciones que Google Ads ya generó para la cuenta — revísalas, y aplícalas o descártalas directo desde acá.',
   },
   administracion: {
     title: 'Administración',
@@ -3818,12 +3824,56 @@ function fetchRecommendations() {
       a.simulated = !!data.simulated;
       s.rows = data.rows || [];
       s.score = data.score || null;
+      s.actions = {};
       s.status = 'ready';
       render();
     })
     .catch((err) => {
       a.error = err.message || String(err);
       s.status = 'idle';
+      render();
+    });
+}
+
+// Aplicar/descartar no tienen vista previa de Google (a diferencia de
+// negativos y ROAS, ver nota en server.py) — el confirm() de acá ES la
+// única confirmación que existe antes de escribir en la cuenta real.
+function applyRecommendation(row) {
+  if (!window.confirm(`¿Aplicar "${row.type_label}" en Google Ads? Este cambio queda escrito de inmediato en la cuenta real — no hay vista previa para este tipo de acción.`)) return;
+  recommendationAction(row, 'apply');
+}
+
+function dismissRecommendation(row) {
+  if (!window.confirm(`¿Descartar la recomendación "${row.type_label}"? Google dejará de sugerirla — no cambia nada en la cuenta, solo oculta la sugerencia.`)) return;
+  recommendationAction(row, 'dismiss');
+}
+
+function recommendationAction(row, kind) {
+  const s = state.recs;
+  const a = s.api;
+  const manualId = (a.accountIdManual || '').replace(/[^0-9]/g, '');
+  const customerId = manualId || a.accountId;
+  const key = row.resource_name;
+  s.actions[key] = { status: 'busy', error: null };
+  render();
+
+  fetch(`/api/google-ads/recommendations/${kind}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ customer_id: customerId || '', resource_name: row.resource_name }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      // Optimista: la recomendación ya no aplica (aplicada o descartada),
+      // se quita de la lista en vez de dejarla marcada — evita que alguien
+      // le vuelva a dar clic a algo que Google ya procesó.
+      s.rows = (s.rows || []).filter((r) => r.resource_name !== key);
+      delete s.actions[key];
+      render();
+    })
+    .catch((err) => {
+      s.actions[key] = { status: 'error', error: err.message || String(err) };
       render();
     });
 }
@@ -3925,12 +3975,23 @@ function renderRecsPage() {
       </div>`;
   } else if (s.status === 'ready') {
     const rows = s.rows || [];
-    const rowsHtml = rows.map((r) => `
+    const rowsHtml = rows.map((r) => {
+      const action = s.actions[r.resource_name];
+      const busy = action && action.status === 'busy';
+      const actionCell = busy ? `<span class="footnote">Procesando…</span>` : `
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button class="btn-outline xs" data-rec-apply="${escapeHtml(r.resource_name)}">Aplicar</button>
+          <button class="btn-outline xs" data-rec-dismiss="${escapeHtml(r.resource_name)}">Descartar</button>
+        </div>
+        ${action && action.status === 'error' ? `<div class="error-panel" style="margin-top:6px;font-size:11px;padding:6px 8px">${escapeHtml(action.error)}</div>` : ''}`;
+      return `
       <tr>
         <td>${escapeHtml(r.type_label)}</td>
         <td>${escapeHtml(r.campaign_name || 'Toda la cuenta')}</td>
         <td>${escapeHtml(recImpactLabel(r))}</td>
-      </tr>`).join('');
+        <td>${actionCell}</td>
+      </tr>`;
+    }).join('');
 
     body = rows.length ? `
       ${scoreCard}
@@ -3940,12 +4001,12 @@ function renderRecsPage() {
         </div>
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Recomendación</th><th>Campaña</th><th>Impacto estimado</th></tr></thead>
+            <thead><tr><th>Recomendación</th><th>Campaña</th><th>Impacto estimado</th><th>Acción</th></tr></thead>
             <tbody>${rowsHtml}</tbody>
           </table>
         </div>
         <p class="footnote" style="margin-top:14px">
-          Estas son las recomendaciones y el puntaje que el motor propio de Google Ads ya calculó para la cuenta — no un análisis de IA generativa (eso es un plan aparte, todavía no construido). De solo lectura por ahora: revisa cada una directo en Google Ads antes de aplicarla o descartarla.
+          Estas son las recomendaciones y el puntaje que el motor propio de Google Ads ya calculó para la cuenta — no un análisis de IA generativa (eso es un plan aparte, todavía no construido). "Aplicar" y "Descartar" escriben en la cuenta real de inmediato — Google no ofrece vista previa para esta acción, así que la confirmación es la única red de seguridad. Las recomendaciones que piden un valor específico (presupuesto, palabra clave, texto de anuncio) van a fallar al aplicarlas — esas todavía hay que resolverlas directo en Google Ads.
         </p>
       </div>` : `
       ${scoreCard}
@@ -4400,6 +4461,18 @@ function bindEvents() {
   if (recsApiAccount) recsApiAccount.addEventListener('change', (e) => { state.recs.api.accountId = e.target.value; });
   const recsApiAccountManual = document.getElementById('recs-api-account-manual');
   if (recsApiAccountManual) recsApiAccountManual.addEventListener('input', (e) => { state.recs.api.accountIdManual = e.target.value; });
+  document.querySelectorAll('[data-rec-apply]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const row = (state.recs.rows || []).find((r) => r.resource_name === btn.dataset.recApply);
+      if (row) applyRecommendation(row);
+    });
+  });
+  document.querySelectorAll('[data-rec-dismiss]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const row = (state.recs.rows || []).find((r) => r.resource_name === btn.dataset.recDismiss);
+      if (row) dismissRecommendation(row);
+    });
+  });
 
   document.querySelectorAll('[data-opp-sort]').forEach((th) => {
     th.addEventListener('click', () => {

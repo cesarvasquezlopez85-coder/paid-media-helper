@@ -773,6 +773,60 @@ def fetch_recommendations(customer_id):
     return rows
 
 
+# apply/dismiss — a diferencia de campaigns:mutate y campaignCriteria:mutate
+# (los otros dos endpoints de escritura de esta plataforma), confirmado
+# contra el .proto real: ApplyRecommendationRequest y
+# DismissRecommendationRequest NO tienen un campo validate_only. No hay
+# forma de pedirle a Google que valide sin aplicar — cada llamada real
+# ejecuta el cambio de inmediato. Por eso acá la confirmación corre del
+# lado del cliente (una advertencia clara antes del clic), no de una vista
+# previa server-side como en push_negative_keywords/update_campaign_target_roas.
+#
+# apply_recommendation() solo manda el resource_name, sin apply_parameters
+# — funciona para recomendaciones tipo "interruptor" (activar Search
+# Partners, expansión a Display, etc.) que no piden ningún valor adicional.
+# Para las que sí necesitan un parámetro específico (presupuesto sugerido,
+# palabra clave, texto de anuncio — ver RECOMMENDATION_TYPE_LABELS y la nota
+# de arriba del archivo), Google rechaza la operación pidiendo ese
+# parámetro; ese error se muestra tal cual en vez de intentar adivinar un
+# valor — construir esas pantallas específicas queda para más adelante.
+def apply_recommendation(customer_id, resource_name):
+    url = f"{BASE_URL}/customers/{customer_id}/recommendations:apply"
+    body = {"operations": [{"resourceName": resource_name}]}
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Google Ads API respondió {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"No se pudo conectar a la API de Google Ads: {e.reason}") from e
+    return {"applied": True}
+
+
+def dismiss_recommendation(customer_id, resource_name):
+    """Descarta una recomendación — no cambia nada de la cuenta real, solo
+    le dice a Google que esta sugerencia en particular no interesa. Bajo
+    riesgo comparado con aplicar, aunque tampoco tiene vista previa."""
+    url = f"{BASE_URL}/customers/{customer_id}/recommendations:dismiss"
+    body = {"operations": [{"resourceName": resource_name}]}
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Google Ads API respondió {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"No se pudo conectar a la API de Google Ads: {e.reason}") from e
+    return {"dismissed": True}
+
+
 # ---------------------------------------------------------------------------
 # Datos simulados — mismas cuentas/campañas "de mentira" para poder construir
 # y probar todo el flujo (selector de cuenta, rango de fechas, tabla,
@@ -958,8 +1012,17 @@ SIMULATED_RECOMMENDATIONS = [
     {"resource_name": "sim-rec-3", "type": "KEYWORD", "type_label": _recommendation_type_label("KEYWORD"), "campaign_name": "Estelar Hoteles - CO:es - Search Genérica", "base_cost": None, "base_conversions": None, "potential_cost": 1200.0, "potential_conversions": 9.0, "potential_impressions": 8400.0, "potential_clicks": 310.0},
     {"resource_name": "sim-rec-4", "type": "MOVE_UNUSED_BUDGET", "type_label": _recommendation_type_label("MOVE_UNUSED_BUDGET"), "campaign_name": None, "base_cost": None, "base_conversions": None, "potential_cost": None, "potential_conversions": 5.0, "potential_impressions": None, "potential_clicks": None},
     {"resource_name": "sim-rec-5", "type": "CALLOUT_ASSET", "type_label": _recommendation_type_label("CALLOUT_ASSET"), "campaign_name": None, "base_cost": None, "base_conversions": None, "potential_cost": None, "potential_conversions": None, "potential_impressions": None, "potential_clicks": None},
+    {"resource_name": "sim-rec-6", "type": "SEARCH_PARTNERS_OPT_IN", "type_label": _recommendation_type_label("SEARCH_PARTNERS_OPT_IN"), "campaign_name": "Estelar Hoteles - CO:es - Search Marca", "base_cost": 8520.0, "base_conversions": 305.0, "potential_cost": 8520.0, "potential_conversions": 305.0, "potential_impressions": 6200.0, "potential_clicks": 890.0},
 ]
 
 
 def simulated_recommendations():
     return SIMULATED_RECOMMENDATIONS
+
+
+def simulated_apply_recommendation(resource_name):
+    return {"applied": True, "simulated": True}
+
+
+def simulated_dismiss_recommendation(resource_name):
+    return {"dismissed": True, "simulated": True}
