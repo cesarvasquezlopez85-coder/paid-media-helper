@@ -634,6 +634,146 @@ def push_negative_keywords(customer_id, items, validate_only=True):
 
 
 # ---------------------------------------------------------------------------
+# Recomendaciones de Google (Función 9) — el motor de recomendaciones propio
+# de Google Ads (el mismo que alimenta el "puntaje de optimización" y la
+# pestaña "Recomendaciones" de la interfaz), NO el nuevo "Ask Advisor"
+# conversacional (ese no tiene API pública — confirmado en la investigación
+# del 2026-08-11, ver Resumen_Proyecto.md). Es de solo lectura por ahora: no
+# hay botón para aplicar/descartar, solo mostrar qué encontró Google.
+#
+# Nombres de campo verificados contra el .proto real de la API v25
+# (googleapis/googleapis en GitHub, no la documentación en developers.google.com
+# — esa es una SPA que no se puede leer sin ejecutar JS) y luego confirmados
+# contra una cuenta real (2026-08-11, Spiwak Chipichape): pedir un campo
+# anidado de recommendation.impact por separado (ej.
+# recommendation.impact.base_metrics.cost_micros) da 400 UNRECOGNIZED_FIELD
+# — hay que pedir recommendation.impact completo (ver fetch_recommendations).
+# Por precaución, esta primera versión solo pide los campos genéricos (tipo,
+# campaña, impacto) — sin el detalle específico de cada tipo (ej. el monto
+# de presupuesto sugerido, que vive en recommendation.campaign_budget_recommendation
+# y otros ~55 campos oneof por tipo) — para no repetir el mismo problema que
+# ya se vio con el Impression Share de Search en fetch_campaign_rows, donde
+# combinar campos de más de un "grupo" en la misma consulta restringía el
+# resultado en silencio. Ese riesgo específico no se probó todavía contra
+# una cuenta real para los campos por tipo — queda pendiente si hace falta
+# el detalle (ej. mostrar el monto de presupuesto sugerido).
+RECOMMENDATION_TYPE_LABELS = {
+    "CAMPAIGN_BUDGET": "Ajustar presupuesto",
+    "MOVE_UNUSED_BUDGET": "Mover presupuesto sin usar",
+    "FORECASTING_CAMPAIGN_BUDGET": "Presupuesto proyectado (temporada)",
+    "MARGINAL_ROI_CAMPAIGN_BUDGET": "Presupuesto por ROI marginal",
+    "KEYWORD": "Agregar palabra clave",
+    "KEYWORD_MATCH_TYPE": "Ampliar concordancia de palabra clave",
+    "USE_BROAD_MATCH_KEYWORD": "Usar concordancia amplia",
+    "TEXT_AD": "Agregar anuncio de texto",
+    "RESPONSIVE_SEARCH_AD": "Agregar anuncio de búsqueda responsivo",
+    "RESPONSIVE_SEARCH_AD_ASSET": "Agregar recursos al anuncio responsivo",
+    "RESPONSIVE_SEARCH_AD_IMPROVE_AD_STRENGTH": "Mejorar fuerza del anuncio responsivo",
+    "TARGET_CPA_OPT_IN": "Cambiar a estrategia CPA objetivo",
+    "TARGET_ROAS_OPT_IN": "Cambiar a estrategia ROAS objetivo",
+    "MAXIMIZE_CONVERSIONS_OPT_IN": "Cambiar a Maximizar conversiones",
+    "MAXIMIZE_CONVERSION_VALUE_OPT_IN": "Cambiar a Maximizar valor de conversión",
+    "MAXIMIZE_CLICKS_OPT_IN": "Cambiar a Maximizar clics",
+    "ENHANCED_CPC_OPT_IN": "Activar CPC mejorado",
+    "RAISE_TARGET_CPA": "Subir el CPA objetivo",
+    "RAISE_TARGET_CPA_BID_TOO_LOW": "CPA objetivo demasiado bajo",
+    "LOWER_TARGET_ROAS": "Bajar el ROAS objetivo",
+    "SET_TARGET_CPA": "Definir un CPA objetivo",
+    "SET_TARGET_ROAS": "Definir un ROAS objetivo",
+    "SEARCH_PARTNERS_OPT_IN": "Mostrar anuncios en Search Partners",
+    "OPTIMIZE_AD_ROTATION": "Optimizar rotación de anuncios",
+    "DISPLAY_EXPANSION_OPT_IN": "Activar expansión a Display",
+    "PERFORMANCE_MAX_OPT_IN": "Migrar a Performance Max",
+    "PERFORMANCE_MAX_FINAL_URL_OPT_IN": "Activar expansión de URL final en PMax",
+    "IMPROVE_PERFORMANCE_MAX_AD_STRENGTH": "Mejorar fuerza de Performance Max",
+    "UPGRADE_SMART_SHOPPING_CAMPAIGN_TO_PERFORMANCE_MAX": "Migrar Smart Shopping a Performance Max",
+    "UPGRADE_LOCAL_CAMPAIGN_TO_PERFORMANCE_MAX": "Migrar campaña Local a Performance Max",
+    "MIGRATE_DYNAMIC_SEARCH_ADS_CAMPAIGN_TO_PERFORMANCE_MAX": "Migrar Dynamic Search Ads a Performance Max",
+    "IMPROVE_DEMAND_GEN_AD_STRENGTH": "Mejorar fuerza de anuncios Demand Gen",
+    "CALLOUT_ASSET": "Agregar frases destacadas",
+    "SITELINK_ASSET": "Agregar enlaces de sitio",
+    "CALL_ASSET": "Agregar extensión de llamada",
+    "LEAD_FORM_ASSET": "Agregar formulario de clientes potenciales",
+    "DYNAMIC_IMAGE_EXTENSION_OPT_IN": "Activar imágenes dinámicas",
+    "CUSTOM_AUDIENCE_OPT_IN": "Crear audiencia personalizada",
+    "REFRESH_CUSTOMER_MATCH_LIST": "Actualizar lista de Customer Match",
+    "IMPROVE_GOOGLE_TAG_COVERAGE": "Mejorar cobertura del Google Tag",
+}
+
+
+def _recommendation_type_label(raw_type):
+    if not raw_type:
+        return "Recomendación"
+    return RECOMMENDATION_TYPE_LABELS.get(raw_type, raw_type.replace("_", " ").capitalize())
+
+
+def fetch_optimization_score(customer_id):
+    """Puntaje de optimización de la cuenta (0-1, se muestra como %) — el
+    mismo número que aparece en la pestaña "Recomendaciones" de la interfaz
+    de Google Ads. optimization_score_weight es la ponderación total usada
+    para calcularlo; se devuelve por si hace falta más adelante, pero hoy
+    solo se muestra el score."""
+    query = "SELECT customer.optimization_score, customer.optimization_score_weight FROM customer"
+    results = _search(customer_id, query)
+    if not results:
+        return {"score": None, "score_weight": None}
+    customer = results[0].get("customer", {})
+    return {
+        "score": _float_or_none(customer.get("optimizationScore")),
+        "score_weight": _float_or_none(customer.get("optimizationScoreWeight")),
+    }
+
+
+def fetch_recommendations(customer_id):
+    """Recomendaciones activas (no descartadas) de Google Ads para la
+    cuenta — el motor de reglas/ML propio de Google, no un modelo de
+    lenguaje. Solo campos genéricos (ver nota arriba del archivo sobre por
+    qué no se piden campos específicos de cada tipo todavía).
+
+    Confirmado contra una cuenta real (2026-08-11): GAQL rechaza pedir los
+    campos anidados de recommendation.impact por separado (ej.
+    recommendation.impact.base_metrics.cost_micros) con 400
+    UNRECOGNIZED_FIELD — hay que pedir recommendation.impact completo, y
+    Google devuelve el objeto entero (base_metrics/potential_metrics, cada
+    uno con solo los campos que aplican a ese tipo de recomendación). No
+    todas las recomendaciones traen impact (ej. USE_BROAD_MATCH_KEYWORD no
+    trajo ninguno en la prueba real) — impact queda ausente en esos casos."""
+    query = """
+        SELECT
+          recommendation.resource_name,
+          recommendation.type,
+          recommendation.campaign,
+          recommendation.dismissed,
+          recommendation.impact,
+          campaign.name
+        FROM recommendation
+        WHERE recommendation.dismissed = FALSE
+    """
+    results = _search(customer_id, query)
+    rows = []
+    for r in results:
+        rec = r.get("recommendation", {})
+        campaign = r.get("campaign", {})
+        impact = rec.get("impact", {})
+        base = impact.get("baseMetrics", {})
+        potential = impact.get("potentialMetrics", {})
+        raw_type = rec.get("type")
+        rows.append({
+            "resource_name": rec.get("resourceName"),
+            "type": raw_type,
+            "type_label": _recommendation_type_label(raw_type),
+            "campaign_name": campaign.get("name"),
+            "base_cost": _micros_to_units(_int_or_none(base.get("costMicros"))),
+            "base_conversions": _float_or_none(base.get("conversions")),
+            "potential_cost": _micros_to_units(_int_or_none(potential.get("costMicros"))),
+            "potential_conversions": _float_or_none(potential.get("conversions")),
+            "potential_impressions": _float_or_none(potential.get("impressions")),
+            "potential_clicks": _float_or_none(potential.get("clicks")),
+        })
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # Datos simulados — mismas cuentas/campañas "de mentira" para poder construir
 # y probar todo el flujo (selector de cuenta, rango de fechas, tabla,
 # recomendaciones) mientras Google aprueba el developer token real. Se usan
@@ -806,3 +946,20 @@ def simulated_impression_share_daily(date_from, date_to):
 
 def simulated_push_negative_keywords(items, validate_only=True):
     return {"created": len(items), "failed": [], "validate_only": validate_only, "simulated": True}
+
+
+def simulated_optimization_score():
+    return {"score": 0.68, "score_weight": 412.5}
+
+
+SIMULATED_RECOMMENDATIONS = [
+    {"resource_name": "sim-rec-1", "type": "CAMPAIGN_BUDGET", "type_label": _recommendation_type_label("CAMPAIGN_BUDGET"), "campaign_name": "Estelar Hoteles - CO:es - Search Genérica", "base_cost": 14640.0, "base_conversions": 98.0, "potential_cost": 18900.0, "potential_conversions": 132.0, "potential_impressions": None, "potential_clicks": None},
+    {"resource_name": "sim-rec-2", "type": "RESPONSIVE_SEARCH_AD_IMPROVE_AD_STRENGTH", "type_label": _recommendation_type_label("RESPONSIVE_SEARCH_AD_IMPROVE_AD_STRENGTH"), "campaign_name": "Estelar Hoteles - CO:es - Search Marca", "base_cost": None, "base_conversions": None, "potential_cost": None, "potential_conversions": None, "potential_impressions": None, "potential_clicks": None},
+    {"resource_name": "sim-rec-3", "type": "KEYWORD", "type_label": _recommendation_type_label("KEYWORD"), "campaign_name": "Estelar Hoteles - CO:es - Search Genérica", "base_cost": None, "base_conversions": None, "potential_cost": 1200.0, "potential_conversions": 9.0, "potential_impressions": 8400.0, "potential_clicks": 310.0},
+    {"resource_name": "sim-rec-4", "type": "MOVE_UNUSED_BUDGET", "type_label": _recommendation_type_label("MOVE_UNUSED_BUDGET"), "campaign_name": None, "base_cost": None, "base_conversions": None, "potential_cost": None, "potential_conversions": 5.0, "potential_impressions": None, "potential_clicks": None},
+    {"resource_name": "sim-rec-5", "type": "CALLOUT_ASSET", "type_label": _recommendation_type_label("CALLOUT_ASSET"), "campaign_name": None, "base_cost": None, "base_conversions": None, "potential_cost": None, "potential_conversions": None, "potential_impressions": None, "potential_clicks": None},
+]
+
+
+def simulated_recommendations():
+    return SIMULATED_RECOMMENDATIONS

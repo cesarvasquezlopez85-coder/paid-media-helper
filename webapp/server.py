@@ -323,6 +323,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_roas(parse_qs(parsed.query))
             return
 
+        if path == "/api/google-ads/recommendations":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_recommendations(parse_qs(parsed.query))
+            return
+
         # Listado de cuentas registradas (sin contraseñas) — solo admins.
         if path == "/api/admin/users":
             if not self._require_admin_json():
@@ -976,6 +982,40 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             rows = google_ads_client.fetch_roas_by_campaign(customer_id, date_from, date_to, only_active)
             self._send_json(200, {"rows": rows, "simulated": False})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    # Recomendaciones propias de Google Ads (RecommendationService) + el
+    # puntaje de optimización de la cuenta — de solo lectura, no el "Ask
+    # Advisor" conversacional (ese no tiene API pública). No depende de un
+    # rango de fechas, a diferencia del resto de /api/google-ads/*.
+    def _handle_google_ads_recommendations(self, query):
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, {
+                "rows": google_ads_client.simulated_recommendations(),
+                "score": google_ads_client.simulated_optimization_score(),
+                "simulated": True,
+            })
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            rows = google_ads_client.fetch_recommendations(customer_id)
+            score = google_ads_client.fetch_optimization_score(customer_id)
+            self._send_json(200, {"rows": rows, "score": score, "simulated": False})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)
 

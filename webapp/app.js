@@ -129,6 +129,21 @@ const state = {
     },
   },
 
+  // Recomendaciones propias de Google Ads (RecommendationService) — el
+  // motor de reglas/ML del propio Google, no un modelo de lenguaje (eso es
+  // el "Ask Advisor" nuevo de Google, que no tiene API pública — ver
+  // Resumen_Proyecto.md). Solo lectura, sin toggle de archivo (no existe
+  // en ningún CSV), mismo patrón que ROAS pero sin rango de fechas — las
+  // recomendaciones de Google no son por periodo.
+  recs: {
+    status: 'idle', error: null, rows: null, score: null,
+    api: {
+      statusChecked: false, configured: false,
+      accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
+      simulated: false, error: null,
+    },
+  },
+
   // Solo visible/usable para usuarios con is_admin=1 (el servidor también
   // lo exige en cada endpoint /api/admin/*, esto es solo la UI).
   admin: {
@@ -180,6 +195,10 @@ const PAGE_META = {
   roas: {
     title: 'ROAS',
     caption: 'Compara el ROAS logrado contra el ROAS objetivo configurado en la estrategia de puja de cada campaña, y ajústalo directo desde acá cuando la estrategia lo permita.',
+  },
+  recomendaciones: {
+    title: 'Recomendaciones de Google',
+    caption: 'El puntaje de optimización y las recomendaciones que Google Ads ya generó para la cuenta — de solo lectura, para revisar de un vistazo qué encontró Google.',
   },
   administracion: {
     title: 'Administración',
@@ -270,6 +289,7 @@ function render() {
   else if (state.page === 'oportunidad') pageHtml = renderOpportunityPage();
   else if (state.page === 'proyeccion') pageHtml = renderForecastPage();
   else if (state.page === 'roas') pageHtml = renderRoasPage();
+  else if (state.page === 'recomendaciones') pageHtml = renderRecsPage();
   else if (state.page === 'administracion') pageHtml = renderAdminPage();
   else pageHtml = renderBookPage();
 
@@ -3748,6 +3768,196 @@ function renderRoasPage() {
 }
 
 // ---------------------------------------------------------------------------
+// Página — Recomendaciones de Google (Función 9, solo lectura)
+// ---------------------------------------------------------------------------
+
+function ensureRecsGoogleAdsStatusLoaded() {
+  const a = state.recs.api;
+  if (a.statusChecked) return;
+  fetch('/api/google-ads/status')
+    .then((r) => r.json())
+    .then((data) => { a.statusChecked = true; a.configured = !!data.configured; render(); })
+    .catch(() => { a.statusChecked = true; a.configured = false; render(); });
+}
+
+function loadRecsGoogleAdsAccounts() {
+  const a = state.recs.api;
+  a.accountsStatus = 'loading'; a.error = null;
+  render();
+  fetch('/api/google-ads/accounts')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.accounts = data.accounts || [];
+      a.simulated = !!data.simulated;
+      a.accountsStatus = 'ready';
+      render();
+    })
+    .catch((err) => {
+      a.accountsStatus = 'error'; a.error = err.message || String(err);
+      render();
+    });
+}
+
+function fetchRecommendations() {
+  const s = state.recs;
+  const a = s.api;
+  const manualId = (a.accountIdManual || '').replace(/[^0-9]/g, '');
+  const customerId = manualId || a.accountId;
+  if (!customerId && !a.simulated) { a.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
+
+  a.error = null;
+  s.status = 'loading'; s.error = null;
+  render();
+
+  const params = new URLSearchParams({ customer_id: customerId || '' });
+  fetch(`/api/google-ads/recommendations?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.simulated = !!data.simulated;
+      s.rows = data.rows || [];
+      s.score = data.score || null;
+      s.status = 'ready';
+      render();
+    })
+    .catch((err) => {
+      a.error = err.message || String(err);
+      s.status = 'idle';
+      render();
+    });
+}
+
+// El impacto que trae cada recomendación varía mucho por tipo (algunas
+// traen conversiones proyectadas, otras solo clics o costo, muchas no
+// traen nada) — confirmado contra una cuenta real (2026-08-11), no todas
+// las recomendaciones de Google tienen el mismo detalle. Se muestra lo más
+// concreto que haya, en este orden de preferencia.
+function recImpactLabel(r) {
+  if (r.potential_conversions != null) return `hasta ${fmtInt(r.potential_conversions)} conv.`;
+  if (r.potential_clicks != null) return `hasta ${fmtInt(r.potential_clicks)} clics`;
+  if (r.potential_impressions != null) return `hasta ${fmtInt(r.potential_impressions)} impr.`;
+  if (r.potential_cost != null) return `≈ ${fmtMoney(r.potential_cost)}`;
+  return 'Ver en Google Ads';
+}
+
+function renderRecsApiPanel() {
+  const a = state.recs.api;
+
+  if (!a.statusChecked) {
+    return `<div class="field"><p class="footnote">Consultando la conexión con Google Ads…</p></div>`;
+  }
+
+  const simulatedNotice = a.simulated ? `
+    <div class="ok-panel" style="margin:10px 0">
+      <strong>Modo simulado.</strong> La API de Google Ads todavía no está configurada en el servidor
+      (falta la aprobación del developer token de Google) — estos son datos de ejemplo, no de una cuenta real.
+    </div>` : '';
+
+  if (a.accountsStatus === 'idle') {
+    return `
+      <div class="card control-panel align-end">
+        <div class="field">
+          <p class="footnote">${a.configured ? 'Conectado a la API de Google Ads.' : 'La API de Google Ads aún no está configurada — se usarán datos simulados para probar el flujo.'}</p>
+          <button class="btn-outline" data-action="recs-api-load-accounts">Ver cuentas disponibles</button>
+        </div>
+      </div>`;
+  }
+  if (a.accountsStatus === 'loading') {
+    return `<div class="card control-panel align-end"><div class="field"><p class="footnote">Cargando cuentas…</p></div></div>`;
+  }
+  if (a.accountsStatus === 'error') {
+    return `<div class="error-panel"><strong>No se pudieron cargar las cuentas.</strong> ${escapeHtml(a.error)}</div>`;
+  }
+
+  const accountOptions = ['<option value="">Elige una cuenta…</option>']
+    .concat(a.accounts.map((acc) => `<option value="${escapeHtml(acc.id)}" ${a.accountId === acc.id ? 'selected' : ''}>${escapeHtml(acc.name)} (${escapeHtml(acc.id)})</option>`))
+    .join('');
+
+  return `
+    <div class="card control-panel align-end">
+      ${simulatedNotice}
+      <div class="field">
+        <label>Cuenta</label>
+        <select id="recs-api-account" style="width:320px">${accountOptions}</select>
+      </div>
+      <div class="field">
+        <label>...o escribe el ID de la cuenta</label>
+        <input type="text" id="recs-api-account-manual" value="${escapeHtml(a.accountIdManual)}" placeholder="ej. 6862893390" style="width:160px" />
+      </div>
+      <button class="btn-accent" data-action="recs-api-fetch">Traer recomendaciones</button>
+      ${a.error ? `<div class="error-panel" style="margin-top:10px"><strong>No se pudo traer las recomendaciones.</strong> ${escapeHtml(a.error)}</div>` : ''}
+    </div>`;
+}
+
+function renderRecsPage() {
+  const s = state.recs;
+  // Igual que ROAS: no hay modo "Subir archivo" (esto no viene en ningún
+  // CSV), así que hace falta disparar la consulta de estado apenas se
+  // entra a la página.
+  ensureRecsGoogleAdsStatusLoaded();
+
+  const controlPanel = renderRecsApiPanel();
+
+  let scoreCard = '';
+  if (s.status === 'ready' && s.score && s.score.score != null) {
+    const pct = Math.round(s.score.score * 100);
+    scoreCard = `
+      <div class="card stat-card accent" style="max-width:260px;margin-bottom:20px">
+        <div class="stat-label">Puntaje de optimización</div>
+        <div class="stat-value lg">${pct}%</div>
+        <div class="stat-sub">Mismo puntaje que se ve en la pestaña "Recomendaciones" de Google Ads</div>
+      </div>`;
+  }
+
+  let body = '';
+  if (s.status === 'idle') {
+    body = `
+      <div class="card state-panel idle">
+        ${icon('lightbulb', 30)}
+        <p>Conecta una cuenta de Google Ads para ver su puntaje de optimización y las recomendaciones que Google ya generó para ella.</p>
+      </div>`;
+  } else if (s.status === 'loading') {
+    body = `
+      <div class="card state-panel loading">
+        <div class="spinner"></div>
+        <p>Trayendo recomendaciones…</p>
+      </div>`;
+  } else if (s.status === 'ready') {
+    const rows = s.rows || [];
+    const rowsHtml = rows.map((r) => `
+      <tr>
+        <td>${escapeHtml(r.type_label)}</td>
+        <td>${escapeHtml(r.campaign_name || 'Toda la cuenta')}</td>
+        <td>${escapeHtml(recImpactLabel(r))}</td>
+      </tr>`).join('');
+
+    body = rows.length ? `
+      ${scoreCard}
+      <div class="card table-panel">
+        <div class="table-panel-head">
+          <h3>Recomendaciones activas (${rows.length})</h3>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Recomendación</th><th>Campaña</th><th>Impacto estimado</th></tr></thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+        </div>
+        <p class="footnote" style="margin-top:14px">
+          Estas son las recomendaciones y el puntaje que el motor propio de Google Ads ya calculó para la cuenta — no un análisis de IA generativa (eso es un plan aparte, todavía no construido). De solo lectura por ahora: revisa cada una directo en Google Ads antes de aplicarla o descartarla.
+        </p>
+      </div>` : `
+      ${scoreCard}
+      <div class="card state-panel idle">${icon('check-circle', 30)}<p>Google Ads no tiene recomendaciones activas para esta cuenta ahora mismo.</p></div>`;
+  } else if (s.status === 'error') {
+    body = `<div class="error-panel"><strong>No se pudo traer las recomendaciones.</strong> ${escapeHtml(s.error)}</div>`;
+  }
+
+  return `${controlPanel}${body}`;
+}
+
+// ---------------------------------------------------------------------------
 // Página — Administración (solo is_admin)
 // ---------------------------------------------------------------------------
 
@@ -4185,6 +4395,12 @@ function bindEvents() {
     });
   });
 
+  // Recomendaciones de Google
+  const recsApiAccount = document.getElementById('recs-api-account');
+  if (recsApiAccount) recsApiAccount.addEventListener('change', (e) => { state.recs.api.accountId = e.target.value; });
+  const recsApiAccountManual = document.getElementById('recs-api-account-manual');
+  if (recsApiAccountManual) recsApiAccountManual.addEventListener('input', (e) => { state.recs.api.accountIdManual = e.target.value; });
+
   document.querySelectorAll('[data-opp-sort]').forEach((th) => {
     th.addEventListener('click', () => {
       const key = th.dataset.oppSort;
@@ -4474,6 +4690,9 @@ function handleAction(action) {
     }
     case 'roas-edit-preview': adjustRoasTarget(true); break;
     case 'roas-edit-confirm': adjustRoasTarget(false); break;
+
+    case 'recs-api-load-accounts': loadRecsGoogleAdsAccounts(); break;
+    case 'recs-api-fetch': fetchRecommendations(); break;
 
     case 'forecast-demo': {
       state.forecast.status = 'loading'; state.forecast.error = null; state.forecast.fileName = 'ingresos_ejemplo.csv';
