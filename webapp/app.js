@@ -20,6 +20,9 @@ const state = {
       dateFrom: '', dateTo: '', onlyActive: false,
       simulated: false, error: null,
     },
+    // Prueba interna: lectura priorizada de los hallazgos vía Claude AI —
+    // solo visible para administradores mientras se valida el flujo.
+    ai: { status: 'idle', narrativa: null, error: null },
   },
 
   neg: {
@@ -163,8 +166,17 @@ const state = {
       accountsStatus: 'idle', accounts: [], accountsError: null, accountFilter: '',
       status: 'idle', error: null, // idle | granting | error
     },
+    // Contraseña temporal recién generada — se muestra UNA sola vez (nunca
+    // vuelve a quedar accesible, ni siquiera para el admin que la generó).
+    resetPassword: { status: 'idle', error: null, result: null }, // result: { username, temp_password }
   },
 };
+
+// Se activa cuando /api/me (o la respuesta de login) trae
+// must_change_password=true — bloquea el resto de la app hasta que la
+// persona defina una contraseña propia. Ver renderForcePasswordChangePanel.
+let forcePasswordChange = false;
+const pwChangeState = { status: 'idle', error: null }; // idle | saving | error
 
 // Se completa con la respuesta de /api/me al cargar la página — controla
 // si se muestra el botón "Administración" del sidebar.
@@ -260,6 +272,70 @@ function icon(name, size = 18) {
 
 const root = document.getElementById('page-root');
 
+// Pantalla forzada tras un reset de contraseña por un admin — reemplaza el
+// resto de la app hasta que la persona defina una contraseña propia.
+function renderForcePasswordChangePanel() {
+  return `
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">Cambia tu contraseña</h1>
+        <p class="page-caption">Un administrador restableció tu contraseña. Antes de continuar, define una nueva que solo tú conozcas.</p>
+      </div>
+    </div>
+    <div class="card control-panel" style="max-width:420px;flex-direction:column;align-items:stretch">
+      <div class="field">
+        <label>Contraseña temporal (la que te dieron)</label>
+        <input type="password" id="pwchange-current" autocomplete="current-password" />
+      </div>
+      <div class="field">
+        <label>Nueva contraseña (mínimo 10 caracteres)</label>
+        <input type="password" id="pwchange-new" autocomplete="new-password" minlength="10" />
+      </div>
+      <div class="field">
+        <label>Repite la nueva contraseña</label>
+        <input type="password" id="pwchange-confirm" autocomplete="new-password" minlength="10" />
+      </div>
+      ${pwChangeState.error ? `<div class="error-panel">${escapeHtml(pwChangeState.error)}</div>` : ''}
+      <button class="btn-accent" data-action="pwchange-submit" ${pwChangeState.status === 'saving' ? 'disabled' : ''}>
+        ${pwChangeState.status === 'saving' ? 'Guardando…' : 'Guardar nueva contraseña'}
+      </button>
+    </div>`;
+}
+
+function submitPasswordChange() {
+  const current = document.getElementById('pwchange-current').value;
+  const next = document.getElementById('pwchange-new').value;
+  const confirmValue = document.getElementById('pwchange-confirm').value;
+  if (next.length < 10) {
+    pwChangeState.status = 'error'; pwChangeState.error = 'La nueva contraseña debe tener al menos 10 caracteres.';
+    render();
+    return;
+  }
+  if (next !== confirmValue) {
+    pwChangeState.status = 'error'; pwChangeState.error = 'Las dos contraseñas nuevas no coinciden.';
+    render();
+    return;
+  }
+  pwChangeState.status = 'saving'; pwChangeState.error = null;
+  render();
+  fetch('/api/change-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ current_password: current, new_password: next }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'No se pudo cambiar la contraseña.');
+      forcePasswordChange = false;
+      pwChangeState.status = 'idle'; pwChangeState.error = null;
+      render();
+    })
+    .catch((err) => {
+      pwChangeState.status = 'error'; pwChangeState.error = err.message || String(err);
+      render();
+    });
+}
+
 function render() {
   document.querySelectorAll('.nav-btn').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.nav === state.page);
@@ -276,6 +352,22 @@ function render() {
       selStart = active.selectionStart;
       selEnd = active.selectionEnd;
     }
+  }
+
+  if (forcePasswordChange) {
+    root.innerHTML = renderForcePasswordChangePanel();
+    bindEvents();
+    if (window.lucide) window.lucide.createIcons();
+    if (focusId) {
+      const el = document.getElementById(focusId);
+      if (el) {
+        el.focus();
+        if (selStart !== null && typeof el.setSelectionRange === 'function') {
+          el.setSelectionRange(selStart, selEnd);
+        }
+      }
+    }
+    return;
   }
 
   const meta = PAGE_META[state.page];
@@ -561,6 +653,38 @@ function barRowsHtml(rows, compact) {
     </div>`).join('');
 }
 
+// Prueba interna: le manda el resumen + hallazgos ya calculados a Claude y
+// muestra una lectura priorizada en prosa. Solo visible para administradores
+// mientras se valida costo/calidad (ver server.py: _handle_ai_analizar_rendimiento
+// exige is_admin).
+function renderAiAnalysisPanel() {
+  if (!currentUser.isAdmin) return '';
+  const ai = state.rend.ai;
+
+  let inner;
+  if (ai.status === 'loading') {
+    inner = `<div class="spinner"></div><p class="footnote">Analizando con IA…</p>`;
+  } else if (ai.status === 'error') {
+    inner = `
+      <div class="error-panel"><strong>No se pudo generar el análisis.</strong> ${escapeHtml(ai.error)}</div>
+      <button class="btn-outline" data-action="rend-ai-analizar">Reintentar</button>`;
+  } else if (ai.status === 'ready') {
+    const paragraphs = (ai.narrativa || '').split(/\n+/).filter(Boolean)
+      .map((p) => `<p class="ai-narrativa">${escapeHtml(p)}</p>`).join('');
+    inner = `${paragraphs}<button class="btn-outline" data-action="rend-ai-analizar">Volver a analizar</button>`;
+  } else {
+    inner = `
+      <button class="btn-outline" data-action="rend-ai-analizar">${icon('sparkles', 16)} Analizar con IA</button>
+      <p class="field-hint">Prueba interna (solo administradores) — le pide a Claude una lectura priorizada de estos hallazgos.</p>`;
+  }
+
+  return `
+    <div class="card ai-analysis-card">
+      <div class="rec-head" style="margin-bottom:8px"><span class="rec-cat">Análisis con IA · prueba interna</span></div>
+      ${inner}
+    </div>`;
+}
+
 function renderRendLayoutA() {
   const s = state.rend;
   const rows = getRendFilteredRows();
@@ -645,6 +769,7 @@ function renderRendLayoutA() {
 
     <div>
       <h2 class="section-title">Recomendaciones de optimización (${recs.length})</h2>
+      ${renderAiAnalysisPanel()}
       ${recsHtml}
     </div>
   `;
@@ -688,6 +813,7 @@ function renderRendLayoutB() {
         </div>
         <div class="card dense-recs">
           <h3>Recomendaciones (${recs.length})</h3>
+          ${renderAiAnalysisPanel()}
           ${recsHtml}
         </div>
       </div>
@@ -792,6 +918,28 @@ function runRendAnalysisFromApiRows(apiRows, fileName) {
     Object.assign(s, { status: 'error', error: err.message || String(err), fileName });
   }
   render();
+}
+
+function runAiAnalysis() {
+  const s = state.rend;
+  s.ai = { status: 'loading', narrativa: null, error: null };
+  render();
+
+  fetch('/api/ai/analizar-rendimiento', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resumen: s.resumen, recs: s.recs }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      s.ai = { status: 'ready', narrativa: data.narrativa, error: null };
+      render();
+    })
+    .catch((err) => {
+      s.ai = { status: 'error', narrativa: null, error: err.message || String(err) };
+      render();
+    });
 }
 
 function ensureGoogleAdsStatusLoaded() {
@@ -4131,6 +4279,28 @@ function deleteAdminUser(username) {
     });
 }
 
+function resetUserPassword(userId, username) {
+  if (!window.confirm(`¿Restablecer la contraseña de "${username}"? Se genera una temporal, se cierra cualquier sesión que tenga abierta, y deberá definir una contraseña propia al volver a entrar.`)) return;
+  const a = state.admin;
+  a.resetPassword = { status: 'resetting', error: null, result: null };
+  render();
+  fetch('/api/admin/users/reset-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user_id: userId }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.resetPassword = { status: 'idle', error: null, result: { username: data.username, temp_password: data.temp_password } };
+      render();
+    })
+    .catch((err) => {
+      a.resetPassword = { status: 'error', error: err.message || String(err), result: null };
+      render();
+    });
+}
+
 function loadAdminGrantAccounts() {
   const g = state.admin.grant;
   g.accountsStatus = 'loading'; g.accountsError = null;
@@ -4218,23 +4388,50 @@ function renderAdminPage() {
   } else if (a.usersStatus === 'error') {
     usersBody = `<div class="error-panel">${escapeHtml(a.usersError)}</div>`;
   } else if (a.usersStatus === 'ready') {
-    const rows = a.users.map((u) => `
+    const meIsSuperAdmin = a.users.some((x) => x.username === currentUser.username && x.is_super_admin);
+    const rows = a.users.map((u) => {
+      const isSelf = u.username === currentUser.username;
+      const deleteCell = isSelf
+        ? '<span class="footnote">Tu cuenta</span>'
+        : u.is_super_admin
+          ? '<span class="footnote">No se puede borrar</span>'
+          : `<button class="btn-outline xs" data-admin-delete-user="${escapeHtml(u.username)}">Eliminar</button>`;
+      const resetCell = isSelf
+        ? ''
+        : (u.is_super_admin && !meIsSuperAdmin)
+          ? '<span class="footnote">Requiere super admin</span>'
+          : `<button class="btn-outline xs" data-admin-reset-password="${u.id}" data-admin-reset-username="${escapeHtml(u.username)}">Restablecer contraseña</button>`;
+      return `
       <tr>
         <td>${escapeHtml(u.username)}</td>
         <td>${u.is_super_admin ? '<span class="delta-badge good">Super admin</span>' : (u.is_admin ? '<span class="delta-badge good">Administrador</span>' : '<span class="delta-badge neutral">Usuario</span>')}</td>
         <td>${fmtDateTime(u.created_at)}</td>
-        <td>${u.is_super_admin
-          ? '<span class="footnote">No se puede borrar</span>'
-          : u.username === currentUser.username
-            ? '<span class="footnote">Tu cuenta</span>'
-            : `<button class="btn-outline xs" data-admin-delete-user="${escapeHtml(u.username)}">Eliminar</button>`}</td>
-      </tr>`).join('');
+        <td>${deleteCell}</td>
+        <td>${resetCell}</td>
+      </tr>`;
+    }).join('');
+    let resetResultHtml = '';
+    if (a.resetPassword.result) {
+      const rp = a.resetPassword.result;
+      resetResultHtml = `
+        <div class="ok-panel" style="margin-bottom:14px">
+          <strong>Contraseña temporal para ${escapeHtml(rp.username)}:</strong>
+          <code style="font-family:ui-monospace,monospace;background:var(--gray-100);padding:2px 6px;border-radius:4px;font-size:14px;user-select:all">${escapeHtml(rp.temp_password)}</code>
+          <p class="footnote" style="margin-top:6px">
+            Pásasela por fuera de la plataforma (Slack, en persona, etc.) — no vuelve a mostrarse. Al iniciar sesión con ella, se le pedirá definir una contraseña propia antes de continuar. Cualquier sesión que tuviera abierta esa cuenta quedó cerrada.
+          </p>
+          <button class="btn-outline xs" data-action="admin-reset-password-dismiss" style="margin-top:8px">Ya la copié, ocultar</button>
+        </div>`;
+    } else if (a.resetPassword.status === 'error') {
+      resetResultHtml = `<div class="error-panel" style="margin-bottom:14px">${escapeHtml(a.resetPassword.error)}</div>`;
+    }
     usersBody = `
       <div class="card table-panel">
         <div class="table-panel-head"><h3>Usuarios registrados (${a.users.length})</h3></div>
+        ${resetResultHtml}
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Usuario</th><th>Rol</th><th>Creada</th><th></th></tr></thead>
+            <thead><tr><th>Usuario</th><th>Rol</th><th>Creada</th><th></th><th></th></tr></thead>
             <tbody>${rows}</tbody>
           </table>
         </div>
@@ -4731,6 +4928,9 @@ function bindEvents() {
   document.querySelectorAll('[data-admin-delete-user]').forEach((btn) => {
     btn.addEventListener('click', () => deleteAdminUser(btn.dataset.adminDeleteUser));
   });
+  document.querySelectorAll('[data-admin-reset-password]').forEach((btn) => {
+    btn.addEventListener('click', () => resetUserPassword(Number(btn.dataset.adminResetPassword), btn.dataset.adminResetUsername));
+  });
   document.querySelectorAll('[data-admin-revoke-user]').forEach((btn) => {
     btn.addEventListener('click', () => revokeAdminAccess(Number(btn.dataset.adminRevokeUser), btn.dataset.adminRevokeCustomer));
   });
@@ -4762,6 +4962,9 @@ function handleAction(action) {
     }
     case 'rend-api-load-accounts': loadGoogleAdsAccounts(); break;
     case 'rend-api-fetch': fetchGoogleAdsCampaigns(); break;
+    case 'rend-ai-analizar': runAiAnalysis(); break;
+    case 'pwchange-submit': submitPasswordChange(); break;
+    case 'admin-reset-password-dismiss': state.admin.resetPassword = { status: 'idle', error: null, result: null }; render(); break;
 
     case 'compare-demo': {
       state.compare.current.status = 'loading'; state.compare.current.error = null; state.compare.current.fileName = 'sample_data_actual.csv';
@@ -4984,6 +5187,10 @@ fetch('/api/me').then((r) => r.json()).then((data) => {
   currentUser.isAdmin = !!data.is_admin;
   const navAdmin = document.getElementById('nav-admin');
   if (navAdmin && currentUser.isAdmin) navAdmin.style.display = '';
+  if (data.must_change_password) {
+    forcePasswordChange = true;
+    render();
+  }
 });
 
 document.getElementById('sidebar-logout')?.addEventListener('click', () => {

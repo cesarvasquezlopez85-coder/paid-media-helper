@@ -38,6 +38,7 @@ from collections import defaultdict
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import claude_client
 import google_ads_client
 
 PORT = int(os.environ.get("PORT", 8642))
@@ -147,6 +148,18 @@ REGISTER_RATE_LIMIT = (5, 300)
 _write_limiter = RateLimiter()
 WRITE_RATE_LIMIT = (30, 60)
 
+# Análisis con IA (Claude): cada llamada cuesta dinero real en la API de
+# Anthropic, a diferencia del resto de endpoints — límite mucho más
+# conservador que el de escritura normal. Por usuario, no por IP.
+_ai_limiter = RateLimiter()
+AI_RATE_LIMIT = (10, 3600)
+
+# /api/change-password verifica una contraseña actual, igual que el login —
+# por usuario ya autenticado (no por IP), para frenar fuerza bruta contra la
+# contraseña vigente sin depender del límite de /api/login.
+_change_password_limiter = RateLimiter()
+CHANGE_PASSWORD_RATE_LIMIT = (8, 300)
+
 # Rutas que no requieren sesión (la pantalla de login/registro y sus llamadas).
 PUBLIC_PATHS = {"/login", "/login.html", "/login.js", "/styles.css"}
 
@@ -220,6 +233,14 @@ def init_db():
             pass
         try:
             conn.execute("ALTER TABLE users ADD COLUMN locked_until REAL")
+        except sqlite3.OperationalError:
+            pass
+        # Se activa cuando un admin restablece la contraseña de alguien (ver
+        # _handle_admin_reset_password) — obliga a definir una contraseña
+        # propia antes de poder usar el resto de la app, para que la temporal
+        # que le pasaron por fuera de la plataforma no quede como definitiva.
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass
         # Qué cuenta de Google Ads (customer_id) puede tocar cada usuario que
@@ -388,6 +409,12 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_google_ads_recommendation_dismiss(payload)
+        elif path == "/api/ai/analizar-rendimiento":
+            # Prueba interna — solo administradores mientras se valida el
+            # costo/calidad del análisis, antes de abrirlo a todos los usuarios.
+            if not self._require_admin_json():
+                return
+            self._handle_ai_analizar_rendimiento(payload)
         elif path == "/api/admin/users/delete":
             if not self._require_admin_json():
                 return
@@ -400,6 +427,14 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_admin_json():
                 return
             self._handle_admin_access_revoke(payload)
+        elif path == "/api/admin/users/reset-password":
+            if not self._require_admin_json():
+                return
+            self._handle_admin_reset_password(payload)
+        elif path == "/api/change-password":
+            if not self._require_auth_json():
+                return
+            self._handle_change_password(payload)
         else:
             self.send_error(404, "No encontrado")
 
@@ -471,6 +506,7 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             row = conn.execute(
                 "SELECT users.id AS id, users.username AS username, users.is_admin AS is_admin, "
+                "users.must_change_password AS must_change_password, "
                 "sessions.expires_at AS expires_at "
                 "FROM sessions JOIN users ON users.id = sessions.user_id "
                 "WHERE sessions.token = ?",
@@ -480,7 +516,10 @@ class Handler(SimpleHTTPRequestHandler):
             conn.close()
         if not row or row["expires_at"] < time.time():
             return None
-        return {"id": row["id"], "username": row["username"], "is_admin": bool(row["is_admin"])}
+        return {
+            "id": row["id"], "username": row["username"], "is_admin": bool(row["is_admin"]),
+            "must_change_password": bool(row["must_change_password"]),
+        }
 
     # Un usuario admin (PMH_ADMIN_USERNAMES) puede tocar cualquier cuenta;
     # el resto solo las que tenga en user_account_access. Sin filas ahí,
@@ -539,7 +578,10 @@ class Handler(SimpleHTTPRequestHandler):
     def _handle_me(self):
         user = self._get_current_user()
         if user:
-            self._send_json(200, {"authenticated": True, "username": user["username"], "is_admin": user["is_admin"]})
+            self._send_json(200, {
+                "authenticated": True, "username": user["username"], "is_admin": user["is_admin"],
+                "must_change_password": user["must_change_password"],
+            })
         else:
             self._send_json(200, {"authenticated": False})
 
@@ -664,6 +706,81 @@ class Handler(SimpleHTTPRequestHandler):
             conn.close()
         self._send_json(200, {"ok": True})
 
+    # Genera una contraseña temporal para otro usuario (ej. la olvidó y no
+    # hay forma de recuperarla — se guarda con hash, nadie puede leerla). El
+    # admin debe pasársela por fuera de la plataforma (Slack, en persona,
+    # etc.); la app la muestra una sola vez en esta respuesta y nunca vuelve
+    # a quedar accesible. must_change_password fuerza a que la primera acción
+    # tras iniciar sesión con la temporal sea definir una propia — ver
+    # _handle_change_password y el gate en app.js. También cierra cualquier
+    # sesión abierta que tuviera esa cuenta y le quita el bloqueo por
+    # intentos fallidos, si lo tenía.
+    #
+    # Restablecer la contraseña de un super admin exige que quien lo pide
+    # también lo sea — un admin normal no puede tomar el control de una
+    # cuenta con más privilegios que la suya reseteándole la contraseña.
+    def _handle_admin_reset_password(self, payload):
+        requester = self._get_current_user()
+        user_id = payload.get("user_id")
+        if not user_id:
+            self._send_json(400, {"error": "Falta user_id."})
+            return
+        conn = get_db()
+        try:
+            target = conn.execute("SELECT id, username FROM users WHERE id = ?", (user_id,)).fetchone()
+            if not target:
+                self._send_json(404, {"error": "No existe ese usuario."})
+                return
+            target_is_super_admin = target["username"].lower() in SUPER_ADMIN_USERNAMES
+            requester_is_super_admin = requester["username"].lower() in SUPER_ADMIN_USERNAMES
+            if target_is_super_admin and not requester_is_super_admin:
+                self._send_json(403, {"error": "Solo un super administrador puede restablecer la contraseña de otro super administrador."})
+                return
+
+            temp_password = secrets.token_urlsafe(12)
+            salt_hex, pw_hash = hash_password(temp_password)
+            conn.execute(
+                "UPDATE users SET salt = ?, password_hash = ?, must_change_password = 1, "
+                "failed_login_attempts = 0, locked_until = NULL WHERE id = ?",
+                (salt_hex, pw_hash, target["id"]),
+            )
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (target["id"],))
+            conn.commit()
+        finally:
+            conn.close()
+        self._send_json(200, {"ok": True, "username": target["username"], "temp_password": temp_password})
+
+    # Cambio de contraseña por el propio usuario — lo usa tanto el flujo
+    # forzado tras un reset de admin (ver arriba) como un cambio voluntario
+    # en cualquier momento. Exige la contraseña actual para no permitir que
+    # una sesión robada (ej. una pestaña abierta) cambie la contraseña sin
+    # saberla.
+    def _handle_change_password(self, payload):
+        user = self._get_current_user()
+        if not _change_password_limiter.allow(f"user:{user['id']}", *CHANGE_PASSWORD_RATE_LIMIT):
+            self._send_json(429, {"error": "Demasiados intentos. Espera unos minutos y vuelve a intentar."})
+            return
+        current_password = payload.get("current_password") or ""
+        new_password = payload.get("new_password") or ""
+        if len(new_password) < MIN_PASSWORD_LENGTH:
+            self._send_json(400, {"error": f"La nueva contraseña debe tener al menos {MIN_PASSWORD_LENGTH} caracteres."})
+            return
+        conn = get_db()
+        try:
+            row = conn.execute("SELECT salt, password_hash FROM users WHERE id = ?", (user["id"],)).fetchone()
+            if not row or not verify_password(current_password, row["salt"], row["password_hash"]):
+                self._send_json(401, {"error": "La contraseña actual no es correcta."})
+                return
+            salt_hex, pw_hash = hash_password(new_password)
+            conn.execute(
+                "UPDATE users SET salt = ?, password_hash = ?, must_change_password = 0 WHERE id = ?",
+                (salt_hex, pw_hash, user["id"]),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._send_json(200, {"ok": True})
+
     def _handle_register(self, payload):
         if not _register_limiter.allow(self._client_ip(), *REGISTER_RATE_LIMIT):
             self._send_json(429, {"error": "Demasiados intentos de registro. Espera unos minutos y vuelve a intentar."})
@@ -710,7 +827,8 @@ class Handler(SimpleHTTPRequestHandler):
         conn = get_db()
         try:
             row = conn.execute(
-                "SELECT id, salt, password_hash, failed_login_attempts, locked_until FROM users WHERE username = ?",
+                "SELECT id, salt, password_hash, failed_login_attempts, locked_until, must_change_password "
+                "FROM users WHERE username = ?",
                 (username,),
             ).fetchone()
             now = time.time()
@@ -749,7 +867,7 @@ class Handler(SimpleHTTPRequestHandler):
         if not ok:
             self._send_json(401, {"error": "Usuario o contraseña incorrectos."})
             return
-        self._start_session(row["id"], username)
+        self._start_session(row["id"], username, must_change_password=bool(row["must_change_password"]))
 
     def _handle_logout(self):
         token = self._get_session_token()
@@ -768,7 +886,7 @@ class Handler(SimpleHTTPRequestHandler):
             jar[SESSION_COOKIE]["secure"] = True
         self._send_json(200, {"ok": True}, extra_headers=[("Set-Cookie", jar[SESSION_COOKIE].OutputString())])
 
-    def _start_session(self, user_id, username):
+    def _start_session(self, user_id, username, must_change_password=False):
         token = secrets.token_urlsafe(32)
         now = time.time()
         conn = get_db()
@@ -790,7 +908,7 @@ class Handler(SimpleHTTPRequestHandler):
             jar[SESSION_COOKIE]["secure"] = True
         self._send_json(
             200,
-            {"ok": True, "username": username},
+            {"ok": True, "username": username, "must_change_password": must_change_password},
             extra_headers=[("Set-Cookie", jar[SESSION_COOKIE].OutputString())],
         )
 
@@ -1094,6 +1212,32 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(200, result)
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)
+
+    # Prueba interna de integración con Claude — el cliente manda el resumen
+    # y los hallazgos que ya calculó localmente (engine.js) y recibe de
+    # vuelta una lectura priorizada en prosa. No toca Google Ads ni datos de
+    # cuenta reales, así que no necesita _user_can_access_account.
+    def _handle_ai_analizar_rendimiento(self, payload):
+        user = self._get_current_user()
+        if not claude_client.is_configured():
+            self._send_json(503, {"error": "La integración con Claude no está configurada en el servidor (falta ANTHROPIC_API_KEY)."})
+            return
+        if not _ai_limiter.allow(f"user:{user['id']}", *AI_RATE_LIMIT):
+            self._send_json(429, {"error": "Alcanzaste el límite de análisis con IA por esta hora. Intenta más tarde."})
+            return
+
+        resumen = payload.get("resumen")
+        recs = payload.get("recs")
+        if not isinstance(resumen, dict) or not isinstance(recs, list):
+            self._send_json(400, {"error": "Faltan datos de rendimiento (resumen/recs) para analizar."})
+            return
+
+        try:
+            narrativa = claude_client.analizar_rendimiento(resumen, recs)
+            self._send_json(200, {"narrativa": narrativa})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            print(f"[claude-error] {e}", flush=True)
+            self._send_json(502, {"error": "No se pudo generar el análisis con IA. Intenta de nuevo en unos minutos."})
 
     # Escritura real sobre la cuenta del cliente — a diferencia de todos los
     # demás endpoints de /api/google-ads/, este modifica Google Ads. Por
