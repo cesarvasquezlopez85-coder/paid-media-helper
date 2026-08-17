@@ -2,7 +2,7 @@
 
 ## Qué es
 
-Una herramienta interna para que cualquier persona del equipo suba archivos de una cuenta de Google Ads (o se conecte directo a la API) y reciba sin intervención manual: (1) gráficas de rendimiento y recomendaciones de optimización, (2) comparación de rendimiento entre dos periodos con recomendaciones por tendencia, (3) una lista de candidatos a palabra clave negativa, (4) análisis de reservas reales para cuentas de hotel (con modo de comparación entre dos periodos), (5) una estimación de ingresos adicionales perdidos por campañas limitadas por presupuesto, (6) una proyección de ventas futuras combinando tendencia y temporada alta/baja, y (7) el ROAS logrado vs. el ROAS objetivo de cada campaña, ajustable directo desde la plataforma. Pensada para cubrir 100+ cuentas de forma self-serve.
+Una herramienta interna para que cualquier persona del equipo suba archivos de una cuenta de Google Ads (o se conecte directo a la API) y reciba sin intervención manual: (1) gráficas de rendimiento y recomendaciones de optimización — con lectura priorizada opcional generada por Claude AI, prueba interna solo para administradores —, (2) comparación de rendimiento entre dos periodos con recomendaciones por tendencia, (3) una lista de candidatos a palabra clave negativa, (4) análisis de reservas reales para cuentas de hotel (con modo de comparación entre dos periodos), (5) una estimación de ingresos adicionales perdidos por campañas limitadas por presupuesto, (6) una proyección de ventas futuras combinando tendencia y temporada alta/baja, (7) el ROAS logrado vs. el ROAS objetivo de cada campaña, ajustable directo desde la plataforma, y (8) las recomendaciones nativas de optimización de Google Ads, con opción de aplicarlas o descartarlas sin salir de la plataforma. Pensada para cubrir 100+ cuentas de forma self-serve.
 
 Hay una función más ya construida — generador de copys de anuncio desde una URL — pero **está oculta del menú a pedido de cesar**: tras probarla con cuentas reales, el resultado no lo convenció lo suficiente para quedar en v1. Queda pendiente para v2 (ver "Función 3" más abajo y `roadmap.md`).
 
@@ -17,7 +17,7 @@ El sidebar de la app ya lo muestra así. El salto de V1 a V2 marca el paso de "s
 - **Conectada de verdad desde el 2026-07-28** (no solo en modo simulado): la primera prueba contra una cuenta real de la agencia encontró y corrigió varios bugs reales (versión de API retirada, un parámetro no soportado, un nombre de campo equivocado, un filtro que dejaba fuera la mayoría de las cuentas del MCC) — ver el detalle completo en la sección de Función 1 más abajo y en `roadmap.md`.
 - Mientras las credenciales de Google no estén configuradas (o para cualquier cuenta de prueba), todo sigue funcionando en **modo simulado** — mismos botones, mismo flujo, datos de ejemplo en vez de reales.
 
-## Estado: V2 — ocho funciones construidas, siete activas en el menú (Función 3, copys, en pausa para v2)
+## Estado: V2 — nueve funciones construidas, ocho activas en el menú (Función 3, copys, en pausa para v2)
 
 **Menú reordenado (2026-07-29):** las cuatro funciones conectadas a Google Ads quedan agrupadas arriba — Rendimiento, Comparar periodos, Oportunidad de ingresos, Negativización — y las dos que no dependen de Google Ads (Bookings, Proyección de ventas) quedan abajo.
 
@@ -54,6 +54,8 @@ Verificado de punta a punta contra la cuenta real de Hotel Neptuno: cuentas, cam
 **Bug real: solo aparecían campañas Search al conectar la API (2026-07-29).** cesar probó contra una cuenta real y reportó que faltaban Performance Max, Demand Gen y Display. Causa: `fetch_campaign_rows` traía las métricas de Impression Share (exclusivas de Search) en la misma consulta GAQL que el resto de campos — comportamiento documentado de Google Ads, combinar esos campos con otros restringe **todo** el resultado a campañas Search, sin avisar. Corregido separando en dos consultas: la principal (sin campos de Impression Share) trae todos los tipos de campaña; la de Impression Share se usa solo como diccionario auxiliar por `campaign.id`, quedando en `None` para las campañas que no aplican.
 
 Pendiente: repetir la carga de ambas cuentas y anotar explícitamente si las recomendaciones coinciden con el criterio de cesar, y seguir con el resto de las 3-5 cuentas objetivo de Fase 1.
+
+**Análisis con IA (Claude), prueba interna solo para administradores (2026-08-17).** Botón "Analizar con IA" al final de la lista de recomendaciones — le manda a Claude (`claude-opus-5`) el resumen de cuenta y hasta 12 hallazgos ya calculados (los de mayor impacto de gasto) y devuelve, en 3-5 párrafos de prosa, una lectura priorizada: qué importa más esta semana y por qué, si varios hallazgos comparten un mismo patrón de fondo, y qué haría primero. No reemplaza `computeMetrics`/`summarize`/`generateRecommendations`, que siguen siendo la fuente de verdad de los números — Claude solo interpreta lo que ya se calculó. `webapp/claude_client.py` llama a la API vía `urllib` puro (no el SDK oficial de Anthropic), mismo criterio que `google_ads_client.py`: el `Dockerfile` no corre `pip install`, solo librería estándar. Endpoint `POST /api/ai/analizar-rendimiento`, gateado a administradores (soft launch) con rate limit de 10 análisis por hora por usuario, porque cada llamada cuesta dinero real. Probado de punta a punta contra la API real: en una prueba con los 12 hallazgos completos de una cuenta, el análisis identificó por su cuenta que el umbral de CTR de Search no aplica a Performance Max ni Display (un falso positivo ya conocido del motor de reglas) y priorizó correctamente el resto. Pendiente decidir si se abre a todos los usuarios.
 
 ### Función 2 — Negativización de términos de búsqueda
 
@@ -164,6 +166,8 @@ Verificada con datos sintéticos y con el archivo real de Estelar: en ese archiv
 
 **Bug encontrado por cesar el mismo día: el gráfico no se actualizaba al cambiar de campaña.** La primera versión agregaba la serie diaria a nivel de toda la cuenta del lado del servidor, así que ningún filtro de la pantalla (campaña, hotel, excluir marca) tenía forma de afectarlo. Corregido: el servidor ahora devuelve una fila por campaña y día (sin agregar); el agregado ponderado por impresiones se calcula en el cliente sobre las campañas que ya pasaron los filtros activos — mismo patrón que usa el resto de la pantalla (traer una vez, filtrar/agregar en el cliente). Verificado que el gráfico cambia al elegir una campaña específica.
 
+**Bug real reportado por cesar (2026-08-11): potencial de conversiones absurdamente bajo para campañas Performance Max en el escenario "sin límite de presupuesto".** `computeRevenueOpportunity()` usaba la tasa de conversión que trae el archivo (`conversiones ÷ interacciones`) para proyectar conversiones sobre los clics potenciales adicionales. Para Search eso es invisible porque interacciones ≈ clics; para PMax/Video/Display, "interacciones" incluye vistas y otros engagements muy por encima de los clics reales, así que la tasa quedaba artificialmente diminuta y el cálculo subestimaba las conversiones en un orden de magnitud. Corregido para calcular siempre `conversiones ÷ clics` localmente, sin importar la fuente del dato ni el tipo de campaña. Verificado matemáticamente contra las cifras reales del caso reportado (30 conversiones, 4525 clics): el cálculo viejo daba ~1 conversión potencial, el corregido ~34.5 — consistente con la proporción real de conversión de la campaña.
+
 ### Función 7 — Proyección de ventas (nueva, 2026-07-27)
 
 Sección para proyectar ingresos futuros del hotel, a pedido de cesar. A diferencia de las otras seis funciones, no parte de un export de Google Ads — necesita un histórico mensual de ingresos reales del hotel (típicamente del PMS/sistema de reservas), con mínimo 12 meses y, idealmente, 24+.
@@ -203,9 +207,38 @@ Sección nueva en el menú, **solo modo API** (sin toggle de archivo — el ROAS
 
 Verificado en modo simulado de punta a punta: 5 campañas (2 ajustables, 3 no por tipo de estrategia), ajuste de una campaña de 1500% a 1800% reflejado en la tabla sin recargar, "Cancelar" reseteando el flujo. Pendiente: primera prueba de escritura real (no solo `validateOnly`) contra una cuenta de verdad.
 
+### Función 9 — Recomendaciones de Google (nueva, 2026-08-11)
+
+cesar preguntó por "Ads Advisor" (la IA nueva de Google dentro de la interfaz de Ads) — se investigó primero y se descartó, no tiene API pública (confirmado contra dos fuentes independientes). En su lugar se integró `RecommendationService`, el mecanismo nativo de recomendaciones de Google Ads, que sí es accesible vía API.
+
+- **Primera versión, solo lectura:** trae el optimization score de la cuenta y la lista de recomendaciones activas (tipo, campaña, impacto estimado). Un bug encontrado antes de desplegar, contra una cuenta real: pedir campos anidados del impacto (ej. `recommendation.impact.base_metrics.cost_micros`) da error — mismo patrón ya visto con Search Impression Share (ver Función 6) — corregido pidiendo el objeto de impacto completo en vez de sus campos por separado.
+- **Aplicar/Descartar (mismo día).** A diferencia de negativos y ROAS, esta API de Google **no tiene vista previa** (`validateOnly`) — cada aplicar/descartar se ejecuta de inmediato sobre la cuenta real. Se le avisó a cesar antes de construir, y se compensó con una confirmación explícita del navegador antes de cada llamada, dejando claro en el texto que no hay vista previa.
+- **Probado contra la cuenta real de Spiwak Chipichape, con autorización explícita de cesar:** se descartó una recomendación real y se confirmó que Google dejó de sugerirla. Aplicar una recomendación real **no se probó** — a diferencia de descartar, es una escritura de verdad sobre la configuración de la campaña, así que queda pendiente de una autorización puntual aparte.
+- **Filtro por campaña (mismo día):** a pedido de cesar, para no ver siempre todas las recomendaciones de la cuenta juntas.
+
+## Seguridad — endurecimiento (2026-07-30)
+
+Con la API de Google Ads ya conectada de verdad (lectura y escritura sobre 1105+ cuentas reales de clientes), cesar pidió una auditoría de seguridad completa: "no pueden haber fugas de información". Hasta ese momento el registro era abierto a cualquiera con el link, cualquier usuario autenticado podía leer/escribir en cualquiera de las 1105+ cuentas del MCC sin ninguna verificación, no había límite de intentos de login, y los errores de Google Ads se mostraban tal cual en el navegador. Se cerraron nueve hallazgos:
+
+1. **Registro cerrado por código de invitación** (`PMH_REGISTRATION_CODE`) — sin el código exacto, `/api/register` rechaza. Fail-secure: sin la variable configurada, el registro queda cerrado por default.
+2. **Rate limiting** en login (8 intentos/5min por IP), registro (5/5min) y endpoints de escritura (30/min por usuario).
+3. **Contraseña mínima de 10 caracteres**, exigida solo al registrarse.
+4. **Errores de Google Ads sanitizados** antes de llegar al navegador — el detalle completo (que podía incluir información interna de la cuenta del cliente) ahora solo queda en los logs del servidor, no en la respuesta.
+5. **Control de acceso por cuenta de Google Ads (roles admin/usuario).** El hallazgo más grande: se agregó `is_admin` por usuario (sincronizado contra `PMH_ADMIN_USERNAMES`) y una tabla de accesos otorgados por cuenta — sin ninguna fila ahí, un usuario no-admin no puede tocar ninguna cuenta de Google Ads (fail-secure). Los admins (`cesar`, `cesar.vasquez`) conservan acceso total. Aplicado a los 7 endpoints que toman `customer_id`, más el filtrado del listado de cuentas del MCC.
+6. **Pantalla de Administración** (solo admins): lista de usuarios con rol, eliminación de cuentas, y panel para otorgar/revocar acceso de un usuario a una cuenta puntual con buscador sobre las 1105+ cuentas del MCC — soporta dar varias cuentas al mismo usuario. Un bug real de UX encontrado al probarlo: el buscador perdía el foco en cada tecla porque el render de la pantalla reemplaza todo el DOM; corregido restaurando el foco y el cursor después de cada render.
+7. **Super admin** — a pedido de cesar, `cesar.vasquez` quedó marcada (`PMH_SUPER_ADMIN_USERNAMES`) como cuenta que ningún admin puede borrar, ni siquiera otro admin; solo se puede "borrar" sacándola de esa variable en Railway y redesplegando.
+8. **CSP, cabeceras de seguridad, versión fija de scripts CDN, validación de username.** A raíz de la pregunta directa de cesar sobre si otro LLM podría hackear la app, se verificó en vivo que el rate limiting no se puede saltar falsificando el header `X-Forwarded-For` (Railway lo sobrescribe). Se agregó `Content-Security-Policy` (sin scripts inline permitidos — bloquea XSS incluso si algún render futuro olvida escapar un valor), más `X-Content-Type-Options`, `X-Frame-Options` y `Referrer-Policy`. Los scripts de terceros (`lucide`, `xlsx`) se fijaron a una versión concreta con hash de integridad, en vez de `@latest`. Efecto colateral encontrado y corregido: la CSP nueva rompía el login porque su script vivía inline en el HTML — se movió a un archivo externo (`login.js`).
+9. **Bloqueo de cuenta tras 5 intentos fallidos de login**, persistente en la base de datos (sobrevive redeploys, a diferencia del rate limiting por IP) — 15 minutos de bloqueo, con el mismo mensaje de error genérico de siempre para no revelar si una cuenta existe o está bloqueada.
+
+Cada punto se probó localmente de punta a punta (incluido, para el control de acceso, contra cuentas reales del MCC) antes de desplegarse, y se verificó en producción después de cada deploy. Las cuentas de prueba temporales ya se limpiaron de producción (2026-07-30). Decidido: el bloqueo por intentos fallidos aplica igual para todos, incluida `cesar.vasquez` — su protección de super admin es solo contra ser *borrada*, no contra ser *bloqueada* tras intentos de login fallidos. Con esto queda cerrada la fase de endurecimiento de seguridad.
+
+**Reset de contraseña por admin (agregado 2026-08-17).** La app no tenía ninguna forma de recuperar el acceso si alguien olvidaba su contraseña — no hay infraestructura de correo (el servidor corre sin dependencias externas), así que un "olvidé mi contraseña" self-service por email quedó descartado. En su lugar, un admin puede generar una temporal para otro usuario desde Administración: se genera al azar, se muestra **una sola vez** en pantalla, cierra cualquier sesión abierta de esa cuenta, y fuerza a la persona a definir una contraseña propia antes de poder usar el resto de la app (pantalla de bloqueo tras iniciar sesión con la temporal). Restablecer la contraseña de un super admin exige que quien lo pide también lo sea — cierra la vía obvia para que un admin normal tome el control de una cuenta con más privilegios que la suya. Probado de punta a punta (curl + navegador): reset admin→usuario, protección de super admin, contraseña vieja invalidada, contraseña temporal invalidada tras el cambio, y el gate forzado funcionando en el navegador real.
+
 ## Por qué ninguna de las funciones de Google Ads usa un modelo de lenguaje por análisis
 
 A 100+ cuentas, llamar a una API por cada archivo o URL tiene costo y latencia reales, y en el caso de negativización y copys implicaría que cada persona del equipo tenga su propia clave de API. Por eso la Función 2 compara contra términos núcleo/excepciones definidas por el usuario, y la Función 3 combina extracción real de la página con plantillas de copywriting de conversión. El costo de esta decisión: ninguna de las dos "entiende" el contenido como lo haría un modelo — solo detectan lo que ya se les definió o lo que literalmente está escrito en la página. Por eso ambas funciones piden revisión humana antes de publicar nada.
+
+**Excepción, 2026-08-17:** la Función 1 (Rendimiento) sí llama a Claude, pero bajo un patrón distinto al que este análisis descarta — no es automático por archivo/cuenta, es un botón bajo demanda ("Analizar con IA"), solo para administradores, con una sola llamada por clic (no una por cuenta ni una por término), y no genera ni publica nada por sí sola — solo interpreta números que el motor de reglas ya calculó. Ver detalle en Función 1 arriba.
 
 ## Cómo corre la plataforma, y el login
 
@@ -218,9 +251,9 @@ python3 server.py
 ```
 Abre `http://localhost:8642`.
 
-En ambos casos, la app pide iniciar sesión o crear cuenta antes de dejar entrar. El registro es abierto (cualquiera con el link puede crear su cuenta), con contraseñas guardadas con hash + salt (nunca en texto plano), y sesión por cookie de 14 días — con el flag `Secure` activado en producción (solo se envía por HTTPS, que Railway provee automático).
+En ambos casos, la app pide iniciar sesión o crear cuenta antes de dejar entrar. **El registro ya no es abierto** (cerrado 2026-07-30, ver "Seguridad — endurecimiento" abajo) — hace falta un código de invitación que solo cesar puede repartir. Contraseñas guardadas con hash + salt (PBKDF2-SHA256, 200 000 iteraciones, nunca en texto plano), mínimo 10 caracteres, y sesión por cookie httpOnly de 14 días — con el flag `Secure` activado en producción (solo se envía por HTTPS, que Railway provee automático).
 
-**Ya expuesta en internet, no solo en red local/interna como antes** (2026-07-13/14): eso resuelve la advertencia de HTTPS que tenía esta sección — **sigue pendiente** decidir si el registro abierto continúa así o pasa a altas manuales, ahora que cualquiera con el link (no solo alguien en la red interna) puede crear una cuenta. Además, Rendimiento y Negativización procesan el archivo subido enteramente en el navegador (nunca tocan el servidor) — el login controla quién *entra* a la app, no hay una segunda barrera del lado del servidor para esas dos funciones específicas una vez que alguien ya la tiene abierta.
+Cada usuario no-admin solo puede leer/escribir en las cuentas de Google Ads que se le asignen explícitamente (pantalla de Administración, solo visible para admins) — antes cualquier usuario autenticado podía tocar cualquiera de las 1105+ cuentas reales del MCC. Rendimiento y Negativización siguen procesando el archivo subido enteramente en el navegador (nunca tocan el servidor) cuando se usa el modo "Subir archivo" — ese modo no pasa por el control de acceso por cuenta, que solo aplica cuando el dato viene de la API de Google Ads.
 
 ## Limitaciones conocidas
 
@@ -229,8 +262,8 @@ En ambos casos, la app pide iniciar sesión o crear cuenta antes de dejar entrar
 - "Estelar" como término núcleo (Función 2) es amplio — es una cadena con varias propiedades en Colombia, puede retener búsquedas de otro hotel Estelar.
 - La Función 3 no ejecuta JavaScript: páginas que cargan su contenido dinámicamente van a dar poco texto real y el resultado se apoya más en plantillas genéricas.
 - La Función 3 no valida las políticas de contenido de Google Ads (mayúsculas, superlativos, marcas de terceros) — solo longitud de caracteres.
-- Ninguna de las siete funciones valida que el archivo/URL subido sea reciente ni de la cuenta correcta.
-- **Control de acceso y despliegue: ya no están pendientes** (ver "Cómo corre la plataforma, y el login" arriba) — HTTPS resuelto por Railway; sigue pendiente decidir si el registro abierto continúa así ahora que la app es alcanzable por internet.
+- Ninguna de las nueve funciones valida que el archivo/URL subido sea reciente ni de la cuenta correcta.
+- **Control de acceso y despliegue: ya no están pendientes** (ver "Seguridad — endurecimiento" y "Cómo corre la plataforma, y el login" arriba) — HTTPS resuelto por Railway, registro cerrado por código de invitación, y control de acceso por cuenta de Google Ads (2026-07-30).
 - No hay persistencia de historial entre cargas todavía para ninguna función (Fase 2) — la base de datos que ya existe solo guarda cuentas de usuario, no resultados de análisis. Las Funciones 4 (modo Comparar periodos) y 5 cubren parte de esta necesidad hoy, pero de forma manual (subiendo dos archivos cada vez).
 - Falta comprar y conectar un dominio propio — hoy la app vive en el dominio genérico de Railway (`paid-media-helper.up.railway.app`).
 - La Función 5 (Comparar periodos) solo se probó con datos sintéticos — falta validarla con dos exports reales del mismo cliente. Lo mismo aplica al modo "Comparar periodos" de la Función 4 (Bookings).
@@ -241,6 +274,8 @@ En ambos casos, la app pide iniciar sesión o crear cuenta antes de dejar entrar
 - Las categorías de búsqueda de Performance Max en Negativización (`campaign_search_term_insight`) no son el término literal exacto de búsqueda — son categorías que Google arma agrupando búsquedas parecidas, y no traen costo por categoría (el ahorro estimado de la pantalla no las incluye).
 - La escritura de ROAS objetivo (Función 8) solo se probó con `validateOnly` contra una cuenta real y en modo simulado — todavía no se probó una escritura real (`validateOnly: false`) contra una cuenta de verdad, a diferencia de los negativos.
 - El ROAS objetivo solo se puede ajustar en campañas con estrategia de puja propia (`TARGET_ROAS` o `MAXIMIZE_CONVERSION_VALUE`) y no compartida con otras campañas — el resto de estrategias, y las campañas con una estrategia de puja compartida (portfolio), quedan en solo lectura desde esta pantalla.
+- La Función 9 (Recomendaciones de Google) no tiene vista previa (`validateOnly`) del lado de la API de Google — cada aplicar/descartar es inmediato sobre la cuenta real, compensado solo con una confirmación explícita en el navegador. **Aplicar** una recomendación real todavía no se probó contra una cuenta de verdad (solo descartar).
+- El análisis con IA de Función 1 es una prueba interna, solo visible para administradores — no está abierta al resto del equipo todavía, y el bloqueo de "cambia tu contraseña" del reset de admin es a nivel de interfaz, no de cada endpoint del servidor (decisión consciente, ver "Seguridad — endurecimiento").
 
 ## Próximos pasos
 
@@ -253,16 +288,21 @@ En ambos casos, la app pide iniciar sesión o crear cuenta antes de dejar entrar
 7. Probar la Función 7 (Proyección de ventas) con histórico real de un hotel, y validar con cesar si el margen de error (MAPE) es aceptable para planear presupuesto.
 8. ~~Probar la escritura de negativos (Función 2) contra una cuenta real por primera vez~~ — completado 2026-07-29 (Search y Performance Max). Sigue pendiente probar con más volumen de términos a la vez.
 9. ~~Extender la conexión con la API de Google Ads a todas las funciones de campañas~~ — completado 2026-07-29 (Rendimiento, Negativización, Comparar periodos, Oportunidad de ingresos).
-10. Decidir si el registro de usuarios sigue abierto o pasa a altas manuales, ahora que la app es alcanzable por internet.
+10. ~~Decidir si el registro de usuarios sigue abierto o pasa a altas manuales~~ — completado 2026-07-30 (registro cerrado por código de invitación, ver "Seguridad — endurecimiento").
 11. Comprar y conectar un dominio propio para reemplazar el de Railway.
 12. Probar la escritura de ROAS objetivo (Función 8) contra una cuenta real por primera vez — empezando por una sola campaña de bajo riesgo, igual que se hizo con los negativos.
+13. ~~Limpiar las cuentas de prueba temporales (`claude_audit_temp*`) que quedaron en producción durante las pruebas de seguridad~~ — hecho por cesar, 2026-07-30.
+14. Probar **aplicar** una recomendación real de la Función 9 contra una cuenta real (solo se probó descartar) — pendiente de autorización puntual de cesar, igual que se hizo con la primera escritura de negativos.
+15. Decidir si el análisis con IA de Función 1 (2026-08-17) se abre a todos los usuarios o se queda como prueba solo para administradores.
 
 ## Archivos del proyecto
 
 | Archivo | Para qué sirve |
 |---|---|
-| `webapp/` | Implementación web completa (HTML/CSS/JS + servidor Python + `Dockerfile`), con login y las siete funciones (seis activas en el menú) — en producción en Railway, o local con `python3 webapp/server.py`. Ver `webapp/README.md` |
+| `webapp/` | Implementación web completa (HTML/CSS/JS + servidor Python + `Dockerfile`), con login, control de acceso por cuenta, pantalla de Administración, y las nueve funciones (ocho activas en el menú) — en producción en Railway, o local con `python3 webapp/server.py`. Ver `webapp/README.md` |
+| `webapp/login.js` | JS del login/registro (separado de `login.html` el 2026-07-30, por la Content-Security-Policy nueva — ver "Seguridad — endurecimiento") |
 | `webapp/google_ads_client.py` | Cliente de la API de Google Ads (lectura de cuentas/campañas/términos de búsqueda, y escritura de negativos) — solo `urllib`, sin la librería oficial, para no agregar dependencias pip al servidor |
+| `webapp/claude_client.py` | Cliente de la API de Claude (análisis con IA de Función 1) — mismo criterio que `google_ads_client.py`: solo `urllib`, sin el SDK oficial de Anthropic |
 | `Especificacion_v1_Plataforma_Google_Ads.docx` | Especificación completa de las tres funciones originales de Google Ads: alcance, formato de archivo, mecanismo, arquitectura, riesgos |
 | `app.py` | Interfaz Streamlit con las tres funciones (correr con `streamlit run app.py`) |
 | `analysis.py` | Lógica de la Función 1 (rendimiento), reusable sin la interfaz |
