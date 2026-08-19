@@ -649,30 +649,52 @@ def update_campaign_ai_max(customer_id, campaign_id, enable, validate_only=True)
     return {"validate_only": validate_only, "applied": not validate_only, "enabled": bool(enable)}
 
 
-def fetch_ai_max_served_combinations(customer_id, campaign_id=None):
-    """Combinaciones de término de búsqueda + página de destino + titular
-    que AI Max generó y sirvió de verdad — vista de solo lectura
-    (ai_max_search_term_ad_combination_view). Confirmado contra el .proto:
-    esta vista solo trae los campos de identificación, sin costo/clics
-    propios — para eso está el reporte normal de términos de búsqueda."""
+AI_MAX_SEARCH_TERM_MATCH_SOURCES = ("AI_MAX_KEYWORDLESS", "AI_MAX_BROAD_MATCH")
+
+
+def fetch_ai_max_served_combinations(customer_id, campaign_id=None, date_from=None, date_to=None):
+    """Qué términos de búsqueda sirvió AI Max de verdad, con métricas
+    reales — search_term_view filtrado por segments.search_term_match_source
+    (AI_MAX_KEYWORDLESS / AI_MAX_BROAD_MATCH), el patrón que documenta
+    Google para este reporte.
+
+    La primera versión de esta función usaba
+    ai_max_search_term_ad_combination_view en vez de esto — confirmado
+    contra una cuenta real con AI Max ya activo (Estelar Yopal, 2026-08-18)
+    que esa vista devuelve 0 filas: no tiene métricas propias (ver commit
+    anterior) y, sin `segments.date`, tampoco parece traer datos aunque
+    haya tráfico real. search_term_view sí trae impresiones/clics/costo/
+    conversiones, y es el mismo recurso que ya usa Negativización — más
+    confiable que una vista nueva sin ejemplos de uso documentados.
+
+    Rango de fechas fijo de últimos 30 días (igual que el ejemplo oficial
+    de Google) para no agregar otro selector de fechas a la pantalla."""
+    date_from = date_from or (datetime.date.today() - datetime.timedelta(days=30)).isoformat()
+    date_to = date_to or datetime.date.today().isoformat()
+    match_sources = ", ".join(f"'{s}'" for s in AI_MAX_SEARCH_TERM_MATCH_SOURCES)
     campaign_filter = f"AND campaign.id = {int(campaign_id)}" if campaign_id else ""
     query = f"""
-        SELECT ai_max_search_term_ad_combination_view.search_term,
-               ai_max_search_term_ad_combination_view.landing_page,
-               ai_max_search_term_ad_combination_view.headline,
-               ad_group.id, ad_group.name,
-               campaign.id, campaign.name
-        FROM ai_max_search_term_ad_combination_view
-        WHERE campaign.advertising_channel_type = 'SEARCH'
-        {campaign_filter}
+        SELECT
+          search_term_view.search_term,
+          segments.search_term_match_source,
+          campaign.id, campaign.name,
+          ad_group.id, ad_group.name,
+          metrics.impressions, metrics.clicks,
+          metrics.cost_micros, metrics.conversions
+        FROM search_term_view
+        WHERE segments.date BETWEEN '{date_from}' AND '{date_to}'
+          AND segments.search_term_match_source IN ({match_sources})
+          {campaign_filter}
     """
     results = _search(customer_id, query)
     rows = []
     for r in results:
-        view = r.get("aiMaxSearchTermAdCombinationView", {})
-        ad_group = r.get("adGroup", {})
+        stv = r.get("searchTermView", {})
         campaign = r.get("campaign", {})
-        search_term = view.get("searchTerm")
+        ad_group = r.get("adGroup", {})
+        segments = r.get("segments", {})
+        metrics = r.get("metrics", {})
+        search_term = stv.get("searchTerm")
         if not search_term:
             continue
         rows.append({
@@ -680,8 +702,11 @@ def fetch_ai_max_served_combinations(customer_id, campaign_id=None):
             "campaign_name": campaign.get("name") or "(sin nombre)",
             "ad_group_name": ad_group.get("name") or "(sin nombre)",
             "search_term": search_term,
-            "landing_page": view.get("landingPage") or "",
-            "headline": view.get("headline") or "",
+            "match_source": segments.get("searchTermMatchSource") or "UNKNOWN",
+            "impressions": _int_or_none(metrics.get("impressions")) or 0,
+            "clicks": _int_or_none(metrics.get("clicks")) or 0,
+            "cost": _micros_to_units(_int_or_none(metrics.get("costMicros"))) or 0,
+            "conversions": _float_or_none(metrics.get("conversions")) or 0,
         })
     return rows
 
@@ -1062,9 +1087,9 @@ _SIMULATED_AI_MAX_BY_CAMPAIGN_ID = {
 }
 
 SIMULATED_AI_MAX_SERVED = [
-    {"campaign_id": "1111111101", "campaign_name": "Estelar Hoteles - CO:es - Search Genérica", "ad_group_name": "Genérico Hoteles Caribe", "search_term": "hotel barato manzanillo cartagena", "landing_page": "https://estelarplayamanzanillo.com/ofertas", "headline": "Ofertas Hotel Manzanillo | Reserva Hoy"},
-    {"campaign_id": "1111111101", "campaign_name": "Estelar Hoteles - CO:es - Search Genérica", "ad_group_name": "Genérico Hoteles Caribe", "search_term": "manzanillo del mar hospedaje", "landing_page": "https://estelarplayamanzanillo.com/", "headline": "Estelar Playa Manzanillo | Todo Incluido"},
-    {"campaign_id": "1111111102", "campaign_name": "Estelar Hoteles - CO:es - Search Marca", "ad_group_name": "Marca Estelar", "search_term": "estelar hoteles reservas oficiales", "landing_page": "https://estelarplayamanzanillo.com/reservas", "headline": "Sitio Oficial Estelar | Mejor Precio Garantizado"},
+    {"campaign_id": "1111111101", "campaign_name": "Estelar Hoteles - CO:es - Search Genérica", "ad_group_name": "Genérico Hoteles Caribe", "search_term": "hotel barato manzanillo cartagena", "match_source": "AI_MAX_BROAD_MATCH", "impressions": 210, "clicks": 14, "cost": 22.4, "conversions": 1},
+    {"campaign_id": "1111111101", "campaign_name": "Estelar Hoteles - CO:es - Search Genérica", "ad_group_name": "Genérico Hoteles Caribe", "search_term": "manzanillo del mar hospedaje", "match_source": "AI_MAX_KEYWORDLESS", "impressions": 95, "clicks": 6, "cost": 9.1, "conversions": 0},
+    {"campaign_id": "1111111102", "campaign_name": "Estelar Hoteles - CO:es - Search Marca", "ad_group_name": "Marca Estelar", "search_term": "estelar hoteles reservas oficiales", "match_source": "AI_MAX_BROAD_MATCH", "impressions": 340, "clicks": 28, "cost": 19.6, "conversions": 3},
 ]
 
 SIMULATED_ACCOUNT_NEGATIVE_KEYWORDS = [

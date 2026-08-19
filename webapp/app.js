@@ -4528,6 +4528,17 @@ function renderIaMaxEstadoTab() {
     </div>`;
 }
 
+// Etiquetas de segments.search_term_match_source — solo los dos valores que
+// puede traer esta consulta (filtrada explícitamente a esos dos en
+// google_ads_client.py), pero con respaldo por si Google agrega uno nuevo.
+const AI_MAX_MATCH_SOURCE_LABELS = {
+  AI_MAX_KEYWORDLESS: 'Sin palabra clave',
+  AI_MAX_BROAD_MATCH: 'Concordancia amplia',
+};
+function aiMaxMatchSourceLabel(raw) {
+  return AI_MAX_MATCH_SOURCE_LABELS[raw] || raw;
+}
+
 function renderIaMaxServidoTab() {
   const s = state.iamax;
   const sv = s.served;
@@ -4536,12 +4547,12 @@ function renderIaMaxServidoTab() {
     return `
       <div class="card state-panel idle">
         ${icon('file-search', 30)}
-        <p>Trae qué términos de búsqueda, páginas de destino y titulares generó y sirvió AI Max de verdad en esta cuenta.</p>
+        <p>Trae qué términos de búsqueda sirvió AI Max de verdad en esta cuenta, con sus métricas — últimos 30 días.</p>
         <button class="btn-accent" data-action="iamax-served-fetch">Traer lo que sirvió AI Max</button>
       </div>`;
   }
   if (sv.status === 'loading') {
-    return `<div class="card state-panel loading"><div class="spinner"></div><p>Trayendo combinaciones servidas…</p></div>`;
+    return `<div class="card state-panel loading"><div class="spinner"></div><p>Trayendo términos servidos…</p></div>`;
   }
   if (sv.status === 'error') {
     return `<div class="error-panel"><strong>No se pudo traer el reporte.</strong> ${escapeHtml(sv.error)}</div>`;
@@ -4563,29 +4574,32 @@ function renderIaMaxServidoTab() {
 
   const rows = getIaMaxServedFiltered();
   if (!rows.length) {
-    return `${filterPanel}<div class="ok-panel">No hay combinaciones servidas por AI Max todavía para esta cuenta (o esta campaña).</div>`;
+    return `${filterPanel}<div class="ok-panel">Ningún término de búsqueda con origen AI Max en los últimos 30 días para esta cuenta (o esta campaña). Si acabas de activarlo, puede que todavía no haya suficiente tráfico servido.</div>`;
   }
   const rowsHtml = rows.map((r) => `
     <tr class="${r.conflict ? 'row-flag' : ''}">
       <td>${escapeHtml(r.campaign_name)}</td>
       <td>${escapeHtml(r.ad_group_name)}</td>
       <td>${escapeHtml(r.search_term)}</td>
-      <td>${escapeHtml(r.headline)}</td>
-      <td style="max-width:220px;overflow-wrap:anywhere">${escapeHtml(r.landing_page)}</td>
+      <td>${escapeHtml(aiMaxMatchSourceLabel(r.match_source))}</td>
+      <td>${fmtInt(r.impressions)}</td>
+      <td>${fmtInt(r.clicks)}</td>
+      <td>${fmtMoney(r.cost)}</td>
+      <td>${fmtInt(r.conversions)}</td>
     </tr>`).join('');
 
   return `
     ${filterPanel}
     <div class="card table-panel">
-      <div class="table-panel-head"><h3>Combinaciones servidas por AI Max (${rows.length})</h3></div>
+      <div class="table-panel-head"><h3>Términos servidos por AI Max, últimos 30 días (${rows.length})</h3></div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Campaña</th><th>Grupo de anuncios</th><th>Término de búsqueda</th><th>Titular generado</th><th>Página de destino</th></tr></thead>
+          <thead><tr><th>Campaña</th><th>Grupo de anuncios</th><th>Término de búsqueda</th><th>Origen</th><th>Impr.</th><th>Clics</th><th>Costo</th><th>Conv.</th></tr></thead>
           <tbody>${rowsHtml}</tbody>
         </table>
       </div>
       <p class="footnote" style="margin-top:14px">
-        Solo de lectura — Google no expone costo/clics propios en este reporte (para eso está el reporte normal de términos de búsqueda). Las filas resaltadas ya aparecen también en la pestaña "Cruce con negativos".
+        "Sin palabra clave" = AI Max encontró la búsqueda sin que existiera una keyword para ella; "Concordancia amplia" = la amplió a partir de una keyword existente. Las filas resaltadas ya aparecen también en la pestaña "Cruce con negativos".
       </p>
     </div>`;
 }
