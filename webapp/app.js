@@ -4248,6 +4248,19 @@ function renderRecsPage() {
 // reales en la cuenta.
 // ---------------------------------------------------------------------------
 
+// El selector de cuenta es compartido por las 3 pestañas, pero cada una se
+// trae con su propio botón ("Traer datos de IA Max" solo trae Estado;
+// "Traer lo que sirvió AI Max" solo trae Servido/Cruce). Sin este reset, al
+// cambiar de cuenta las pestañas que no se volvieron a traer seguían
+// mostrando los datos de la cuenta anterior como si fueran de la actual —
+// bug real reportado por cesar (2026-08-19).
+function resetIaMaxAccountData() {
+  const s = state.iamax;
+  s.status = 'idle'; s.error = null; s.rows = null;
+  s.toggle = { campaignId: null, status: 'idle', newEnable: null, preview: null, result: null, error: null };
+  s.served = { status: 'idle', error: null, rows: null, negatives: null, campaignFilter: 'all' };
+}
+
 function ensureIaMaxGoogleAdsStatusLoaded() {
   const a = state.iamax.api;
   if (a.statusChecked) return;
@@ -5185,9 +5198,15 @@ function bindEvents() {
 
   // IA Max
   const iamaxApiAccount = document.getElementById('iamax-api-account');
-  if (iamaxApiAccount) iamaxApiAccount.addEventListener('change', (e) => { state.iamax.api.accountId = e.target.value; });
+  if (iamaxApiAccount) iamaxApiAccount.addEventListener('change', (e) => {
+    state.iamax.api.accountId = e.target.value;
+    resetIaMaxAccountData();
+  });
   const iamaxApiAccountManual = document.getElementById('iamax-api-account-manual');
-  if (iamaxApiAccountManual) iamaxApiAccountManual.addEventListener('input', (e) => { state.iamax.api.accountIdManual = e.target.value; });
+  if (iamaxApiAccountManual) iamaxApiAccountManual.addEventListener('input', (e) => {
+    state.iamax.api.accountIdManual = e.target.value;
+    resetIaMaxAccountData();
+  });
   const iamaxApiOnlyActive = document.getElementById('iamax-api-only-active');
   if (iamaxApiOnlyActive) iamaxApiOnlyActive.addEventListener('change', (e) => { state.iamax.api.onlyActive = e.target.checked; });
   const iamaxServedCampaignFilter = document.getElementById('iamax-served-campaign-filter');
