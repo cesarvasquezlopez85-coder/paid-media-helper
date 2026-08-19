@@ -621,6 +621,29 @@ export function aggregateImpressionShareDaily(dailyRows, campaignNames) {
   });
 }
 
+// Cruza lo que AI Max sirvió de verdad (término de búsqueda + landing page
+// + titular) contra los negativos que YA están escritos en la cuenta real
+// (no la clasificación núcleo/excepción de Negativización, que es efímera)
+// — para avisar si AI Max está sirviendo búsquedas que el equipo ya decidió
+// evitar en esa misma campaña. Heurística deliberadamente simple (substring,
+// no simula los tipos de concordancia de Google): un match es una señal
+// para revisar a mano, no una certeza — mismo criterio que "revisar" en
+// Negativización.
+export function crossReferenceAiMaxServed(servedRows, negativeRows) {
+  const negativesByCampaign = new Map();
+  for (const n of (negativeRows || [])) {
+    if (!n.campaign_id || !n.text) continue;
+    if (!negativesByCampaign.has(n.campaign_id)) negativesByCampaign.set(n.campaign_id, []);
+    negativesByCampaign.get(n.campaign_id).push(n.text.toLowerCase());
+  }
+  return (servedRows || []).map((row) => {
+    const negatives = negativesByCampaign.get(row.campaign_id) || [];
+    const termLower = (row.search_term || '').toLowerCase();
+    const matched = negatives.find((neg) => termLower.includes(neg));
+    return { ...row, conflict: !!matched, conflict_term: matched || null };
+  });
+}
+
 // Agrega el embudo completo (escenario actual vs. sin límite de
 // presupuesto) sobre el conjunto de campañas ya filtrado — para el
 // diagrama "de dónde venimos, a dónde podríamos llegar". Se suman las

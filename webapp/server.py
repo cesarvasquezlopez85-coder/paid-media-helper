@@ -350,6 +350,18 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_recommendations(parse_qs(parsed.query))
             return
 
+        if path == "/api/google-ads/ai-max":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_ai_max(parse_qs(parsed.query))
+            return
+
+        if path == "/api/google-ads/ai-max-served":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_ai_max_served(parse_qs(parsed.query))
+            return
+
         # Listado de cuentas registradas (sin contraseñas) — solo admins.
         if path == "/api/admin/users":
             if not self._require_admin_json():
@@ -401,6 +413,10 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_google_ads_roas_adjust(payload)
+        elif path == "/api/google-ads/ai-max-toggle":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_ai_max_toggle(payload)
         elif path == "/api/google-ads/recommendations/apply":
             if not self._require_auth_json():
                 return
@@ -1327,6 +1343,106 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(200, result)
         except ValueError as e:
             self._send_json(400, {"error": str(e)})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    # ------------------------------------------------------- IA Max ---
+    # Estado de AI Max por campaña Search. Sin rango de fechas — es
+    # configuración de campaña, no una métrica de un periodo.
+    def _handle_google_ads_ai_max(self, query):
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        only_active = (query.get("only_active") or [""])[0].strip() == "1"
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, {"rows": google_ads_client.simulated_ai_max_status(only_active), "simulated": True})
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            rows = google_ads_client.fetch_ai_max_status(customer_id, only_active)
+            self._send_json(200, {"rows": rows, "simulated": False})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    def _handle_google_ads_ai_max_toggle(self, payload):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not _write_limiter.allow(f"user:{user['id']}", *WRITE_RATE_LIMIT):
+            self._send_json(429, {"error": "Demasiadas escrituras seguidas. Espera un minuto y vuelve a intentar."})
+            return
+        customer_id = str(payload.get("customer_id") or "").strip()
+        campaign_id = str(payload.get("campaign_id") or "").strip()
+        enable = bool(payload.get("enable"))
+        validate_only = payload.get("validate_only", True) is not False
+
+        if not campaign_id:
+            self._send_json(400, {"error": "Falta campaign_id."})
+            return
+
+        if not google_ads_client.is_configured():
+            result = google_ads_client.simulated_update_campaign_ai_max(campaign_id, enable, validate_only)
+            self._send_json(200, result)
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            result = google_ads_client.update_campaign_ai_max(customer_id, campaign_id, enable, validate_only)
+            self._send_json(200, result)
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    # Trae, en una sola llamada, lo que AI Max sirvió de verdad (término +
+    # landing page + titular) y los negativos reales ya escritos en la
+    # cuenta — el cruce entre ambos se hace en el cliente
+    # (engine.crossReferenceAiMaxServed), mismo criterio de "traer una vez,
+    # cruzar/filtrar en el cliente" que ya usa el resto de la plataforma.
+    def _handle_google_ads_ai_max_served(self, query):
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        campaign_id = (query.get("campaign_id") or [""])[0].strip()
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, {
+                "rows": google_ads_client.simulated_ai_max_served(campaign_id or None),
+                "negatives": google_ads_client.simulated_account_negative_keywords(),
+                "simulated": True,
+            })
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            rows = google_ads_client.fetch_ai_max_served_combinations(customer_id, campaign_id or None)
+            negatives = google_ads_client.fetch_account_negative_keywords(customer_id)
+            self._send_json(200, {"rows": rows, "negatives": negatives, "simulated": False})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)
 

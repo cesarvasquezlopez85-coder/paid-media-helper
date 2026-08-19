@@ -154,6 +154,35 @@ const state = {
     actions: {}, // resource_name -> { status: 'idle'|'busy'|'error', error }
   },
 
+  // IA Max (AI Max for Search) — a diferencia de "Ask Advisor", sí tiene
+  // API real (Campaign.ai_max_setting, desde v25). Tres sub-vistas sobre
+  // las mismas campañas Search de la cuenta elegida: estado/toggle, qué
+  // sirvió AI Max de verdad, y si eso choca con negativos ya reales en la
+  // cuenta (Función 9/Negativización). Sin rango de fechas — todo acá es
+  // configuración o estado actual, no una métrica de un periodo.
+  iamax: {
+    tab: 'estado', // 'estado' | 'servido' | 'cruce'
+    status: 'idle', error: null, rows: null,
+    api: {
+      statusChecked: false, configured: false,
+      accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
+      onlyActive: false,
+      simulated: false, error: null,
+    },
+    // Igual que ROAS: nunca un solo clic entre decidir y escribir — siempre
+    // pasa por vista previa (validateOnly) antes de que "Confirmar" quede
+    // disponible.
+    toggle: {
+      campaignId: null,
+      status: 'idle', // idle | previewing | preview_ready | applying | done | error
+      newEnable: null, preview: null, result: null, error: null,
+    },
+    served: {
+      status: 'idle', error: null, rows: null, negatives: null,
+      campaignFilter: 'all',
+    },
+  },
+
   // Solo visible/usable para usuarios con is_admin=1 (el servidor también
   // lo exige en cada endpoint /api/admin/*, esto es solo la UI).
   admin: {
@@ -218,6 +247,10 @@ const PAGE_META = {
   recomendaciones: {
     title: 'Recomendaciones de Google',
     caption: 'El puntaje de optimización y las recomendaciones que Google Ads ya generó para la cuenta — revísalas, y aplícalas o descártalas directo desde acá.',
+  },
+  iamax: {
+    title: 'IA Max',
+    caption: 'Estado de AI Max en campañas Search, qué está sirviendo de verdad, y si choca con negativos ya escritos en la cuenta.',
   },
   administracion: {
     title: 'Administración',
@@ -389,6 +422,7 @@ function render() {
   else if (state.page === 'proyeccion') pageHtml = renderForecastPage();
   else if (state.page === 'roas') pageHtml = renderRoasPage();
   else if (state.page === 'recomendaciones') pageHtml = renderRecsPage();
+  else if (state.page === 'iamax') pageHtml = renderIaMaxPage();
   else if (state.page === 'administracion') pageHtml = renderAdminPage();
   else pageHtml = renderBookPage();
 
@@ -4207,6 +4241,425 @@ function renderRecsPage() {
 }
 
 // ---------------------------------------------------------------------------
+// Página — IA Max (AI Max for Search). A diferencia de "Ask Advisor", sí
+// tiene API real (Campaign.ai_max_setting, desde v25 — confirmado contra el
+// .proto, ver google_ads_client.py). Tres sub-vistas sobre la misma cuenta:
+// estado/toggle, qué sirvió AI Max de verdad, y cruce con negativos ya
+// reales en la cuenta.
+// ---------------------------------------------------------------------------
+
+function ensureIaMaxGoogleAdsStatusLoaded() {
+  const a = state.iamax.api;
+  if (a.statusChecked) return;
+  fetch('/api/google-ads/status')
+    .then((r) => r.json())
+    .then((data) => { a.statusChecked = true; a.configured = !!data.configured; render(); })
+    .catch(() => { a.statusChecked = true; a.configured = false; render(); });
+}
+
+function loadIaMaxGoogleAdsAccounts() {
+  const a = state.iamax.api;
+  a.accountsStatus = 'loading'; a.error = null;
+  render();
+  fetch('/api/google-ads/accounts')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.accounts = data.accounts || [];
+      a.simulated = !!data.simulated;
+      a.accountsStatus = 'ready';
+      render();
+    })
+    .catch((err) => {
+      a.accountsStatus = 'error'; a.error = err.message || String(err);
+      render();
+    });
+}
+
+function iaMaxCustomerId() {
+  const a = state.iamax.api;
+  const manualId = (a.accountIdManual || '').replace(/[^0-9]/g, '');
+  return manualId || a.accountId;
+}
+
+function fetchIaMaxStatus() {
+  const s = state.iamax;
+  const a = s.api;
+  const customerId = iaMaxCustomerId();
+  if (!customerId && !a.simulated) { a.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
+
+  a.error = null;
+  s.status = 'loading'; s.error = null;
+  render();
+
+  const params = new URLSearchParams({ customer_id: customerId || '', only_active: a.onlyActive ? '1' : '0' });
+  fetch(`/api/google-ads/ai-max?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.simulated = !!data.simulated;
+      s.rows = data.rows || [];
+      s.status = 'ready';
+      s.toggle = { campaignId: null, status: 'idle', newEnable: null, preview: null, result: null, error: null };
+      render();
+    })
+    .catch((err) => {
+      a.error = err.message || String(err);
+      s.status = 'idle';
+      render();
+    });
+}
+
+// preview=true valida sin aplicar; preview=false escribe de verdad en la
+// cuenta. Igual que ROAS: nunca un solo clic entre decidir y escribir.
+function toggleAiMax(preview) {
+  const s = state.iamax;
+  const t = s.toggle;
+  const row = (s.rows || []).find((r) => r.campaign_id === t.campaignId);
+  if (!row) { t.error = 'No se encontró la campaña.'; render(); return; }
+
+  const customerId = iaMaxCustomerId();
+  t.status = preview ? 'previewing' : 'applying';
+  t.error = null;
+  render();
+
+  fetch('/api/google-ads/ai-max-toggle', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customer_id: customerId,
+      campaign_id: row.campaign_id,
+      enable: t.newEnable,
+      validate_only: preview,
+    }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      if (preview) {
+        t.status = 'preview_ready';
+        t.preview = { enable: t.newEnable, campaignName: row.campaign_name };
+      } else {
+        t.status = 'done';
+        t.result = { enable: t.newEnable, campaignName: row.campaign_name };
+        row.enabled = t.newEnable; // refleja el nuevo valor en la tabla sin volver a traer todo
+      }
+      render();
+    })
+    .catch((err) => {
+      t.status = 'error';
+      t.error = err.message || String(err);
+      render();
+    });
+}
+
+function fetchIaMaxServed() {
+  const s = state.iamax;
+  const a = s.api;
+  const sv = s.served;
+  const customerId = iaMaxCustomerId();
+  if (!customerId && !a.simulated) { a.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
+
+  a.error = null;
+  sv.status = 'loading'; sv.error = null;
+  render();
+
+  const params = new URLSearchParams({ customer_id: customerId || '' });
+  fetch(`/api/google-ads/ai-max-served?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.simulated = !!data.simulated;
+      sv.rows = engine.crossReferenceAiMaxServed(data.rows || [], data.negatives || []);
+      sv.negatives = data.negatives || [];
+      sv.campaignFilter = 'all';
+      sv.status = 'ready';
+      render();
+    })
+    .catch((err) => {
+      a.error = err.message || String(err);
+      sv.status = 'idle';
+      render();
+    });
+}
+
+function getIaMaxServedFiltered() {
+  const sv = state.iamax.served;
+  const rows = sv.rows || [];
+  if (sv.campaignFilter === 'all') return rows;
+  return rows.filter((r) => r.campaign_name === sv.campaignFilter);
+}
+
+function renderIaMaxApiPanel() {
+  const a = state.iamax.api;
+
+  if (!a.statusChecked) {
+    return `<div class="field"><p class="footnote">Consultando la conexión con Google Ads…</p></div>`;
+  }
+
+  const simulatedNotice = a.simulated ? `
+    <div class="ok-panel" style="margin:10px 0">
+      <strong>Modo simulado.</strong> La API de Google Ads todavía no está configurada en el servidor
+      (falta la aprobación del developer token de Google) — estos son datos de ejemplo, no de una cuenta real.
+    </div>` : '';
+
+  if (a.accountsStatus === 'idle') {
+    return `
+      <div class="card control-panel align-end">
+        <div class="field">
+          <p class="footnote">${a.configured ? 'Conectado a la API de Google Ads.' : 'La API de Google Ads aún no está configurada — se usarán datos simulados para probar el flujo.'}</p>
+          <button class="btn-outline" data-action="iamax-api-load-accounts">Ver cuentas disponibles</button>
+        </div>
+      </div>`;
+  }
+  if (a.accountsStatus === 'loading') {
+    return `<div class="card control-panel align-end"><div class="field"><p class="footnote">Cargando cuentas…</p></div></div>`;
+  }
+  if (a.accountsStatus === 'error') {
+    return `<div class="error-panel"><strong>No se pudieron cargar las cuentas.</strong> ${escapeHtml(a.error)}</div>`;
+  }
+
+  const accountOptions = ['<option value="">Elige una cuenta…</option>']
+    .concat(a.accounts.map((acc) => `<option value="${escapeHtml(acc.id)}" ${a.accountId === acc.id ? 'selected' : ''}>${escapeHtml(acc.name)} (${escapeHtml(acc.id)})</option>`))
+    .join('');
+
+  return `
+    <div class="card control-panel align-end">
+      ${simulatedNotice}
+      <div class="field">
+        <label>Cuenta</label>
+        <select id="iamax-api-account" style="width:320px">${accountOptions}</select>
+      </div>
+      <div class="field">
+        <label>...o escribe el ID de la cuenta</label>
+        <input type="text" id="iamax-api-account-manual" value="${escapeHtml(a.accountIdManual)}" placeholder="ej. 6862893390" style="width:160px" />
+      </div>
+      <div class="field">
+        <label style="display:flex;align-items:center;gap:8px;font-weight:400">
+          <input type="checkbox" id="iamax-api-only-active" ${a.onlyActive ? 'checked' : ''} />
+          Solo campañas activas
+        </label>
+      </div>
+      <button class="btn-accent" data-action="iamax-api-fetch">Traer datos de IA Max</button>
+      ${a.error ? `<div class="error-panel" style="margin-top:10px"><strong>No se pudo traer los datos.</strong> ${escapeHtml(a.error)}</div>` : ''}
+    </div>`;
+}
+
+function renderIaMaxToggleCell(row) {
+  const s = state.iamax;
+  const t = s.toggle;
+  const isEditing = t.campaignId === row.campaign_id;
+
+  if (!isEditing) {
+    const label = row.enabled ? 'Apagar' : 'Prender';
+    return `<button class="btn-outline sm" data-action="iamax-toggle-start" data-campaign="${escapeHtml(row.campaign_id)}" data-enable="${row.enabled ? '0' : '1'}">${label}</button>`;
+  }
+
+  const busy = t.status === 'previewing' || t.status === 'applying';
+
+  if (t.status === 'idle' || t.status === 'error') {
+    return `
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn-accent sm" data-action="iamax-toggle-preview" ${busy ? 'disabled' : ''}>Vista previa</button>
+        <button class="btn-outline sm" data-action="iamax-toggle-cancel">Cancelar</button>
+      </div>
+      ${t.error ? `<div class="error-panel" style="margin-top:6px;font-size:12px">${escapeHtml(t.error)}</div>` : ''}`;
+  }
+
+  if (busy) {
+    return `<p class="footnote">${t.status === 'previewing' ? 'Validando con Google Ads (vista previa, no aplica nada todavía)…' : 'Aplicando el cambio en Google Ads…'}</p>`;
+  }
+
+  if (t.status === 'preview_ready' && t.preview) {
+    return `
+      <div class="ok-panel" style="margin:6px 0;padding:10px 12px;font-size:12.5px">
+        <strong>Vista previa lista.</strong> Vas a ${t.preview.enable ? 'prender' : 'apagar'} AI Max en "${escapeHtml(t.preview.campaignName)}" — esto cambia de verdad cómo se sirven los anuncios de esta campaña en producción.
+        <div style="margin-top:8px;display:flex;gap:8px">
+          <button class="btn-accent sm" data-action="iamax-toggle-confirm">Confirmar y aplicar</button>
+          <button class="btn-outline sm" data-action="iamax-toggle-cancel">Cancelar</button>
+        </div>
+      </div>`;
+  }
+
+  if (t.status === 'done' && t.result) {
+    return `<div class="ok-panel" style="margin:6px 0;padding:8px 12px;font-size:12.5px"><strong>Listo.</strong> AI Max ${t.result.enable ? 'activado' : 'desactivado'}.</div>`;
+  }
+
+  return '';
+}
+
+function renderIaMaxEstadoTab() {
+  const s = state.iamax;
+  if (s.status === 'idle') {
+    return `
+      <div class="card state-panel idle">
+        ${icon('wand-2', 30)}
+        <p>Conecta una cuenta de Google Ads para ver qué campañas Search tienen AI Max activo.</p>
+      </div>`;
+  }
+  if (s.status === 'loading') {
+    return `<div class="card state-panel loading"><div class="spinner"></div><p>Trayendo estado de AI Max…</p></div>`;
+  }
+  if (s.status === 'error') {
+    return `<div class="error-panel"><strong>No se pudo traer el estado.</strong> ${escapeHtml(s.error)}</div>`;
+  }
+  const rows = s.rows || [];
+  if (!rows.length) {
+    return `<div class="ok-panel">No se encontraron campañas Search en esta cuenta.</div>`;
+  }
+  const rowsHtml = rows.map((r) => `
+    <tr>
+      <td>${escapeHtml(r.campaign_name)}</td>
+      <td>${r.enabled ? '<span class="delta-badge good">Activo</span>' : '<span class="delta-badge neutral">Inactivo</span>'}</td>
+      <td>${renderIaMaxToggleCell(r)}</td>
+    </tr>`).join('');
+  return `
+    <div class="card table-panel">
+      <div class="table-panel-head"><h3>Campañas Search (${rows.length})</h3></div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Campaña</th><th>AI Max</th><th>Acción</th></tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>
+      <p class="footnote" style="margin-top:14px">
+        Prender/apagar AI Max cambia de verdad cómo Google sirve esta campaña en producción — la vista previa (validateOnly) valida el cambio sin aplicarlo, igual que en ROAS.
+      </p>
+    </div>`;
+}
+
+function renderIaMaxServidoTab() {
+  const s = state.iamax;
+  const sv = s.served;
+
+  if (sv.status === 'idle') {
+    return `
+      <div class="card state-panel idle">
+        ${icon('file-search', 30)}
+        <p>Trae qué términos de búsqueda, páginas de destino y titulares generó y sirvió AI Max de verdad en esta cuenta.</p>
+        <button class="btn-accent" data-action="iamax-served-fetch">Traer lo que sirvió AI Max</button>
+      </div>`;
+  }
+  if (sv.status === 'loading') {
+    return `<div class="card state-panel loading"><div class="spinner"></div><p>Trayendo combinaciones servidas…</p></div>`;
+  }
+  if (sv.status === 'error') {
+    return `<div class="error-panel"><strong>No se pudo traer el reporte.</strong> ${escapeHtml(sv.error)}</div>`;
+  }
+
+  const allRows = sv.rows || [];
+  const campaignNames = [...new Set(allRows.map((r) => r.campaign_name))].sort();
+  const filterPanel = allRows.length ? `
+    <div class="card control-panel align-end" style="margin-bottom:20px">
+      <div class="field">
+        <label>Ver solo esta campaña</label>
+        <select id="iamax-served-campaign-filter" style="width:320px">
+          <option value="all" ${sv.campaignFilter === 'all' ? 'selected' : ''}>Todas las campañas</option>
+          ${campaignNames.map((c) => `<option value="${escapeHtml(c)}" ${sv.campaignFilter === c ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}
+        </select>
+      </div>
+      <button class="btn-outline" data-action="iamax-served-fetch">Volver a traer</button>
+    </div>` : '';
+
+  const rows = getIaMaxServedFiltered();
+  if (!rows.length) {
+    return `${filterPanel}<div class="ok-panel">No hay combinaciones servidas por AI Max todavía para esta cuenta (o esta campaña).</div>`;
+  }
+  const rowsHtml = rows.map((r) => `
+    <tr class="${r.conflict ? 'row-flag' : ''}">
+      <td>${escapeHtml(r.campaign_name)}</td>
+      <td>${escapeHtml(r.ad_group_name)}</td>
+      <td>${escapeHtml(r.search_term)}</td>
+      <td>${escapeHtml(r.headline)}</td>
+      <td style="max-width:220px;overflow-wrap:anywhere">${escapeHtml(r.landing_page)}</td>
+    </tr>`).join('');
+
+  return `
+    ${filterPanel}
+    <div class="card table-panel">
+      <div class="table-panel-head"><h3>Combinaciones servidas por AI Max (${rows.length})</h3></div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Campaña</th><th>Grupo de anuncios</th><th>Término de búsqueda</th><th>Titular generado</th><th>Página de destino</th></tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>
+      <p class="footnote" style="margin-top:14px">
+        Solo de lectura — Google no expone costo/clics propios en este reporte (para eso está el reporte normal de términos de búsqueda). Las filas resaltadas ya aparecen también en la pestaña "Cruce con negativos".
+      </p>
+    </div>`;
+}
+
+function renderIaMaxCruceTab() {
+  const s = state.iamax;
+  const sv = s.served;
+
+  if (sv.status === 'idle') {
+    return `
+      <div class="card state-panel idle">
+        ${icon('shield-alert', 30)}
+        <p>Trae primero lo que sirvió AI Max (pestaña anterior) — acá se cruza contra los negativos que ya están escritos de verdad en la cuenta.</p>
+      </div>`;
+  }
+  if (sv.status === 'loading') {
+    return `<div class="card state-panel loading"><div class="spinner"></div><p>Trayendo…</p></div>`;
+  }
+  if (sv.status === 'error') {
+    return `<div class="error-panel"><strong>No se pudo traer el reporte.</strong> ${escapeHtml(sv.error)}</div>`;
+  }
+
+  const conflicts = (sv.rows || []).filter((r) => r.conflict);
+  if (!conflicts.length) {
+    return `<div class="ok-panel">Ningún término servido por AI Max coincide con un negativo ya escrito en la cuenta (${(sv.negatives || []).length} negativos revisados).</div>`;
+  }
+  const rowsHtml = conflicts.map((r) => `
+    <tr>
+      <td>${escapeHtml(r.campaign_name)}</td>
+      <td>${escapeHtml(r.search_term)}</td>
+      <td>${escapeHtml(r.conflict_term)}</td>
+    </tr>`).join('');
+
+  return `
+    <div class="error-panel" style="margin-bottom:14px">
+      <strong>${conflicts.length} término${conflicts.length === 1 ? '' : 's'} servido${conflicts.length === 1 ? '' : 's'} por AI Max choca${conflicts.length === 1 ? '' : 'n'} con un negativo ya escrito en la misma campaña.</strong>
+      AI Max amplía la concordancia por su cuenta — puede estar sirviendo búsquedas que el equipo ya decidió evitar en Negativización.
+    </div>
+    <div class="card table-panel">
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Campaña</th><th>Término servido por AI Max</th><th>Negativo que coincide</th></tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>
+      <p class="footnote" style="margin-top:14px">
+        Coincidencia por texto contenido (heurística simple, no simula los tipos de concordancia de Google) — es una señal para revisar a mano, no una certeza. Para actuar, ve a Negativización o ajusta el negativo directo en Google Ads.
+      </p>
+    </div>`;
+}
+
+function renderIaMaxPage() {
+  const s = state.iamax;
+  ensureIaMaxGoogleAdsStatusLoaded();
+
+  const controlPanel = renderIaMaxApiPanel();
+  const conflictCount = (s.served.rows || []).filter((r) => r.conflict).length;
+
+  const tabs = `
+    <div class="seg-control" style="margin-bottom:20px">
+      <button class="seg-btn ${s.tab === 'estado' ? 'active' : ''}" data-action="iamax-tab-estado">Estado</button>
+      <button class="seg-btn ${s.tab === 'servido' ? 'active' : ''}" data-action="iamax-tab-servido">Qué sirvió</button>
+      <button class="seg-btn ${s.tab === 'cruce' ? 'active' : ''}" data-action="iamax-tab-cruce">Cruce con negativos${conflictCount ? ` (${conflictCount})` : ''}</button>
+    </div>`;
+
+  let body = '';
+  if (s.tab === 'estado') body = renderIaMaxEstadoTab();
+  else if (s.tab === 'servido') body = renderIaMaxServidoTab();
+  else body = renderIaMaxCruceTab();
+
+  return `${controlPanel}${tabs}${body}`;
+}
+
+// ---------------------------------------------------------------------------
 // Página — Administración (solo is_admin)
 // ---------------------------------------------------------------------------
 
@@ -4716,6 +5169,30 @@ function bindEvents() {
     });
   });
 
+  // IA Max
+  const iamaxApiAccount = document.getElementById('iamax-api-account');
+  if (iamaxApiAccount) iamaxApiAccount.addEventListener('change', (e) => { state.iamax.api.accountId = e.target.value; });
+  const iamaxApiAccountManual = document.getElementById('iamax-api-account-manual');
+  if (iamaxApiAccountManual) iamaxApiAccountManual.addEventListener('input', (e) => { state.iamax.api.accountIdManual = e.target.value; });
+  const iamaxApiOnlyActive = document.getElementById('iamax-api-only-active');
+  if (iamaxApiOnlyActive) iamaxApiOnlyActive.addEventListener('change', (e) => { state.iamax.api.onlyActive = e.target.checked; });
+  const iamaxServedCampaignFilter = document.getElementById('iamax-served-campaign-filter');
+  if (iamaxServedCampaignFilter) iamaxServedCampaignFilter.addEventListener('change', (e) => {
+    state.iamax.served.campaignFilter = e.target.value;
+    render();
+  });
+  document.querySelectorAll('[data-action="iamax-toggle-start"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.iamax.toggle = {
+        campaignId: btn.dataset.campaign,
+        status: 'idle',
+        newEnable: btn.dataset.enable === '1',
+        preview: null, result: null, error: null,
+      };
+      render();
+    });
+  });
+
   document.querySelectorAll('[data-opp-sort]').forEach((th) => {
     th.addEventListener('click', () => {
       const key = th.dataset.oppSort;
@@ -5014,6 +5491,20 @@ function handleAction(action) {
 
     case 'recs-api-load-accounts': loadRecsGoogleAdsAccounts(); break;
     case 'recs-api-fetch': fetchRecommendations(); break;
+
+    case 'iamax-api-load-accounts': loadIaMaxGoogleAdsAccounts(); break;
+    case 'iamax-api-fetch': fetchIaMaxStatus(); break;
+    case 'iamax-toggle-cancel': {
+      state.iamax.toggle = { campaignId: null, status: 'idle', newEnable: null, preview: null, result: null, error: null };
+      render();
+      break;
+    }
+    case 'iamax-toggle-preview': toggleAiMax(true); break;
+    case 'iamax-toggle-confirm': toggleAiMax(false); break;
+    case 'iamax-served-fetch': fetchIaMaxServed(); break;
+    case 'iamax-tab-estado': state.iamax.tab = 'estado'; render(); break;
+    case 'iamax-tab-servido': state.iamax.tab = 'servido'; render(); break;
+    case 'iamax-tab-cruce': state.iamax.tab = 'cruce'; render(); break;
 
     case 'forecast-demo': {
       state.forecast.status = 'loading'; state.forecast.error = null; state.forecast.fileName = 'ingresos_ejemplo.csv';

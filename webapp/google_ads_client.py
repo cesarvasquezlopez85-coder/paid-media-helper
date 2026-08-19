@@ -576,6 +576,149 @@ def update_campaign_target_roas(customer_id, campaign_id, bidding_strategy_type,
     return {"validate_only": validate_only, "applied": not validate_only, "target_roas": target_roas}
 
 
+# ---------------------------------------------------------------------------
+# IA Max (AI Max for Search) — a diferencia de "Ask Advisor" (investigado y
+# descartado, sin API pública — ver RECOMMENDATION_TYPE_LABELS más abajo),
+# AI Max sí tiene soporte real en la API desde v25: Campaign.ai_max_setting
+# (campaign.proto), verificado contra el .proto real antes de escribir esto.
+# Solo campañas Search — el campo también existe para Shopping, pero "AI Max
+# for Search" es el producto que pidió cesar; Shopping queda fuera de v1.
+# ---------------------------------------------------------------------------
+
+def fetch_ai_max_status(customer_id, only_active=False):
+    """Estado de AI Max por campaña Search — activo/inactivo y si requiere
+    "bundling" (campo de solo lectura de Google, informativo). No depende de
+    rango de fechas: es configuración de la campaña, no una métrica de un
+    periodo."""
+    status_filter = "campaign.status = 'ENABLED'" if only_active else "campaign.status != 'REMOVED'"
+    query = f"""
+        SELECT campaign.id, campaign.name, campaign.status,
+               campaign.ai_max_setting.enable_ai_max,
+               campaign.ai_max_setting.bundling_required
+        FROM campaign
+        WHERE campaign.advertising_channel_type = 'SEARCH'
+          AND {status_filter}
+    """
+    results = _search(customer_id, query)
+    rows = []
+    for r in results:
+        campaign = r.get("campaign", {})
+        ai_max = campaign.get("aiMaxSetting", {})
+        rows.append({
+            "campaign_id": str(campaign.get("id")) if campaign.get("id") is not None else None,
+            "campaign_name": campaign.get("name") or "(sin nombre)",
+            "status": campaign.get("status") or "UNKNOWN",
+            "enabled": bool(ai_max.get("enableAiMax", False)),
+            "bundling_required": ai_max.get("bundlingRequired") or "UNSPECIFIED",
+        })
+    return rows
+
+
+def update_campaign_ai_max(customer_id, campaign_id, enable, validate_only=True):
+    """Prende/apaga AI Max en una campaña Search. Campo booleano simple —
+    a diferencia de ROAS, no hay chequeo de compatibilidad de estrategia que
+    hacer antes: cualquier campaña Search puede tener AI Max prendido o
+    apagado.
+
+    validate_only=True (vista previa): Google valida la operación sin
+    aplicarla. Solo con validate_only=False el cambio queda escrito de
+    verdad en la cuenta."""
+    url = f"{BASE_URL}/customers/{customer_id}/campaigns:mutate"
+    body = {
+        "operations": [{
+            "update": {
+                "resourceName": f"customers/{customer_id}/campaigns/{campaign_id}",
+                "aiMaxSetting": {"enableAiMax": bool(enable)},
+            },
+            "updateMask": "ai_max_setting.enable_ai_max",
+        }],
+        "validateOnly": validate_only,
+    }
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Google Ads API respondió {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"No se pudo conectar a la API de Google Ads: {e.reason}") from e
+
+    return {"validate_only": validate_only, "applied": not validate_only, "enabled": bool(enable)}
+
+
+def fetch_ai_max_served_combinations(customer_id, campaign_id=None):
+    """Combinaciones de término de búsqueda + página de destino + titular
+    que AI Max generó y sirvió de verdad — vista de solo lectura
+    (ai_max_search_term_ad_combination_view). Confirmado contra el .proto:
+    esta vista solo trae los campos de identificación, sin costo/clics
+    propios — para eso está el reporte normal de términos de búsqueda."""
+    campaign_filter = f"AND campaign.id = {int(campaign_id)}" if campaign_id else ""
+    query = f"""
+        SELECT ai_max_search_term_ad_combination_view.search_term,
+               ai_max_search_term_ad_combination_view.landing_page,
+               ai_max_search_term_ad_combination_view.headline,
+               ad_group.id, ad_group.name,
+               campaign.id, campaign.name
+        FROM ai_max_search_term_ad_combination_view
+        WHERE campaign.advertising_channel_type = 'SEARCH'
+        {campaign_filter}
+    """
+    results = _search(customer_id, query)
+    rows = []
+    for r in results:
+        view = r.get("aiMaxSearchTermAdCombinationView", {})
+        ad_group = r.get("adGroup", {})
+        campaign = r.get("campaign", {})
+        search_term = view.get("searchTerm")
+        if not search_term:
+            continue
+        rows.append({
+            "campaign_id": str(campaign.get("id")) if campaign.get("id") is not None else None,
+            "campaign_name": campaign.get("name") or "(sin nombre)",
+            "ad_group_name": ad_group.get("name") or "(sin nombre)",
+            "search_term": search_term,
+            "landing_page": view.get("landingPage") or "",
+            "headline": view.get("headline") or "",
+        })
+    return rows
+
+
+def fetch_account_negative_keywords(customer_id):
+    """Negativos de concordancia exacta que YA están escritos de verdad en
+    la cuenta (campaign_criterion con negative=true) — distinto de la
+    clasificación núcleo/excepción de Negativización, que es efímera (se
+    escribe en pantalla cada vez, no se guarda). Esto se usa para cruzar
+    contra lo que AI Max está sirviendo — ver el helper de cruce en
+    engine.js."""
+    query = """
+        SELECT campaign.id, campaign.name,
+               campaign_criterion.keyword.text,
+               campaign_criterion.keyword.match_type
+        FROM campaign_criterion
+        WHERE campaign_criterion.type = 'KEYWORD'
+          AND campaign_criterion.negative = true
+    """
+    results = _search(customer_id, query)
+    rows = []
+    for r in results:
+        campaign = r.get("campaign", {})
+        criterion = r.get("campaignCriterion", {})
+        keyword = criterion.get("keyword", {})
+        text = keyword.get("text")
+        if not text:
+            continue
+        rows.append({
+            "campaign_id": str(campaign.get("id")) if campaign.get("id") is not None else None,
+            "campaign_name": campaign.get("name") or "(sin nombre)",
+            "text": text,
+            "match_type": keyword.get("matchType") or "UNKNOWN",
+        })
+    return rows
+
+
 def push_negative_keywords(customer_id, items, validate_only=True):
     """Sube palabras clave negativas de concordancia exacta a nivel de
     campaña. items: lista de {"campaign_id": ..., "term": ...}.
@@ -908,6 +1051,57 @@ def simulated_update_campaign_target_roas(campaign_id, bidding_strategy_type, ta
     if not target_roas or target_roas <= 0:
         raise ValueError("El ROAS objetivo debe ser un número mayor que cero.")
     return {"validate_only": validate_only, "applied": not validate_only, "target_roas": target_roas, "simulated": True}
+
+
+# IA Max simulado — las dos campañas Search del set simulado, una con AI Max
+# ya activo y otra sin activar todavía, para poder probar el toggle en
+# ambos sentidos sin esperar a Google.
+_SIMULATED_AI_MAX_BY_CAMPAIGN_ID = {
+    "1111111101": {"campaign_name": "Estelar Hoteles - CO:es - Search Genérica", "enabled": False},
+    "1111111102": {"campaign_name": "Estelar Hoteles - CO:es - Search Marca", "enabled": True},
+}
+
+SIMULATED_AI_MAX_SERVED = [
+    {"campaign_id": "1111111101", "campaign_name": "Estelar Hoteles - CO:es - Search Genérica", "ad_group_name": "Genérico Hoteles Caribe", "search_term": "hotel barato manzanillo cartagena", "landing_page": "https://estelarplayamanzanillo.com/ofertas", "headline": "Ofertas Hotel Manzanillo | Reserva Hoy"},
+    {"campaign_id": "1111111101", "campaign_name": "Estelar Hoteles - CO:es - Search Genérica", "ad_group_name": "Genérico Hoteles Caribe", "search_term": "manzanillo del mar hospedaje", "landing_page": "https://estelarplayamanzanillo.com/", "headline": "Estelar Playa Manzanillo | Todo Incluido"},
+    {"campaign_id": "1111111102", "campaign_name": "Estelar Hoteles - CO:es - Search Marca", "ad_group_name": "Marca Estelar", "search_term": "estelar hoteles reservas oficiales", "landing_page": "https://estelarplayamanzanillo.com/reservas", "headline": "Sitio Oficial Estelar | Mejor Precio Garantizado"},
+]
+
+SIMULATED_ACCOUNT_NEGATIVE_KEYWORDS = [
+    {"campaign_id": "1111111101", "campaign_name": "Estelar Hoteles - CO:es - Search Genérica", "text": "manzanillo del mar", "match_type": "EXACT"},
+]
+
+
+def simulated_ai_max_status(only_active=False):
+    rows = simulated_campaign_rows(only_active)
+    out = []
+    for c in rows:
+        campaign_id = _SIMULATED_CAMPAIGN_IDS_BY_NAME.get(c["campaign"])
+        entry = _SIMULATED_AI_MAX_BY_CAMPAIGN_ID.get(campaign_id)
+        if not entry:
+            continue  # no es campaña Search en el set simulado
+        out.append({
+            "campaign_id": campaign_id,
+            "campaign_name": c["campaign"],
+            "status": c["status"],
+            "enabled": entry["enabled"],
+            "bundling_required": "NOT_REQUIRED",
+        })
+    return out
+
+
+def simulated_update_campaign_ai_max(campaign_id, enable, validate_only=True):
+    return {"validate_only": validate_only, "applied": not validate_only, "enabled": bool(enable), "simulated": True}
+
+
+def simulated_ai_max_served(campaign_id=None):
+    if campaign_id:
+        return [r for r in SIMULATED_AI_MAX_SERVED if r["campaign_id"] == str(campaign_id)]
+    return list(SIMULATED_AI_MAX_SERVED)
+
+
+def simulated_account_negative_keywords():
+    return list(SIMULATED_ACCOUNT_NEGATIVE_KEYWORDS)
 
 
 # Términos de búsqueda de ejemplo, con su campaña — para probar el flujo de
