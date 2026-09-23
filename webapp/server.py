@@ -1546,25 +1546,25 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         customer_id = str(payload.get("customer_id") or "").strip()
-        category_resource_name = str(payload.get("category_resource_name") or "").strip()
+        category_resource_names = payload.get("category_resource_names") or []
         validate_only = bool(payload.get("validate_only", True))
 
         if not google_ads_client.is_configured():
-            self._send_json(200, google_ads_client.simulated_add_app_category_exclusion(category_resource_name, validate_only))
+            self._send_json(200, google_ads_client.simulated_add_app_category_exclusions(category_resource_names, validate_only))
             return
 
         if not customer_id.isdigit():
             self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
             return
-        if not category_resource_name:
-            self._send_json(400, {"error": "Falta el parámetro category_resource_name."})
+        if not category_resource_names:
+            self._send_json(400, {"error": "Falta el parámetro category_resource_names."})
             return
         if not self._user_can_access_account(user, customer_id):
             self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
             return
 
         try:
-            result = google_ads_client.add_app_category_exclusion(customer_id, category_resource_name, validate_only)
+            result = google_ads_client.add_app_category_exclusions(customer_id, category_resource_names, validate_only)
             self._send_json(200, result)
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)

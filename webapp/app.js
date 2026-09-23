@@ -205,7 +205,7 @@ const state = {
     },
     addApp: {
       filter: '',
-      selectedResourceName: '',
+      selected: new Set(), // category_resource_name — selección múltiple, igual que addLabels
       status: 'idle', error: null, preview: null, result: null,
     },
     // Estado de "quitar" por fila — mismo patrón que el toggle de IA Max:
@@ -4766,7 +4766,7 @@ function resetContentExclusionsAccountData() {
   s.status = 'idle'; s.error = null;
   s.contentLabels = null; s.appCategories = null; s.appCategoriesCatalog = null;
   s.addLabels = { selected: new Set(), status: 'idle', error: null, preview: null, result: null };
-  s.addApp = { filter: '', selectedResourceName: '', status: 'idle', error: null, preview: null, result: null };
+  s.addApp = { filter: '', selected: new Set(), status: 'idle', error: null, preview: null, result: null };
   s.remove = { resourceName: null, status: 'idle', error: null, preview: null, result: null };
 }
 
@@ -4825,7 +4825,7 @@ function fetchContentExclusions() {
       s.appCategoriesCatalog = data.app_categories_catalog || [];
       s.status = 'ready';
       s.addLabels = { selected: new Set(), status: 'idle', error: null, preview: null, result: null };
-      s.addApp = { filter: '', selectedResourceName: '', status: 'idle', error: null, preview: null, result: null };
+      s.addApp = { filter: '', selected: new Set(), status: 'idle', error: null, preview: null, result: null };
       s.remove = { resourceName: null, status: 'idle', error: null, preview: null, result: null };
       render();
     })
@@ -4876,11 +4876,12 @@ function addContentLabelExclusions(preview) {
     });
 }
 
-function addAppCategoryExclusion(preview) {
+function addAppCategoryExclusions(preview) {
   const s = state.contentExclusions;
   const p = s.addApp;
   const customerId = contentExclusionsCustomerId();
-  if (!p.selectedResourceName) { p.error = 'Elige una categoría de apps primero.'; render(); return; }
+  const resourceNames = [...p.selected];
+  if (!resourceNames.length) { p.error = 'Elige al menos una categoría de apps primero.'; render(); return; }
 
   p.status = preview ? 'previewing' : 'applying';
   p.error = null;
@@ -4889,17 +4890,18 @@ function addAppCategoryExclusion(preview) {
   fetch('/api/google-ads/content-exclusions/add-app-category', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ customer_id: customerId, category_resource_name: p.selectedResourceName, validate_only: preview }),
+    body: JSON.stringify({ customer_id: customerId, category_resource_names: resourceNames, validate_only: preview }),
   })
     .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
       if (preview) {
         p.status = 'preview_ready';
-        p.preview = { ...data };
+        p.preview = { ...data, resourceNames };
       } else {
         p.status = 'done';
         p.result = data;
+        p.selected = new Set();
         fetchContentExclusions();
       }
       render();
@@ -5140,38 +5142,49 @@ function renderContentExclusionsAddAppPanel() {
   const available = catalog.filter((c) => !excludedResources.has(c.resource_name) && (!filterLower || c.name.toLowerCase().includes(filterLower)));
   const busy = p.status === 'previewing' || p.status === 'applying';
 
-  const optionsHtml = ['<option value="">Elige una categoría de apps…</option>']
-    .concat(available.map((c) => `<option value="${escapeHtml(c.resource_name)}" ${p.selectedResourceName === c.resource_name ? 'selected' : ''}>${escapeHtml(c.name)}</option>`))
-    .join('');
+  const checkboxesHtml = available.map((c) => `
+    <label style="display:flex;align-items:center;gap:8px;font-weight:400;padding:4px 0">
+      <input type="checkbox" class="exclusiones-app-check" value="${escapeHtml(c.resource_name)}" ${p.selected.has(c.resource_name) ? 'checked' : ''} />
+      ${escapeHtml(c.name)}
+    </label>`).join('');
 
   return `
     <div class="card table-panel" style="margin-bottom:20px">
-      <h3 class="dense-chart-title">Excluir una categoría de apps</h3>
-      <p style="margin:0 0 12px;font-size:12.5px;color:var(--color-text-muted)">Excluye una categoría completa de apps (ej. juegos, apps de citas) de toda la cuenta — aplica sobre todo a Display y Demand Gen. La vista previa valida sin aplicar nada.</p>
+      <h3 class="dense-chart-title">Excluir categorías de apps</h3>
+      <p style="margin:0 0 12px;font-size:12.5px;color:var(--color-text-muted)">Excluye una o más categorías completas de apps (ej. juegos, apps de citas) de toda la cuenta — aplica sobre todo a Display y Demand Gen. La vista previa valida sin aplicar nada.</p>
       <div class="field" style="margin-bottom:10px">
         <label>Buscar categoría</label>
         <input type="text" id="exclusiones-app-filter" value="${escapeHtml(p.filter)}" placeholder="ej. juegos" style="width:280px" />
       </div>
-      <div class="field" style="margin-bottom:12px">
-        <label>Categoría</label>
-        <select id="exclusiones-app-select" style="width:320px">${optionsHtml}</select>
-      </div>
+
+      ${available.length ? `
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+          <button class="btn-outline sm" data-action="exclusiones-app-select-all">Seleccionar las ${available.length} mostradas</button>
+          <button class="btn-outline sm" data-action="exclusiones-app-select-none">Deseleccionar todas</button>
+          <span style="font-size:12.5px;color:var(--color-text-muted)">${p.selected.size} seleccionada${p.selected.size === 1 ? '' : 's'}</span>
+        </div>
+        <div style="max-height:260px;overflow-y:auto;border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:6px 12px;margin-bottom:12px">
+          ${checkboxesHtml}
+        </div>` : `<p class="footnote">Ninguna categoría disponible para excluir con este filtro.</p>`}
 
       ${p.status === 'idle' || p.status === 'error' ? `
-        <button class="btn-accent" data-action="exclusiones-app-preview" ${!p.selectedResourceName || busy ? 'disabled' : ''}>Vista previa</button>
+        <button class="btn-accent" data-action="exclusiones-app-preview" ${p.selected.size === 0 || busy ? 'disabled' : ''}>Vista previa</button>
         ${p.error ? `<div class="error-panel" style="margin-top:10px">${escapeHtml(p.error)}</div>` : ''}
       ` : ''}
 
       ${busy ? `<p class="footnote">${p.status === 'previewing' ? 'Validando con Google Ads (vista previa, no aplica nada todavía)…' : 'Aplicando en Google Ads…'}</p>` : ''}
 
       ${p.status === 'preview_ready' && p.preview ? `
-        <div class="ok-panel" style="margin:10px 0"><strong>Vista previa lista.</strong> No se aplicó nada todavía.</div>
+        <div class="ok-panel" style="margin:10px 0">
+          <strong>Vista previa lista.</strong> Google Ads validó ${p.preview.created} de ${p.preview.resourceNames.length} sin problema — nada se aplicó todavía.
+          ${p.preview.failed && p.preview.failed.length ? `<div style="margin-top:6px"><strong>${p.preview.failed.length} no pasaron la validación:</strong><br>${p.preview.failed.map((m) => escapeHtml(m)).join('<br>')}</div>` : ''}
+        </div>
         <button class="btn-accent" data-action="exclusiones-app-confirm">Confirmar y aplicar</button>
         <button class="btn-outline" data-action="exclusiones-app-cancel">Cancelar</button>
       ` : ''}
 
       ${p.status === 'done' && p.result ? `
-        <div class="ok-panel" style="margin:10px 0"><strong>Listo.</strong> Categoría de apps excluida.</div>
+        <div class="ok-panel" style="margin:10px 0"><strong>Listo.</strong> Se excluyeron ${p.result.created} categorías de apps.</div>
       ` : ''}
     </div>`;
 }
@@ -5768,10 +5781,13 @@ function bindEvents() {
     state.contentExclusions.addApp.filter = e.target.value;
     render();
   });
-  const exclusionesAppSelect = document.getElementById('exclusiones-app-select');
-  if (exclusionesAppSelect) exclusionesAppSelect.addEventListener('change', (e) => {
-    state.contentExclusions.addApp.selectedResourceName = e.target.value;
-    render();
+  document.querySelectorAll('.exclusiones-app-check').forEach((cb) => {
+    cb.addEventListener('change', (e) => {
+      const p = state.contentExclusions.addApp;
+      if (e.target.checked) p.selected.add(e.target.value);
+      else p.selected.delete(e.target.value);
+      render();
+    });
   });
   document.querySelectorAll('[data-action="exclusiones-remove-start"]').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -6109,8 +6125,19 @@ function handleAction(action) {
       break;
     }
 
-    case 'exclusiones-app-preview': addAppCategoryExclusion(true); break;
-    case 'exclusiones-app-confirm': addAppCategoryExclusion(false); break;
+    case 'exclusiones-app-select-all': {
+      const s = state.contentExclusions;
+      const p = s.addApp;
+      const excludedResources = new Set((s.appCategories || []).map((a) => a.category_constant));
+      const filterLower = (p.filter || '').toLowerCase();
+      const available = (s.appCategoriesCatalog || []).filter((c) => !excludedResources.has(c.resource_name) && (!filterLower || c.name.toLowerCase().includes(filterLower)));
+      p.selected = new Set(available.map((c) => c.resource_name));
+      render();
+      break;
+    }
+    case 'exclusiones-app-select-none': state.contentExclusions.addApp.selected = new Set(); render(); break;
+    case 'exclusiones-app-preview': addAppCategoryExclusions(true); break;
+    case 'exclusiones-app-confirm': addAppCategoryExclusions(false); break;
     case 'exclusiones-app-cancel': {
       state.contentExclusions.addApp.status = 'idle';
       state.contentExclusions.addApp.preview = null;

@@ -973,13 +973,34 @@ def add_content_label_exclusions(customer_id, content_label_types, validate_only
     return {"created": created, "failed": failed_messages, "validate_only": validate_only}
 
 
-def add_app_category_exclusion(customer_id, category_resource_name, validate_only=True):
-    """Excluye una categoría de apps de toda la cuenta. category_resource_name
-    es el resource_name completo de MobileAppCategoryConstant, ej.
-    "mobileAppCategoryConstants/70000"."""
-    operations = [{"create": {"mobileAppCategory": {"mobileAppCategoryConstant": category_resource_name}}}]
-    _mutate_customer_negative_criteria(customer_id, operations, validate_only)
-    return {"validate_only": validate_only, "applied": not validate_only}
+def add_app_category_exclusions(customer_id, category_resource_names, validate_only=True):
+    """Excluye una o más categorías de apps de TODA la cuenta de una vez —
+    cada elemento de category_resource_names es el resource_name completo
+    de MobileAppCategoryConstant, ej. "mobileAppCategoryConstants/70000".
+    Mismo patrón que add_content_label_exclusions (partialFailure para que
+    una ya excluida no tumbe las demás)."""
+    if not category_resource_names:
+        return {"created": 0, "failed": [], "validate_only": validate_only}
+    operations = [{"create": {"mobileAppCategory": {"mobileAppCategoryConstant": r}}} for r in category_resource_names]
+    payload = _mutate_customer_negative_criteria(customer_id, operations, validate_only)
+    failed_indices = set()
+    failed_messages = []
+    partial_error = payload.get("partialFailureError")
+    if partial_error:
+        for detail in partial_error.get("details", []):
+            for err in detail.get("errors", []):
+                message = err.get("message", "Error desconocido.")
+                idx = None
+                for el in err.get("location", {}).get("fieldPathElements", []):
+                    if el.get("fieldName") == "operations" and el.get("index") is not None:
+                        idx = el["index"]
+                if idx is not None and idx < len(category_resource_names):
+                    failed_indices.add(idx)
+                    failed_messages.append(f"{category_resource_names[idx]}: {message}")
+                else:
+                    failed_messages.append(message)
+    created = len(category_resource_names) - len(failed_indices)
+    return {"created": created, "failed": failed_messages, "validate_only": validate_only}
 
 
 def remove_customer_negative_criterion(customer_id, resource_name, validate_only=True):
@@ -1375,10 +1396,12 @@ def simulated_add_content_label_exclusions(content_label_types, validate_only=Tr
     return {"created": len(types), "failed": [], "validate_only": validate_only, "simulated": True}
 
 
-def simulated_add_app_category_exclusion(category_resource_name, validate_only=True):
+def simulated_add_app_category_exclusions(category_resource_names, validate_only=True):
+    names = category_resource_names or []
     if not validate_only:
-        _SIMULATED_APP_CATEGORIES_EXCLUDED.add(category_resource_name)
-    return {"validate_only": validate_only, "applied": not validate_only, "simulated": True}
+        for r in names:
+            _SIMULATED_APP_CATEGORIES_EXCLUDED.add(r)
+    return {"created": len(names), "failed": [], "validate_only": validate_only, "simulated": True}
 
 
 def simulated_remove_customer_negative_criterion(resource_name, validate_only=True):
