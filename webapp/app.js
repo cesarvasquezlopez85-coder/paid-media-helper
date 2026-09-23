@@ -183,6 +183,40 @@ const state = {
     },
   },
 
+  // Exclusiones de contenido a nivel de cuenta (CustomerNegativeCriterion) —
+  // categorías de contenido no apto y de apps, excluidas de TODA la cuenta
+  // de una vez. Es la única palanca que existe para Performance Max (no
+  // tiene exclusión por campaña); por eso pesa más para PMax/Demand Gen/
+  // Display/Video y casi no toca Search. A pedido explícito de cesar
+  // (2026-09-23).
+  contentExclusions: {
+    status: 'idle', error: null,
+    contentLabels: null, appCategories: null, appCategoriesCatalog: null,
+    api: {
+      statusChecked: false, configured: false,
+      accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
+      simulated: false, error: null,
+    },
+    // Igual que Negativización: selección múltiple con vista previa
+    // (validateOnly) antes de que "Confirmar" quede disponible.
+    addLabels: {
+      selected: new Set(), // content_label_type
+      status: 'idle', error: null, preview: null, result: null,
+    },
+    addApp: {
+      filter: '',
+      selectedResourceName: '',
+      status: 'idle', error: null, preview: null, result: null,
+    },
+    // Estado de "quitar" por fila — mismo patrón que el toggle de IA Max:
+    // un solo resource_name editándose a la vez, nunca un clic directo a
+    // escribir sin pasar por vista previa.
+    remove: {
+      resourceName: null,
+      status: 'idle', error: null, preview: null, result: null,
+    },
+  },
+
   // Solo visible/usable para usuarios con is_admin=1 (el servidor también
   // lo exige en cada endpoint /api/admin/*, esto es solo la UI).
   admin: {
@@ -251,6 +285,10 @@ const PAGE_META = {
   iamax: {
     title: 'IA Max',
     caption: 'Estado de AI Max en campañas Search, qué está sirviendo de verdad, y si choca con negativos ya escritos en la cuenta.',
+  },
+  exclusiones: {
+    title: 'Exclusiones de contenido',
+    caption: 'Excluye categorías de contenido no apto y de apps de toda la cuenta de una vez — aplica sobre todo a Performance Max, Demand Gen, Display y Video; casi no toca Search.',
   },
   administracion: {
     title: 'Administración',
@@ -423,6 +461,7 @@ function render() {
   else if (state.page === 'roas') pageHtml = renderRoasPage();
   else if (state.page === 'recomendaciones') pageHtml = renderRecsPage();
   else if (state.page === 'iamax') pageHtml = renderIaMaxPage();
+  else if (state.page === 'exclusiones') pageHtml = renderContentExclusionsPage();
   else if (state.page === 'administracion') pageHtml = renderAdminPage();
   else pageHtml = renderBookPage();
 
@@ -4687,6 +4726,485 @@ function renderIaMaxPage() {
 }
 
 // ---------------------------------------------------------------------------
+// Página — Exclusiones de contenido (CustomerNegativeCriterion, a nivel de
+// cuenta). Espejo en el cliente de CONTENT_LABEL_TYPES/CONTENT_LABEL_LABELS
+// en google_ads_client.py — se necesita acá para el picker de "agregar",
+// que debe mostrar las 26 categorías reales aunque la cuenta no tenga
+// ninguna excluida todavía.
+// ---------------------------------------------------------------------------
+
+const CONTENT_LABEL_CATALOG = [
+  { type: 'SEXUALLY_SUGGESTIVE', label: 'Contenido sexualmente sugestivo' },
+  { type: 'BELOW_THE_FOLD', label: 'Ubicación "bajo el pliegue" (below the fold)' },
+  { type: 'PARKED_DOMAIN', label: 'Dominio estacionado (parked domain)' },
+  { type: 'JUVENILE', label: 'Contenido juvenil, grotesco o bizarro' },
+  { type: 'PROFANITY', label: 'Lenguaje profano o vulgar' },
+  { type: 'TRAGEDY', label: 'Muerte y tragedia' },
+  { type: 'VIDEO', label: 'Contenido de video (en general)' },
+  { type: 'VIDEO_RATING_DV_G', label: 'Video — clasificación G' },
+  { type: 'VIDEO_RATING_DV_PG', label: 'Video — clasificación PG' },
+  { type: 'VIDEO_RATING_DV_T', label: 'Video — clasificación T' },
+  { type: 'VIDEO_RATING_DV_MA', label: 'Video — clasificación MA' },
+  { type: 'VIDEO_NOT_YET_RATED', label: 'Video sin clasificar todavía' },
+  { type: 'EMBEDDED_VIDEO', label: 'Video incrustado' },
+  { type: 'LIVE_STREAMING_VIDEO', label: 'Video en vivo (streaming)' },
+  { type: 'SOCIAL_ISSUES', label: 'Temas sociales sensibles' },
+  { type: 'BRAND_SUITABILITY_CONTENT_FOR_FAMILIES', label: 'Contenido apto para familias (incl. "Hecho para niños" de YouTube)' },
+  { type: 'BRAND_SUITABILITY_GAMES_FIGHTING', label: 'Videojuegos de combate o pelea' },
+  { type: 'BRAND_SUITABILITY_GAMES_MATURE', label: 'Videojuegos con contenido maduro' },
+  { type: 'BRAND_SUITABILITY_HEALTH_SENSITIVE', label: 'Contenido de salud sensible' },
+  { type: 'BRAND_SUITABILITY_HEALTH_SOURCE_UNDETERMINED', label: 'Salud, de fuentes poco verificadas' },
+  { type: 'BRAND_SUITABILITY_NEWS_RECENT', label: 'Noticias recién anunciadas' },
+  { type: 'BRAND_SUITABILITY_NEWS_SENSITIVE', label: 'Noticias sensibles (crímenes, accidentes, controversia)' },
+  { type: 'BRAND_SUITABILITY_NEWS_SOURCE_NOT_FEATURED', label: 'Noticias de fuentes no destacadas por Google/YouTube' },
+  { type: 'BRAND_SUITABILITY_POLITICS', label: 'Política, elecciones y eventos políticos' },
+  { type: 'BRAND_SUITABILITY_RELIGION', label: 'Temas religiosos' },
+];
+
+function resetContentExclusionsAccountData() {
+  const s = state.contentExclusions;
+  s.status = 'idle'; s.error = null;
+  s.contentLabels = null; s.appCategories = null; s.appCategoriesCatalog = null;
+  s.addLabels = { selected: new Set(), status: 'idle', error: null, preview: null, result: null };
+  s.addApp = { filter: '', selectedResourceName: '', status: 'idle', error: null, preview: null, result: null };
+  s.remove = { resourceName: null, status: 'idle', error: null, preview: null, result: null };
+}
+
+function ensureContentExclusionsGoogleAdsStatusLoaded() {
+  const a = state.contentExclusions.api;
+  if (a.statusChecked) return;
+  fetch('/api/google-ads/status')
+    .then((r) => r.json())
+    .then((data) => { a.statusChecked = true; a.configured = !!data.configured; render(); })
+    .catch(() => { a.statusChecked = true; a.configured = false; render(); });
+}
+
+function loadContentExclusionsGoogleAdsAccounts() {
+  const a = state.contentExclusions.api;
+  a.accountsStatus = 'loading'; a.error = null;
+  render();
+  fetch('/api/google-ads/accounts')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.accounts = data.accounts || [];
+      a.simulated = !!data.simulated;
+      a.accountsStatus = 'ready';
+      render();
+    })
+    .catch((err) => {
+      a.accountsStatus = 'error'; a.error = err.message || String(err);
+      render();
+    });
+}
+
+function contentExclusionsCustomerId() {
+  const a = state.contentExclusions.api;
+  const manualId = (a.accountIdManual || '').replace(/[^0-9]/g, '');
+  return manualId || a.accountId;
+}
+
+function fetchContentExclusions() {
+  const s = state.contentExclusions;
+  const a = s.api;
+  const customerId = contentExclusionsCustomerId();
+  if (!customerId && !a.simulated) { a.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
+
+  a.error = null;
+  s.status = 'loading'; s.error = null;
+  render();
+
+  const params = new URLSearchParams({ customer_id: customerId || '' });
+  fetch(`/api/google-ads/content-exclusions?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.simulated = !!data.simulated;
+      s.contentLabels = data.content_labels || [];
+      s.appCategories = data.app_categories || [];
+      s.appCategoriesCatalog = data.app_categories_catalog || [];
+      s.status = 'ready';
+      s.addLabels = { selected: new Set(), status: 'idle', error: null, preview: null, result: null };
+      s.addApp = { filter: '', selectedResourceName: '', status: 'idle', error: null, preview: null, result: null };
+      s.remove = { resourceName: null, status: 'idle', error: null, preview: null, result: null };
+      render();
+    })
+    .catch((err) => {
+      a.error = err.message || String(err);
+      s.status = 'idle';
+      render();
+    });
+}
+
+// preview=true valida sin aplicar; preview=false escribe de verdad en la
+// cuenta. Igual que ROAS/Negativización: nunca un solo clic entre decidir y
+// escribir.
+function addContentLabelExclusions(preview) {
+  const s = state.contentExclusions;
+  const p = s.addLabels;
+  const customerId = contentExclusionsCustomerId();
+  const types = [...p.selected];
+  if (!types.length) { p.error = 'Selecciona al menos una categoría.'; render(); return; }
+
+  p.status = preview ? 'previewing' : 'applying';
+  p.error = null;
+  render();
+
+  fetch('/api/google-ads/content-exclusions/add-labels', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ customer_id: customerId, content_label_types: types, validate_only: preview }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      if (preview) {
+        p.status = 'preview_ready';
+        p.preview = { ...data, types };
+      } else {
+        p.status = 'done';
+        p.result = data;
+        p.selected = new Set();
+        fetchContentExclusions();
+      }
+      render();
+    })
+    .catch((err) => {
+      p.status = 'error';
+      p.error = err.message || String(err);
+      render();
+    });
+}
+
+function addAppCategoryExclusion(preview) {
+  const s = state.contentExclusions;
+  const p = s.addApp;
+  const customerId = contentExclusionsCustomerId();
+  if (!p.selectedResourceName) { p.error = 'Elige una categoría de apps primero.'; render(); return; }
+
+  p.status = preview ? 'previewing' : 'applying';
+  p.error = null;
+  render();
+
+  fetch('/api/google-ads/content-exclusions/add-app-category', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ customer_id: customerId, category_resource_name: p.selectedResourceName, validate_only: preview }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      if (preview) {
+        p.status = 'preview_ready';
+        p.preview = { ...data };
+      } else {
+        p.status = 'done';
+        p.result = data;
+        fetchContentExclusions();
+      }
+      render();
+    })
+    .catch((err) => {
+      p.status = 'error';
+      p.error = err.message || String(err);
+      render();
+    });
+}
+
+function removeContentExclusion(preview) {
+  const s = state.contentExclusions;
+  const p = s.remove;
+  const customerId = contentExclusionsCustomerId();
+  if (!p.resourceName) return;
+
+  p.status = preview ? 'previewing' : 'applying';
+  p.error = null;
+  render();
+
+  fetch('/api/google-ads/content-exclusions/remove', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ customer_id: customerId, resource_name: p.resourceName, validate_only: preview }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      if (preview) {
+        p.status = 'preview_ready';
+        p.preview = { ...data };
+      } else {
+        p.status = 'done';
+        p.result = data;
+        fetchContentExclusions();
+      }
+      render();
+    })
+    .catch((err) => {
+      p.status = 'error';
+      p.error = err.message || String(err);
+      render();
+    });
+}
+
+function renderContentExclusionsApiPanel() {
+  const a = state.contentExclusions.api;
+
+  if (!a.statusChecked) {
+    return `<div class="field"><p class="footnote">Consultando la conexión con Google Ads…</p></div>`;
+  }
+
+  const simulatedNotice = a.simulated ? `
+    <div class="ok-panel" style="margin:10px 0">
+      <strong>Modo simulado.</strong> La API de Google Ads todavía no está configurada en el servidor
+      (falta la aprobación del developer token de Google) — estos son datos de ejemplo, no de una cuenta real.
+    </div>` : '';
+
+  if (a.accountsStatus === 'idle') {
+    return `
+      <div class="card control-panel align-end">
+        <div class="field">
+          <p class="footnote">${a.configured ? 'Conectado a la API de Google Ads.' : 'La API de Google Ads aún no está configurada — se usarán datos simulados para probar el flujo.'}</p>
+          <button class="btn-outline" data-action="exclusiones-api-load-accounts">Ver cuentas disponibles</button>
+        </div>
+      </div>`;
+  }
+  if (a.accountsStatus === 'loading') {
+    return `<div class="card control-panel align-end"><div class="field"><p class="footnote">Cargando cuentas…</p></div></div>`;
+  }
+  if (a.accountsStatus === 'error') {
+    return `<div class="error-panel"><strong>No se pudieron cargar las cuentas.</strong> ${escapeHtml(a.error)}</div>`;
+  }
+
+  const accountOptions = ['<option value="">Elige una cuenta…</option>']
+    .concat(a.accounts.map((acc) => `<option value="${escapeHtml(acc.id)}" ${a.accountId === acc.id ? 'selected' : ''}>${escapeHtml(acc.name)} (${escapeHtml(acc.id)})</option>`))
+    .join('');
+
+  return `
+    <div class="card control-panel align-end">
+      ${simulatedNotice}
+      <div class="field">
+        <label>Cuenta</label>
+        <select id="exclusiones-api-account" style="width:320px">${accountOptions}</select>
+      </div>
+      <div class="field">
+        <label>...o escribe el ID de la cuenta</label>
+        <input type="text" id="exclusiones-api-account-manual" value="${escapeHtml(a.accountIdManual)}" placeholder="ej. 6862893390" style="width:160px" />
+      </div>
+      <button class="btn-accent" data-action="exclusiones-api-fetch">Traer exclusiones</button>
+      ${a.error ? `<div class="error-panel" style="margin-top:10px"><strong>No se pudo traer los datos.</strong> ${escapeHtml(a.error)}</div>` : ''}
+    </div>`;
+}
+
+function renderContentExclusionsRemoveCell(resourceName) {
+  const s = state.contentExclusions;
+  const r = s.remove;
+  const isEditing = r.resourceName === resourceName;
+
+  if (!isEditing) {
+    return `<button class="btn-outline sm" data-action="exclusiones-remove-start" data-resource="${escapeHtml(resourceName)}">Quitar</button>`;
+  }
+
+  const busy = r.status === 'previewing' || r.status === 'applying';
+
+  if (r.status === 'idle' || r.status === 'error') {
+    return `
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button class="btn-accent sm" data-action="exclusiones-remove-preview" ${busy ? 'disabled' : ''}>Vista previa</button>
+        <button class="btn-outline sm" data-action="exclusiones-remove-cancel">Cancelar</button>
+      </div>
+      ${r.error ? `<div class="error-panel" style="margin-top:6px;font-size:12px">${escapeHtml(r.error)}</div>` : ''}`;
+  }
+
+  if (busy) {
+    return `<p class="footnote">${r.status === 'previewing' ? 'Validando…' : 'Aplicando…'}</p>`;
+  }
+
+  if (r.status === 'preview_ready') {
+    return `
+      <div class="ok-panel" style="margin:6px 0;padding:8px 10px;font-size:12.5px">
+        <strong>Vista previa lista.</strong> Esto quita la exclusión de verdad en la cuenta.
+        <div style="margin-top:8px;display:flex;gap:8px">
+          <button class="btn-accent sm" data-action="exclusiones-remove-confirm">Confirmar</button>
+          <button class="btn-outline sm" data-action="exclusiones-remove-cancel">Cancelar</button>
+        </div>
+      </div>`;
+  }
+
+  if (r.status === 'done') {
+    return `<span class="footnote">Quitada.</span>`;
+  }
+
+  return '';
+}
+
+function renderContentExclusionsListPanel() {
+  const s = state.contentExclusions;
+  const labels = s.contentLabels || [];
+  const apps = s.appCategories || [];
+
+  if (!labels.length && !apps.length) {
+    return `<div class="ok-panel">Esta cuenta no tiene categorías de contenido ni de apps excluidas todavía.</div>`;
+  }
+
+  const labelsRows = labels.map((l) => `
+    <tr>
+      <td>${escapeHtml(l.label)}</td>
+      <td>${renderContentExclusionsRemoveCell(l.resource_name)}</td>
+    </tr>`).join('');
+  const appsRows = apps.map((c) => `
+    <tr>
+      <td>${escapeHtml(c.name || c.category_constant)}</td>
+      <td>${renderContentExclusionsRemoveCell(c.resource_name)}</td>
+    </tr>`).join('');
+
+  return `
+    <div class="card table-panel" style="margin-bottom:20px">
+      <div class="table-panel-head"><h3>Categorías de contenido excluidas (${labels.length})</h3></div>
+      ${labels.length ? `
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Categoría</th><th>Acción</th></tr></thead>
+            <tbody>${labelsRows}</tbody>
+          </table>
+        </div>` : `<p class="footnote">Ninguna categoría de contenido excluida.</p>`}
+    </div>
+    <div class="card table-panel" style="margin-bottom:20px">
+      <div class="table-panel-head"><h3>Categorías de apps excluidas (${apps.length})</h3></div>
+      ${apps.length ? `
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Categoría de apps</th><th>Acción</th></tr></thead>
+            <tbody>${appsRows}</tbody>
+          </table>
+        </div>` : `<p class="footnote">Ninguna categoría de apps excluida.</p>`}
+    </div>`;
+}
+
+function renderContentExclusionsAddLabelsPanel() {
+  const s = state.contentExclusions;
+  const p = s.addLabels;
+  const excludedTypes = new Set((s.contentLabels || []).map((l) => l.type));
+  const available = CONTENT_LABEL_CATALOG.filter((c) => !excludedTypes.has(c.type));
+  const busy = p.status === 'previewing' || p.status === 'applying';
+
+  if (!available.length) {
+    return `
+      <div class="card table-panel" style="margin-bottom:20px">
+        <h3 class="dense-chart-title">Excluir categorías de contenido</h3>
+        <p class="footnote">Ya están excluidas todas las categorías disponibles.</p>
+      </div>`;
+  }
+
+  const checkboxesHtml = available.map((c) => `
+    <label style="display:flex;align-items:center;gap:8px;font-weight:400;padding:4px 0">
+      <input type="checkbox" class="exclusiones-label-check" value="${escapeHtml(c.type)}" ${p.selected.has(c.type) ? 'checked' : ''} />
+      ${escapeHtml(c.label)}
+    </label>`).join('');
+
+  return `
+    <div class="card table-panel" style="margin-bottom:20px">
+      <h3 class="dense-chart-title">Excluir categorías de contenido</h3>
+      <p style="margin:0 0 12px;font-size:12.5px;color:var(--color-text-muted)">Marca las categorías a excluir de TODA la cuenta — aplica a Performance Max, Demand Gen, Display y Video (Search casi no usa esto). La vista previa valida contra Google Ads sin aplicar nada; solo al confirmar queda escrito de verdad.</p>
+      <div style="max-height:260px;overflow-y:auto;border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:6px 12px;margin-bottom:12px">
+        ${checkboxesHtml}
+      </div>
+
+      ${p.status === 'idle' || p.status === 'error' ? `
+        <button class="btn-accent" data-action="exclusiones-labels-preview" ${p.selected.size === 0 || busy ? 'disabled' : ''}>Vista previa</button>
+        ${p.error ? `<div class="error-panel" style="margin-top:10px">${escapeHtml(p.error)}</div>` : ''}
+      ` : ''}
+
+      ${busy ? `<p class="footnote">${p.status === 'previewing' ? 'Validando con Google Ads (vista previa, no aplica nada todavía)…' : 'Aplicando en Google Ads…'}</p>` : ''}
+
+      ${p.status === 'preview_ready' && p.preview ? `
+        <div class="ok-panel" style="margin:10px 0">
+          <strong>Vista previa lista.</strong> Google Ads validó ${p.preview.created} de ${p.preview.types.length} sin problema — nada se aplicó todavía.
+          ${p.preview.failed && p.preview.failed.length ? `<div style="margin-top:6px"><strong>${p.preview.failed.length} no pasaron la validación:</strong><br>${p.preview.failed.map((m) => escapeHtml(m)).join('<br>')}</div>` : ''}
+        </div>
+        <button class="btn-accent" data-action="exclusiones-labels-confirm">Confirmar y aplicar</button>
+        <button class="btn-outline" data-action="exclusiones-labels-cancel">Cancelar</button>
+      ` : ''}
+
+      ${p.status === 'done' && p.result ? `
+        <div class="ok-panel" style="margin:10px 0"><strong>Listo.</strong> Se excluyeron ${p.result.created} categorías.</div>
+      ` : ''}
+    </div>`;
+}
+
+function renderContentExclusionsAddAppPanel() {
+  const s = state.contentExclusions;
+  const p = s.addApp;
+  const excludedResources = new Set((s.appCategories || []).map((a) => a.category_constant));
+  const catalog = s.appCategoriesCatalog || [];
+  const filterLower = (p.filter || '').toLowerCase();
+  const available = catalog.filter((c) => !excludedResources.has(c.resource_name) && (!filterLower || c.name.toLowerCase().includes(filterLower)));
+  const busy = p.status === 'previewing' || p.status === 'applying';
+
+  const optionsHtml = ['<option value="">Elige una categoría de apps…</option>']
+    .concat(available.map((c) => `<option value="${escapeHtml(c.resource_name)}" ${p.selectedResourceName === c.resource_name ? 'selected' : ''}>${escapeHtml(c.name)}</option>`))
+    .join('');
+
+  return `
+    <div class="card table-panel" style="margin-bottom:20px">
+      <h3 class="dense-chart-title">Excluir una categoría de apps</h3>
+      <p style="margin:0 0 12px;font-size:12.5px;color:var(--color-text-muted)">Excluye una categoría completa de apps (ej. juegos, apps de citas) de toda la cuenta — aplica sobre todo a Display y Demand Gen. La vista previa valida sin aplicar nada.</p>
+      <div class="field" style="margin-bottom:10px">
+        <label>Buscar categoría</label>
+        <input type="text" id="exclusiones-app-filter" value="${escapeHtml(p.filter)}" placeholder="ej. juegos" style="width:280px" />
+      </div>
+      <div class="field" style="margin-bottom:12px">
+        <label>Categoría</label>
+        <select id="exclusiones-app-select" style="width:320px">${optionsHtml}</select>
+      </div>
+
+      ${p.status === 'idle' || p.status === 'error' ? `
+        <button class="btn-accent" data-action="exclusiones-app-preview" ${!p.selectedResourceName || busy ? 'disabled' : ''}>Vista previa</button>
+        ${p.error ? `<div class="error-panel" style="margin-top:10px">${escapeHtml(p.error)}</div>` : ''}
+      ` : ''}
+
+      ${busy ? `<p class="footnote">${p.status === 'previewing' ? 'Validando con Google Ads (vista previa, no aplica nada todavía)…' : 'Aplicando en Google Ads…'}</p>` : ''}
+
+      ${p.status === 'preview_ready' && p.preview ? `
+        <div class="ok-panel" style="margin:10px 0"><strong>Vista previa lista.</strong> No se aplicó nada todavía.</div>
+        <button class="btn-accent" data-action="exclusiones-app-confirm">Confirmar y aplicar</button>
+        <button class="btn-outline" data-action="exclusiones-app-cancel">Cancelar</button>
+      ` : ''}
+
+      ${p.status === 'done' && p.result ? `
+        <div class="ok-panel" style="margin:10px 0"><strong>Listo.</strong> Categoría de apps excluida.</div>
+      ` : ''}
+    </div>`;
+}
+
+function renderContentExclusionsPage() {
+  const s = state.contentExclusions;
+  ensureContentExclusionsGoogleAdsStatusLoaded();
+
+  const controlPanel = renderContentExclusionsApiPanel();
+
+  if (s.status === 'idle') {
+    return `
+      ${controlPanel}
+      <div class="card state-panel idle">
+        ${icon('shield-off', 30)}
+        <p>Conecta una cuenta de Google Ads para ver qué categorías de contenido y de apps ya están excluidas de toda la cuenta.</p>
+      </div>`;
+  }
+  if (s.status === 'loading') {
+    return `${controlPanel}<div class="card state-panel loading"><div class="spinner"></div><p>Trayendo exclusiones…</p></div>`;
+  }
+  if (s.status === 'error') {
+    return `${controlPanel}<div class="error-panel"><strong>No se pudo traer las exclusiones.</strong> ${escapeHtml(s.error)}</div>`;
+  }
+
+  return `
+    ${controlPanel}
+    ${renderContentExclusionsListPanel()}
+    ${renderContentExclusionsAddLabelsPanel()}
+    ${renderContentExclusionsAddAppPanel()}`;
+}
+
+// ---------------------------------------------------------------------------
 // Página — Administración (solo is_admin)
 // ---------------------------------------------------------------------------
 
@@ -5226,6 +5744,45 @@ function bindEvents() {
     });
   });
 
+  // Exclusiones de contenido
+  const exclusionesApiAccount = document.getElementById('exclusiones-api-account');
+  if (exclusionesApiAccount) exclusionesApiAccount.addEventListener('change', (e) => {
+    state.contentExclusions.api.accountId = e.target.value;
+    resetContentExclusionsAccountData();
+  });
+  const exclusionesApiAccountManual = document.getElementById('exclusiones-api-account-manual');
+  if (exclusionesApiAccountManual) exclusionesApiAccountManual.addEventListener('input', (e) => {
+    state.contentExclusions.api.accountIdManual = e.target.value;
+    resetContentExclusionsAccountData();
+  });
+  document.querySelectorAll('.exclusiones-label-check').forEach((cb) => {
+    cb.addEventListener('change', (e) => {
+      const p = state.contentExclusions.addLabels;
+      if (e.target.checked) p.selected.add(e.target.value);
+      else p.selected.delete(e.target.value);
+      render();
+    });
+  });
+  const exclusionesAppFilter = document.getElementById('exclusiones-app-filter');
+  if (exclusionesAppFilter) exclusionesAppFilter.addEventListener('input', (e) => {
+    state.contentExclusions.addApp.filter = e.target.value;
+    render();
+  });
+  const exclusionesAppSelect = document.getElementById('exclusiones-app-select');
+  if (exclusionesAppSelect) exclusionesAppSelect.addEventListener('change', (e) => {
+    state.contentExclusions.addApp.selectedResourceName = e.target.value;
+    render();
+  });
+  document.querySelectorAll('[data-action="exclusiones-remove-start"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.contentExclusions.remove = {
+        resourceName: btn.dataset.resource,
+        status: 'idle', error: null, preview: null, result: null,
+      };
+      render();
+    });
+  });
+
   document.querySelectorAll('[data-opp-sort]').forEach((th) => {
     th.addEventListener('click', () => {
       const key = th.dataset.oppSort;
@@ -5538,6 +6095,37 @@ function handleAction(action) {
     case 'iamax-tab-estado': state.iamax.tab = 'estado'; render(); break;
     case 'iamax-tab-servido': state.iamax.tab = 'servido'; render(); break;
     case 'iamax-tab-cruce': state.iamax.tab = 'cruce'; render(); break;
+
+    case 'exclusiones-api-load-accounts': loadContentExclusionsGoogleAdsAccounts(); break;
+    case 'exclusiones-api-fetch': fetchContentExclusions(); break;
+
+    case 'exclusiones-labels-preview': addContentLabelExclusions(true); break;
+    case 'exclusiones-labels-confirm': addContentLabelExclusions(false); break;
+    case 'exclusiones-labels-cancel': {
+      state.contentExclusions.addLabels.status = 'idle';
+      state.contentExclusions.addLabels.preview = null;
+      state.contentExclusions.addLabels.error = null;
+      render();
+      break;
+    }
+
+    case 'exclusiones-app-preview': addAppCategoryExclusion(true); break;
+    case 'exclusiones-app-confirm': addAppCategoryExclusion(false); break;
+    case 'exclusiones-app-cancel': {
+      state.contentExclusions.addApp.status = 'idle';
+      state.contentExclusions.addApp.preview = null;
+      state.contentExclusions.addApp.error = null;
+      render();
+      break;
+    }
+
+    case 'exclusiones-remove-preview': removeContentExclusion(true); break;
+    case 'exclusiones-remove-confirm': removeContentExclusion(false); break;
+    case 'exclusiones-remove-cancel': {
+      state.contentExclusions.remove = { resourceName: null, status: 'idle', error: null, preview: null, result: null };
+      render();
+      break;
+    }
 
     case 'forecast-demo': {
       state.forecast.status = 'loading'; state.forecast.error = null; state.forecast.fileName = 'ingresos_ejemplo.csv';

@@ -362,6 +362,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_ai_max_served(parse_qs(parsed.query))
             return
 
+        if path == "/api/google-ads/content-exclusions":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_content_exclusions(parse_qs(parsed.query))
+            return
+
         # Listado de cuentas registradas (sin contraseñas) — solo admins.
         if path == "/api/admin/users":
             if not self._require_admin_json():
@@ -417,6 +423,18 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_google_ads_ai_max_toggle(payload)
+        elif path == "/api/google-ads/content-exclusions/add-labels":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_content_exclusions_add_labels(payload)
+        elif path == "/api/google-ads/content-exclusions/add-app-category":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_content_exclusions_add_app_category(payload)
+        elif path == "/api/google-ads/content-exclusions/remove":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_content_exclusions_remove(payload)
         elif path == "/api/google-ads/recommendations/apply":
             if not self._require_auth_json():
                 return
@@ -1443,6 +1461,144 @@ class Handler(SimpleHTTPRequestHandler):
             rows = google_ads_client.fetch_ai_max_served_combinations(customer_id, campaign_id or None)
             negatives = google_ads_client.fetch_account_negative_keywords(customer_id)
             self._send_json(200, {"rows": rows, "negatives": negatives, "simulated": False})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    def _handle_google_ads_content_exclusions(self, query):
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+
+        if not google_ads_client.is_configured():
+            exclusions = google_ads_client.simulated_content_exclusions()
+            self._send_json(200, {
+                "content_labels": exclusions["content_labels"],
+                "app_categories": exclusions["app_categories"],
+                "app_categories_catalog": google_ads_client.simulated_mobile_app_categories(),
+                "simulated": True,
+            })
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            exclusions = google_ads_client.fetch_content_exclusions(customer_id)
+            catalog = google_ads_client.fetch_mobile_app_categories(customer_id)
+            catalog_by_resource = {c["resource_name"]: c["name"] for c in catalog}
+            app_categories = [
+                {**a, "name": catalog_by_resource.get(a["category_constant"], a["category_constant"])}
+                for a in exclusions["app_categories"]
+            ]
+            self._send_json(200, {
+                "content_labels": exclusions["content_labels"],
+                "app_categories": app_categories,
+                "app_categories_catalog": catalog,
+                "simulated": False,
+            })
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    def _handle_google_ads_content_exclusions_add_labels(self, payload):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not _write_limiter.allow(f"user:{user['id']}", *WRITE_RATE_LIMIT):
+            self._send_json(429, {"error": "Demasiadas escrituras seguidas. Espera un minuto y vuelve a intentar."})
+            return
+
+        customer_id = str(payload.get("customer_id") or "").strip()
+        content_label_types = payload.get("content_label_types") or []
+        validate_only = bool(payload.get("validate_only", True))
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, google_ads_client.simulated_add_content_label_exclusions(content_label_types, validate_only))
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            result = google_ads_client.add_content_label_exclusions(customer_id, content_label_types, validate_only)
+            self._send_json(200, result)
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    def _handle_google_ads_content_exclusions_add_app_category(self, payload):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not _write_limiter.allow(f"user:{user['id']}", *WRITE_RATE_LIMIT):
+            self._send_json(429, {"error": "Demasiadas escrituras seguidas. Espera un minuto y vuelve a intentar."})
+            return
+
+        customer_id = str(payload.get("customer_id") or "").strip()
+        category_resource_name = str(payload.get("category_resource_name") or "").strip()
+        validate_only = bool(payload.get("validate_only", True))
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, google_ads_client.simulated_add_app_category_exclusion(category_resource_name, validate_only))
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not category_resource_name:
+            self._send_json(400, {"error": "Falta el parámetro category_resource_name."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            result = google_ads_client.add_app_category_exclusion(customer_id, category_resource_name, validate_only)
+            self._send_json(200, result)
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    def _handle_google_ads_content_exclusions_remove(self, payload):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not _write_limiter.allow(f"user:{user['id']}", *WRITE_RATE_LIMIT):
+            self._send_json(429, {"error": "Demasiadas escrituras seguidas. Espera un minuto y vuelve a intentar."})
+            return
+
+        customer_id = str(payload.get("customer_id") or "").strip()
+        resource_name = str(payload.get("resource_name") or "").strip()
+        validate_only = bool(payload.get("validate_only", True))
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, google_ads_client.simulated_remove_customer_negative_criterion(resource_name, validate_only))
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not resource_name:
+            self._send_json(400, {"error": "Falta el parámetro resource_name."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            result = google_ads_client.remove_customer_negative_criterion(customer_id, resource_name, validate_only)
+            self._send_json(200, result)
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)
 

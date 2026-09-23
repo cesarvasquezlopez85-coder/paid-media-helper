@@ -802,6 +802,196 @@ def push_negative_keywords(customer_id, items, validate_only=True):
 
 
 # ---------------------------------------------------------------------------
+# Exclusiones de contenido a nivel de cuenta (CustomerNegativeCriterion) —
+# categorías de contenido "no apto" y de apps que se excluyen de TODA la
+# cuenta de una sola vez, a diferencia de los negativos de Negativización
+# (por campaña, CampaignCriterion). Solo tiene efecto real en campañas que
+# sirven sobre contenido/apps/ubicaciones — Performance Max, Demand Gen,
+# Display, Video — no en Search puro (ahí no hay "contenido" del cual
+# excluirse, salvo que la campaña use la red de Search Partners). Para
+# Performance Max en particular, las exclusiones de contenido/ubicación
+# SOLO se pueden tocar a nivel de cuenta — no existe equivalente por
+# campaña — así que este es el único lugar desde el que se puede ajustar
+# esto para esas campañas. A pedido explícito de cesar (2026-09-23): que
+# esto pese más para PMax/Demand Gen/Display/Video, no tanto para Search.
+#
+# Nombres de campo y forma de los mensajes verificados contra los .proto
+# reales de la API v25 (CustomerNegativeCriterion, ContentLabelInfo,
+# MobileAppCategoryInfo, MobileAppCategoryConstant) antes de escribir esto
+# — mismo criterio que el resto de la integración.
+# ---------------------------------------------------------------------------
+
+# Las 26 categorías reales de ContentLabelTypeEnum (v25), sin UNSPECIFIED/
+# UNKNOWN — confirmadas contra el .proto completo, no adivinadas.
+CONTENT_LABEL_TYPES = (
+    "SEXUALLY_SUGGESTIVE", "BELOW_THE_FOLD", "PARKED_DOMAIN", "JUVENILE",
+    "PROFANITY", "TRAGEDY", "VIDEO", "VIDEO_RATING_DV_G", "VIDEO_RATING_DV_PG",
+    "VIDEO_RATING_DV_T", "VIDEO_RATING_DV_MA", "VIDEO_NOT_YET_RATED",
+    "EMBEDDED_VIDEO", "LIVE_STREAMING_VIDEO", "SOCIAL_ISSUES",
+    "BRAND_SUITABILITY_CONTENT_FOR_FAMILIES", "BRAND_SUITABILITY_GAMES_FIGHTING",
+    "BRAND_SUITABILITY_GAMES_MATURE", "BRAND_SUITABILITY_HEALTH_SENSITIVE",
+    "BRAND_SUITABILITY_HEALTH_SOURCE_UNDETERMINED", "BRAND_SUITABILITY_NEWS_RECENT",
+    "BRAND_SUITABILITY_NEWS_SENSITIVE", "BRAND_SUITABILITY_NEWS_SOURCE_NOT_FEATURED",
+    "BRAND_SUITABILITY_POLITICS", "BRAND_SUITABILITY_RELIGION",
+)
+
+CONTENT_LABEL_LABELS = {
+    "SEXUALLY_SUGGESTIVE": "Contenido sexualmente sugestivo",
+    "BELOW_THE_FOLD": "Ubicación \"bajo el pliegue\" (below the fold)",
+    "PARKED_DOMAIN": "Dominio estacionado (parked domain)",
+    "JUVENILE": "Contenido juvenil, grotesco o bizarro",
+    "PROFANITY": "Lenguaje profano o vulgar",
+    "TRAGEDY": "Muerte y tragedia",
+    "VIDEO": "Contenido de video (en general)",
+    "VIDEO_RATING_DV_G": "Video — clasificación G",
+    "VIDEO_RATING_DV_PG": "Video — clasificación PG",
+    "VIDEO_RATING_DV_T": "Video — clasificación T",
+    "VIDEO_RATING_DV_MA": "Video — clasificación MA",
+    "VIDEO_NOT_YET_RATED": "Video sin clasificar todavía",
+    "EMBEDDED_VIDEO": "Video incrustado",
+    "LIVE_STREAMING_VIDEO": "Video en vivo (streaming)",
+    "SOCIAL_ISSUES": "Temas sociales sensibles",
+    "BRAND_SUITABILITY_CONTENT_FOR_FAMILIES": "Contenido apto para familias (incl. \"Hecho para niños\" de YouTube)",
+    "BRAND_SUITABILITY_GAMES_FIGHTING": "Videojuegos de combate o pelea",
+    "BRAND_SUITABILITY_GAMES_MATURE": "Videojuegos con contenido maduro",
+    "BRAND_SUITABILITY_HEALTH_SENSITIVE": "Contenido de salud sensible",
+    "BRAND_SUITABILITY_HEALTH_SOURCE_UNDETERMINED": "Salud, de fuentes poco verificadas",
+    "BRAND_SUITABILITY_NEWS_RECENT": "Noticias recién anunciadas",
+    "BRAND_SUITABILITY_NEWS_SENSITIVE": "Noticias sensibles (crímenes, accidentes, controversia)",
+    "BRAND_SUITABILITY_NEWS_SOURCE_NOT_FEATURED": "Noticias de fuentes no destacadas por Google/YouTube",
+    "BRAND_SUITABILITY_POLITICS": "Política, elecciones y eventos políticos",
+    "BRAND_SUITABILITY_RELIGION": "Temas religiosos",
+}
+
+
+def content_label_type_label(raw_type):
+    return CONTENT_LABEL_LABELS.get(raw_type, raw_type)
+
+
+def fetch_content_exclusions(customer_id):
+    """Categorías de contenido y de apps que YA están excluidas de toda la
+    cuenta (CustomerNegativeCriterion). No incluye placements/YouTube/IP —
+    fuera del alcance de v1, se puede agregar después si hace falta."""
+    query = """
+        SELECT customer_negative_criterion.resource_name,
+               customer_negative_criterion.type,
+               customer_negative_criterion.content_label.type,
+               customer_negative_criterion.mobile_app_category.mobile_app_category_constant
+        FROM customer_negative_criterion
+        WHERE customer_negative_criterion.type IN ('CONTENT_LABEL', 'MOBILE_APP_CATEGORY')
+    """
+    results = _search(customer_id, query)
+    content_labels = []
+    app_categories = []
+    for r in results:
+        criterion = r.get("customerNegativeCriterion", {})
+        resource_name = criterion.get("resourceName")
+        criterion_type = criterion.get("type")
+        if criterion_type == "CONTENT_LABEL":
+            label_type = criterion.get("contentLabel", {}).get("type")
+            if not label_type:
+                continue
+            content_labels.append({
+                "resource_name": resource_name,
+                "type": label_type,
+                "label": content_label_type_label(label_type),
+            })
+        elif criterion_type == "MOBILE_APP_CATEGORY":
+            constant = criterion.get("mobileAppCategory", {}).get("mobileAppCategoryConstant")
+            if not constant:
+                continue
+            app_categories.append({"resource_name": resource_name, "category_constant": constant})
+    return {"content_labels": content_labels, "app_categories": app_categories}
+
+
+def fetch_mobile_app_categories(customer_id):
+    """Catálogo completo de categorías de apps que reconoce Google Ads
+    (MobileAppCategoryConstant) — recurso "constante": el mismo para
+    cualquier cuenta, pero la API igual exige pegarle a una cuenta real
+    para autenticar la consulta."""
+    query = """
+        SELECT mobile_app_category_constant.id,
+               mobile_app_category_constant.resource_name,
+               mobile_app_category_constant.name
+        FROM mobile_app_category_constant
+    """
+    results = _search(customer_id, query)
+    rows = []
+    for r in results:
+        constant = r.get("mobileAppCategoryConstant", {})
+        name = constant.get("name")
+        resource_name = constant.get("resourceName")
+        if not name or not resource_name:
+            continue
+        rows.append({"resource_name": resource_name, "name": name})
+    rows.sort(key=lambda x: x["name"])
+    return rows
+
+
+def _mutate_customer_negative_criteria(customer_id, operations, validate_only):
+    url = f"{BASE_URL}/customers/{customer_id}/customerNegativeCriteria:mutate"
+    body = {"operations": operations, "partialFailure": True, "validateOnly": validate_only}
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Google Ads API respondió {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"No se pudo conectar a la API de Google Ads: {e.reason}") from e
+
+
+def add_content_label_exclusions(customer_id, content_label_types, validate_only=True):
+    """Excluye una o más categorías de contenido de TODA la cuenta.
+    validate_only=True (vista previa): Google valida sin aplicar. Usa
+    partialFailure para que una categoría ya excluida (Google la rechaza
+    como duplicada) no tumbe la subida de las demás."""
+    if not content_label_types:
+        return {"created": 0, "failed": [], "validate_only": validate_only}
+    operations = [{"create": {"contentLabel": {"type": t}}} for t in content_label_types]
+    payload = _mutate_customer_negative_criteria(customer_id, operations, validate_only)
+    failed_indices = set()
+    failed_messages = []
+    partial_error = payload.get("partialFailureError")
+    if partial_error:
+        for detail in partial_error.get("details", []):
+            for err in detail.get("errors", []):
+                message = err.get("message", "Error desconocido.")
+                idx = None
+                for el in err.get("location", {}).get("fieldPathElements", []):
+                    if el.get("fieldName") == "operations" and el.get("index") is not None:
+                        idx = el["index"]
+                if idx is not None and idx < len(content_label_types):
+                    failed_indices.add(idx)
+                    failed_messages.append(f"\"{content_label_type_label(content_label_types[idx])}\": {message}")
+                else:
+                    failed_messages.append(message)
+    created = len(content_label_types) - len(failed_indices)
+    return {"created": created, "failed": failed_messages, "validate_only": validate_only}
+
+
+def add_app_category_exclusion(customer_id, category_resource_name, validate_only=True):
+    """Excluye una categoría de apps de toda la cuenta. category_resource_name
+    es el resource_name completo de MobileAppCategoryConstant, ej.
+    "mobileAppCategoryConstants/70000"."""
+    operations = [{"create": {"mobileAppCategory": {"mobileAppCategoryConstant": category_resource_name}}}]
+    _mutate_customer_negative_criteria(customer_id, operations, validate_only)
+    return {"validate_only": validate_only, "applied": not validate_only}
+
+
+def remove_customer_negative_criterion(customer_id, resource_name, validate_only=True):
+    """Quita una exclusión existente (categoría de contenido o de apps) —
+    mismo endpoint, operación "remove" con el resource_name completo del
+    CustomerNegativeCriterion."""
+    operations = [{"remove": resource_name}]
+    _mutate_customer_negative_criteria(customer_id, operations, validate_only)
+    return {"validate_only": validate_only, "applied": not validate_only}
+
+
+# ---------------------------------------------------------------------------
 # Recomendaciones de Google (Función 9) — el motor de recomendaciones propio
 # de Google Ads (el mismo que alimenta el "puntaje de optimización" y la
 # pestaña "Recomendaciones" de la interfaz), NO el nuevo "Ask Advisor"
@@ -1127,6 +1317,81 @@ def simulated_ai_max_served(campaign_id=None):
 
 def simulated_account_negative_keywords():
     return list(SIMULATED_ACCOUNT_NEGATIVE_KEYWORDS)
+
+
+# Exclusiones de contenido simuladas — dos categorías de contenido y una de
+# apps ya excluidas, para poder probar el flujo de quitar sin esperar a
+# Google; y un catálogo chico de categorías de apps para probar el flujo de
+# agregar.
+_SIMULATED_CONTENT_LABELS_EXCLUDED = ["SEXUALLY_SUGGESTIVE", "PROFANITY"]
+
+SIMULATED_MOBILE_APP_CATEGORIES = [
+    {"resource_name": "mobileAppCategoryConstants/70001", "name": "Juegos"},
+    {"resource_name": "mobileAppCategoryConstants/70002", "name": "Citas y relaciones"},
+    {"resource_name": "mobileAppCategoryConstants/70003", "name": "Redes sociales"},
+    {"resource_name": "mobileAppCategoryConstants/70004", "name": "Entretenimiento para adultos"},
+    {"resource_name": "mobileAppCategoryConstants/70005", "name": "Finanzas"},
+    {"resource_name": "mobileAppCategoryConstants/70006", "name": "Viajes y hoteles"},
+]
+
+_SIMULATED_APP_CATEGORIES_EXCLUDED = {"mobileAppCategoryConstants/70004"}
+
+
+def _simulated_label_resource_name(content_label_type):
+    return f"customers/0000000000/customerNegativeCriteria/label-{content_label_type}"
+
+
+def _simulated_app_resource_name(category_constant):
+    return f"customers/0000000000/customerNegativeCriteria/app-{category_constant.rsplit('/', 1)[-1]}"
+
+
+def simulated_content_exclusions():
+    content_labels = [
+        {"resource_name": _simulated_label_resource_name(t), "type": t, "label": content_label_type_label(t)}
+        for t in _SIMULATED_CONTENT_LABELS_EXCLUDED
+    ]
+    app_categories = [
+        {"resource_name": _simulated_app_resource_name(c["resource_name"]), "category_constant": c["resource_name"], "name": c["name"]}
+        for c in SIMULATED_MOBILE_APP_CATEGORIES if c["resource_name"] in _SIMULATED_APP_CATEGORIES_EXCLUDED
+    ]
+    return {"content_labels": content_labels, "app_categories": app_categories}
+
+
+def simulated_mobile_app_categories():
+    return list(SIMULATED_MOBILE_APP_CATEGORIES)
+
+
+# Igual que el resto del modo simulado (ver simulated_toggle_ai_max): las
+# escrituras (validate_only=False) sí mutan el estado simulado en memoria,
+# para que la vista previa/confirmar de acá se sienta igual que contra la
+# API real al volver a traer la lista — si no, "confirmar" no cambiaría nada
+# visible y parecería que no funcionó.
+def simulated_add_content_label_exclusions(content_label_types, validate_only=True):
+    types = content_label_types or []
+    if not validate_only:
+        for t in types:
+            if t not in _SIMULATED_CONTENT_LABELS_EXCLUDED:
+                _SIMULATED_CONTENT_LABELS_EXCLUDED.append(t)
+    return {"created": len(types), "failed": [], "validate_only": validate_only, "simulated": True}
+
+
+def simulated_add_app_category_exclusion(category_resource_name, validate_only=True):
+    if not validate_only:
+        _SIMULATED_APP_CATEGORIES_EXCLUDED.add(category_resource_name)
+    return {"validate_only": validate_only, "applied": not validate_only, "simulated": True}
+
+
+def simulated_remove_customer_negative_criterion(resource_name, validate_only=True):
+    if not validate_only:
+        suffix = resource_name.rsplit('/', 1)[-1]
+        if suffix.startswith("label-"):
+            label_type = suffix[len("label-"):]
+            if label_type in _SIMULATED_CONTENT_LABELS_EXCLUDED:
+                _SIMULATED_CONTENT_LABELS_EXCLUDED.remove(label_type)
+        elif suffix.startswith("app-"):
+            app_id = suffix[len("app-"):]
+            _SIMULATED_APP_CATEGORIES_EXCLUDED.discard(f"mobileAppCategoryConstants/{app_id}")
+    return {"validate_only": validate_only, "applied": not validate_only, "simulated": True}
 
 
 # Términos de búsqueda de ejemplo, con su campaña — para probar el flujo de
