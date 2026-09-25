@@ -224,6 +224,7 @@ const state = {
     accessStatus: 'idle', access: [], accessError: null,
     deleteStatus: 'idle', deleteError: null,
     revokeStatus: 'idle', revokeError: null,
+    setAdminStatus: 'idle', setAdminError: null,
     grant: {
       userId: '', customerId: '', accountName: '',
       accountsStatus: 'idle', accounts: [], accountsError: null, accountFilter: '',
@@ -5290,6 +5291,31 @@ function deleteAdminUser(username) {
     });
 }
 
+function setAdminRole(userId, username, makeAdmin) {
+  const confirmMsg = makeAdmin
+    ? `¿Hacer administrador a "${username}"? Va a poder ver y tocar todas las cuentas de Google Ads sin restricción, y usar el panel de administración.`
+    : `¿Quitarle el permiso de administrador a "${username}"? Va a perder acceso a todas las cuentas salvo las que tenga asignadas explícitamente abajo.`;
+  if (!window.confirm(confirmMsg)) return;
+  const a = state.admin;
+  a.setAdminStatus = 'loading'; a.setAdminError = null;
+  render();
+  fetch('/api/admin/users/set-admin', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user_id: userId, is_admin: makeAdmin }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.setAdminStatus = 'idle';
+      loadAdminUsers();
+    })
+    .catch((err) => {
+      a.setAdminStatus = 'error'; a.setAdminError = err.message || String(err);
+      render();
+    });
+}
+
 function resetUserPassword(userId, username) {
   if (!window.confirm(`¿Restablecer la contraseña de "${username}"? Se genera una temporal, se cierra cualquier sesión que tenga abierta, y deberá definir una contraseña propia al volver a entrar.`)) return;
   const a = state.admin;
@@ -5412,15 +5438,24 @@ function renderAdminPage() {
         : (u.is_super_admin && !meIsSuperAdmin)
           ? '<span class="footnote">Requiere super admin</span>'
           : `<button class="btn-outline xs" data-admin-reset-password="${u.id}" data-admin-reset-username="${escapeHtml(u.username)}">Restablecer contraseña</button>`;
+      const adminCell = u.is_super_admin
+        ? '<span class="footnote">Siempre administrador</span>'
+        : isSelf
+          ? '<span class="footnote">No puedes quitarte el tuyo</span>'
+          : u.is_admin
+            ? `<button class="btn-outline xs" data-admin-set-admin="${u.id}" data-admin-set-admin-value="0" data-admin-set-admin-username="${escapeHtml(u.username)}">Quitar admin</button>`
+            : `<button class="btn-outline xs" data-admin-set-admin="${u.id}" data-admin-set-admin-value="1" data-admin-set-admin-username="${escapeHtml(u.username)}">Hacer admin</button>`;
       return `
       <tr>
         <td>${escapeHtml(u.username)}</td>
         <td>${u.is_super_admin ? '<span class="delta-badge good">Super admin</span>' : (u.is_admin ? '<span class="delta-badge good">Administrador</span>' : '<span class="delta-badge neutral">Usuario</span>')}</td>
         <td>${fmtDateTime(u.created_at)}</td>
+        <td>${adminCell}</td>
         <td>${deleteCell}</td>
         <td>${resetCell}</td>
       </tr>`;
     }).join('');
+    const setAdminErrorHtml = a.setAdminError ? `<div class="error-panel" style="margin-bottom:14px">${escapeHtml(a.setAdminError)}</div>` : '';
     let resetResultHtml = '';
     if (a.resetPassword.result) {
       const rp = a.resetPassword.result;
@@ -5440,14 +5475,15 @@ function renderAdminPage() {
       <div class="card table-panel">
         <div class="table-panel-head"><h3>Usuarios registrados (${a.users.length})</h3></div>
         ${resetResultHtml}
+        ${setAdminErrorHtml}
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Usuario</th><th>Rol</th><th>Creada</th><th></th><th></th></tr></thead>
+            <thead><tr><th>Usuario</th><th>Rol</th><th>Creada</th><th></th><th></th><th></th></tr></thead>
             <tbody>${rows}</tbody>
           </table>
         </div>
         <p class="footnote" style="margin-top:14px">
-          Los administradores (definidos por <code>PMH_ADMIN_USERNAMES</code> en el servidor) tienen acceso a todas las cuentas de Google Ads sin restricción. El resto de usuarios solo pueden tocar las cuentas que les asignes abajo.
+          Los administradores tienen acceso a todas las cuentas de Google Ads sin restricción y pueden entrar al panel de administración — dalos y quítalos con el botón de cada fila. El resto de usuarios solo pueden tocar las cuentas que les asignes abajo.
         </p>
       </div>`;
   } else {
@@ -6013,6 +6049,9 @@ function bindEvents() {
   });
   document.querySelectorAll('[data-admin-reset-password]').forEach((btn) => {
     btn.addEventListener('click', () => resetUserPassword(Number(btn.dataset.adminResetPassword), btn.dataset.adminResetUsername));
+  });
+  document.querySelectorAll('[data-admin-set-admin]').forEach((btn) => {
+    btn.addEventListener('click', () => setAdminRole(Number(btn.dataset.adminSetAdmin), btn.dataset.adminSetAdminUsername, btn.dataset.adminSetAdminValue === '1'));
   });
   document.querySelectorAll('[data-admin-revoke-user]').forEach((btn) => {
     btn.addEventListener('click', () => revokeAdminAccess(Number(btn.dataset.adminRevokeUser), btn.dataset.adminRevokeCustomer));

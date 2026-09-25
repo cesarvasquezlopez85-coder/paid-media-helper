@@ -261,13 +261,14 @@ def init_db():
             )
             """
         )
-        # Sincroniza is_admin con PMH_ADMIN_USERNAMES en cada arranque — tanto
-        # para dar de alta admins nuevos como para bajarle el flag a alguien
-        # que ya no debería tenerlo, sin necesidad de tocar la base a mano.
+        # PMH_ADMIN_USERNAMES es solo un piso mínimo garantizado en cada
+        # arranque (para nunca quedar sin ningún admin) — SOLO sube a admin
+        # a esos usernames, nunca baja a nadie. Bajar el flag a alguien más
+        # ahora se hace desde el panel (/api/admin/users/set-admin), y esa
+        # decisión debe sobrevivir el próximo deploy/restart, no revertirse.
         if ADMIN_USERNAMES:
             placeholders = ",".join("?" for _ in ADMIN_USERNAMES)
             conn.execute(f"UPDATE users SET is_admin = 1 WHERE username IN ({placeholders})", tuple(ADMIN_USERNAMES))
-            conn.execute(f"UPDATE users SET is_admin = 0 WHERE username NOT IN ({placeholders})", tuple(ADMIN_USERNAMES))
         conn.commit()
     finally:
         conn.close()
@@ -453,6 +454,10 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_admin_json():
                 return
             self._handle_admin_delete_user(payload)
+        elif path == "/api/admin/users/set-admin":
+            if not self._require_admin_json():
+                return
+            self._handle_admin_set_admin(payload)
         elif path == "/api/admin/access/grant":
             if not self._require_admin_json():
                 return
@@ -662,6 +667,35 @@ class Handler(SimpleHTTPRequestHandler):
         finally:
             conn.close()
         self._send_json(200, {"ok": True, "deleted": username})
+
+    # Da o quita permisos de administrador a un usuario desde el panel.
+    # PMH_SUPER_ADMIN_USERNAMES nunca se puede bajar acá (siempre debe poder
+    # administrar) y nadie puede quitarse sus propios permisos por accidente
+    # — en ambos casos pedimos que lo haga otro administrador.
+    def _handle_admin_set_admin(self, payload):
+        requester = self._get_current_user()
+        user_id = payload.get("user_id")
+        make_admin = bool(payload.get("is_admin"))
+        if not user_id:
+            self._send_json(400, {"error": "Falta user_id."})
+            return
+        conn = get_db()
+        try:
+            target = conn.execute("SELECT id, username FROM users WHERE id = ?", (user_id,)).fetchone()
+            if not target:
+                self._send_json(404, {"error": "No existe ese usuario."})
+                return
+            if not make_admin and target["username"].lower() in SUPER_ADMIN_USERNAMES:
+                self._send_json(403, {"error": "Esta cuenta es super administrador y no se le puede quitar el permiso de administrador."})
+                return
+            if not make_admin and target["id"] == requester["id"]:
+                self._send_json(403, {"error": "No puedes quitarte tus propios permisos de administrador — pide a otro administrador que lo haga."})
+                return
+            conn.execute("UPDATE users SET is_admin = ? WHERE id = ?", (1 if make_admin else 0, target["id"]))
+            conn.commit()
+        finally:
+            conn.close()
+        self._send_json(200, {"ok": True, "username": target["username"], "is_admin": make_admin})
 
     # Lista los grants de acceso a cuentas de Google Ads — de un usuario si
     # se pasa user_id, o todos los grants de todos los usuarios si no (para
