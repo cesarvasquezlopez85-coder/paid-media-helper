@@ -243,6 +243,14 @@ def init_db():
             conn.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass
+        # Último ingreso exitoso (login o registro, que también deja logueado
+        # de una vez) — se muestra en Administración para saber quién ha
+        # entrado y cuándo fue la última vez. NULL para cuentas creadas antes
+        # de este campo que nunca volvieron a entrar.
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN last_login_at REAL")
+        except sqlite3.OperationalError:
+            pass
         # Qué cuenta de Google Ads (customer_id) puede tocar cada usuario que
         # NO sea admin — sin ninguna fila acá, un usuario no-admin no puede
         # leer ni escribir en ninguna cuenta (fail-secure: antes de esto,
@@ -628,13 +636,14 @@ class Handler(SimpleHTTPRequestHandler):
         conn = get_db()
         try:
             rows = conn.execute(
-                "SELECT id, username, created_at, is_admin FROM users ORDER BY created_at"
+                "SELECT id, username, created_at, last_login_at, is_admin FROM users ORDER BY created_at"
             ).fetchall()
         finally:
             conn.close()
         users = [
             {
                 "id": r["id"], "username": r["username"], "created_at": r["created_at"],
+                "last_login_at": r["last_login_at"],
                 "is_admin": bool(r["is_admin"]), "is_super_admin": r["username"].lower() in SUPER_ADMIN_USERNAMES,
             }
             for r in rows
@@ -876,9 +885,10 @@ class Handler(SimpleHTTPRequestHandler):
                 self._send_json(409, {"error": "Ese usuario ya existe. Prueba iniciar sesión."})
                 return
             salt_hex, pw_hash = hash_password(password)
+            now = time.time()
             cur = conn.execute(
-                "INSERT INTO users (username, salt, password_hash, created_at) VALUES (?, ?, ?, ?)",
-                (username, salt_hex, pw_hash, time.time()),
+                "INSERT INTO users (username, salt, password_hash, created_at, last_login_at) VALUES (?, ?, ?, ?, ?)",
+                (username, salt_hex, pw_hash, now, now),
             )
             conn.commit()
             user_id = cur.lastrowid
@@ -912,8 +922,8 @@ class Handler(SimpleHTTPRequestHandler):
             if row and not locked:
                 if verified:
                     conn.execute(
-                        "UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = ?",
-                        (row["id"],),
+                        "UPDATE users SET failed_login_attempts = 0, locked_until = NULL, last_login_at = ? WHERE id = ?",
+                        (now, row["id"]),
                     )
                 else:
                     attempts = row["failed_login_attempts"] + 1

@@ -5450,6 +5450,7 @@ function renderAdminPage() {
         <td>${escapeHtml(u.username)}</td>
         <td>${u.is_super_admin ? '<span class="delta-badge good">Super admin</span>' : (u.is_admin ? '<span class="delta-badge good">Administrador</span>' : '<span class="delta-badge neutral">Usuario</span>')}</td>
         <td>${fmtDateTime(u.created_at)}</td>
+        <td>${fmtDateTime(u.last_login_at)}</td>
         <td>${adminCell}</td>
         <td>${deleteCell}</td>
         <td>${resetCell}</td>
@@ -5478,7 +5479,7 @@ function renderAdminPage() {
         ${setAdminErrorHtml}
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Usuario</th><th>Rol</th><th>Creada</th><th></th><th></th><th></th></tr></thead>
+            <thead><tr><th>Usuario</th><th>Rol</th><th>Creada</th><th>Último ingreso</th><th></th><th></th><th></th></tr></thead>
             <tbody>${rows}</tbody>
           </table>
         </div>
