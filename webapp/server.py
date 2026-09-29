@@ -377,6 +377,18 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_content_exclusions(parse_qs(parsed.query))
             return
 
+        if path == "/api/google-ads/keyword-planner/geo-search":
+            if not self._require_auth_json():
+                return
+            self._handle_keyword_planner_geo_search(parse_qs(parsed.query))
+            return
+
+        if path == "/api/google-ads/keyword-planner/languages":
+            if not self._require_auth_json():
+                return
+            self._handle_keyword_planner_languages(parse_qs(parsed.query))
+            return
+
         # Listado de cuentas registradas (sin contraseñas) — solo admins.
         if path == "/api/admin/users":
             if not self._require_admin_json():
@@ -444,6 +456,18 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_google_ads_content_exclusions_remove(payload)
+        elif path == "/api/google-ads/keyword-planner/ideas":
+            if not self._require_auth_json():
+                return
+            self._handle_keyword_planner_ideas(payload)
+        elif path == "/api/google-ads/keyword-planner/historical":
+            if not self._require_auth_json():
+                return
+            self._handle_keyword_planner_historical(payload)
+        elif path == "/api/google-ads/keyword-planner/forecast":
+            if not self._require_auth_json():
+                return
+            self._handle_keyword_planner_forecast(payload)
         elif path == "/api/google-ads/recommendations/apply":
             if not self._require_auth_json():
                 return
@@ -1643,6 +1667,175 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             result = google_ads_client.remove_customer_negative_criterion(customer_id, resource_name, validate_only)
             self._send_json(200, result)
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    # ---------------------------------------- Planificador de palabras clave ---
+    # Todos de solo lectura — ninguno escribe en la cuenta, así que no llevan
+    # validate_only ni _write_limiter (a diferencia de ROAS/Negativización/
+    # IA Max/Exclusiones de contenido, que sí mutan algo real).
+    def _handle_keyword_planner_geo_search(self, query):
+        q = (query.get("q") or [""])[0].strip()
+        if not google_ads_client.is_configured():
+            self._send_json(200, {"results": google_ads_client.simulated_geo_target_suggestions(q), "simulated": True})
+            return
+        if not q:
+            self._send_json(200, {"results": [], "simulated": False})
+            return
+        try:
+            results = google_ads_client.fetch_geo_target_suggestions(q)
+            self._send_json(200, {"results": results, "simulated": False})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    def _handle_keyword_planner_languages(self, query):
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        if not google_ads_client.is_configured():
+            self._send_json(200, {"languages": google_ads_client.simulated_targetable_languages(), "simulated": True})
+            return
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+        try:
+            languages = google_ads_client.fetch_targetable_languages(customer_id)
+            self._send_json(200, {"languages": languages, "simulated": False})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    def _handle_keyword_planner_ideas(self, payload):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        customer_id = str(payload.get("customer_id") or "").strip()
+        seed_keywords = [str(k).strip() for k in (payload.get("seed_keywords") or []) if str(k).strip()]
+        seed_url = str(payload.get("seed_url") or "").strip() or None
+        geo_resource_names = payload.get("geo_resource_names") or []
+        language_resource_name = str(payload.get("language_resource_name") or "").strip() or None
+        network = str(payload.get("network") or "GOOGLE_SEARCH_AND_PARTNERS")
+        include_adult = bool(payload.get("include_adult", False))
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, {**google_ads_client.simulated_keyword_ideas(seed_keywords, seed_url), "simulated": True})
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not seed_keywords and not seed_url:
+            self._send_json(400, {"error": "Escribe al menos una keyword semilla o una URL."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            result = google_ads_client.fetch_keyword_ideas(
+                customer_id, seed_keywords=seed_keywords or None, seed_url=seed_url,
+                geo_resource_names=geo_resource_names or None, language_resource_name=language_resource_name,
+                network=network, include_adult=include_adult,
+            )
+            self._send_json(200, {**result, "simulated": False})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    def _handle_keyword_planner_historical(self, payload):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        customer_id = str(payload.get("customer_id") or "").strip()
+        keywords = [str(k).strip() for k in (payload.get("keywords") or []) if str(k).strip()]
+        geo_resource_names = payload.get("geo_resource_names") or []
+        language_resource_name = str(payload.get("language_resource_name") or "").strip() or None
+        network = str(payload.get("network") or "GOOGLE_SEARCH_AND_PARTNERS")
+        include_adult = bool(payload.get("include_adult", False))
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, {**google_ads_client.simulated_keyword_historical_metrics(keywords), "simulated": True})
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not keywords:
+            self._send_json(400, {"error": "Escribe al menos una keyword."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            result = google_ads_client.fetch_keyword_historical_metrics(
+                customer_id, keywords, geo_resource_names=geo_resource_names or None,
+                language_resource_name=language_resource_name, network=network, include_adult=include_adult,
+            )
+            self._send_json(200, {**result, "simulated": False})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    def _handle_keyword_planner_forecast(self, payload):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        customer_id = str(payload.get("customer_id") or "").strip()
+        keywords = [str(k).strip() for k in (payload.get("keywords") or []) if str(k).strip()]
+        match_type = str(payload.get("match_type") or "BROAD")
+        geo_resource_names = payload.get("geo_resource_names") or []
+        language_resource_names = payload.get("language_resource_names") or []
+        bidding_mode = str(payload.get("bidding_mode") or "")
+        start_date = str(payload.get("start_date") or "")
+        end_date = str(payload.get("end_date") or "")
+        daily_budget = payload.get("daily_budget")
+        max_cpc_bid = payload.get("max_cpc_bid")
+        daily_target_spend = payload.get("daily_target_spend")
+        max_cpc_bid_ceiling = payload.get("max_cpc_bid_ceiling")
+        currency_code = str(payload.get("currency_code") or "").strip() or None
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, {
+                **google_ads_client.simulated_keyword_forecast(
+                    keywords, bidding_mode, start_date, end_date,
+                    daily_budget=daily_budget, max_cpc_bid=max_cpc_bid,
+                    daily_target_spend=daily_target_spend, max_cpc_bid_ceiling=max_cpc_bid_ceiling,
+                ),
+                "simulated": True,
+            })
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not keywords:
+            self._send_json(400, {"error": "Escribe al menos una keyword."})
+            return
+        if not start_date or not end_date:
+            self._send_json(400, {"error": "Falta el rango de fechas del pronóstico."})
+            return
+        if bidding_mode not in ("MANUAL_CPC", "MAXIMIZE_CLICKS", "MAXIMIZE_CONVERSIONS"):
+            self._send_json(400, {"error": "Estrategia de puja inválida."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            result = google_ads_client.fetch_keyword_forecast(
+                customer_id, keywords, match_type, geo_resource_names or [], language_resource_names or [],
+                bidding_mode, start_date, end_date,
+                daily_budget=daily_budget, max_cpc_bid=max_cpc_bid,
+                daily_target_spend=daily_target_spend, max_cpc_bid_ceiling=max_cpc_bid_ceiling,
+                currency_code=currency_code,
+            )
+            self._send_json(200, {**result, "simulated": False})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)
 

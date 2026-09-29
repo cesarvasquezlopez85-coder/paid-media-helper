@@ -217,6 +217,47 @@ const state = {
     },
   },
 
+  // Planificador de palabras clave — Ideas, Histórico, y Pronóstico
+  // (KeywordPlanIdeaService). Todo de solo lectura, nada escribe en la
+  // cuenta — no hay vista previa/confirmar acá, a diferencia de ROAS/
+  // Negativización/IA Max/Exclusiones de contenido. Performance Planner (la
+  // curva de presupuesto vs. conversiones de campañas YA activas) no tiene
+  // API pública — esto es lo más cercano que sí existe.
+  keywordPlanner: {
+    tab: 'ideas', // 'ideas' | 'historico' | 'pronostico'
+    api: {
+      statusChecked: false, configured: false,
+      accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
+      simulated: false, error: null,
+    },
+    // Geo e idioma se comparten entre las 3 pestañas — se buscan por nombre
+    // (SuggestGeoTargetConstants) en vez de escribir IDs a mano.
+    geo: {
+      query: '', status: 'idle', results: [], selected: [], error: null,
+    },
+    languages: {
+      status: 'idle', list: [], selectedResourceName: '', error: null,
+    },
+    network: 'GOOGLE_SEARCH_AND_PARTNERS', // GOOGLE_SEARCH | GOOGLE_SEARCH_AND_PARTNERS
+    ideas: {
+      seedKeywords: '', seedUrl: '',
+      status: 'idle', error: null, rows: null, totalSize: 0,
+      sortBy: 'avg_monthly_searches', sortDir: 'desc',
+    },
+    historico: {
+      keywordsText: '',
+      status: 'idle', error: null, rows: null,
+    },
+    // No optimiza nada solo — el usuario elige presupuesto/puja y esto
+    // estima el resultado de ESA combinación puntual (sin curva automática).
+    pronostico: {
+      keywordsText: '', matchType: 'BROAD', biddingMode: 'MAXIMIZE_CONVERSIONS',
+      dailyBudget: '', maxCpcBid: '', dailyTargetSpend: '', maxCpcBidCeiling: '',
+      startDate: '', endDate: '', currencyCode: '',
+      status: 'idle', error: null, result: null,
+    },
+  },
+
   // Solo visible/usable para usuarios con is_admin=1 (el servidor también
   // lo exige en cada endpoint /api/admin/*, esto es solo la UI).
   admin: {
@@ -290,6 +331,10 @@ const PAGE_META = {
   exclusiones: {
     title: 'Exclusiones de contenido',
     caption: 'Excluye categorías de contenido no apto y de apps de toda la cuenta de una vez — aplica sobre todo a Performance Max, Demand Gen, Display y Video; casi no toca Search.',
+  },
+  keywordplanner: {
+    title: 'Planificador de palabras clave',
+    caption: 'Descubre keywords nuevas, revisa su histórico de búsquedas, y pronostica clics/costo/conversiones para una campaña hipotética antes de pitchearla.',
   },
   administracion: {
     title: 'Administración',
@@ -463,6 +508,7 @@ function render() {
   else if (state.page === 'recomendaciones') pageHtml = renderRecsPage();
   else if (state.page === 'iamax') pageHtml = renderIaMaxPage();
   else if (state.page === 'exclusiones') pageHtml = renderContentExclusionsPage();
+  else if (state.page === 'keywordplanner') pageHtml = renderKeywordPlannerPage();
   else if (state.page === 'administracion') pageHtml = renderAdminPage();
   else pageHtml = renderBookPage();
 
@@ -5219,6 +5265,649 @@ function renderContentExclusionsPage() {
 }
 
 // ---------------------------------------------------------------------------
+// Página — Planificador de palabras clave (Ideas, Histórico, Pronóstico)
+// ---------------------------------------------------------------------------
+
+function kwpParseKeywords(text) {
+  return [...new Set((text || '').split(/[\n,]/).map((s) => s.trim()).filter(Boolean))];
+}
+
+const KWP_COMPETITION_LABELS = { LOW: 'Baja', MEDIUM: 'Media', HIGH: 'Alta' };
+function kwpCompetitionBadge(raw) {
+  const label = KWP_COMPETITION_LABELS[raw] || 'N/D';
+  const tone = raw === 'HIGH' ? 'bad' : raw === 'LOW' ? 'good' : 'neutral';
+  return `<span class="delta-badge ${tone}">${label}</span>`;
+}
+function fmtMoneyFromMicros(micros) {
+  if (micros === null || micros === undefined) return 'N/D';
+  return fmtMoney(micros / 1_000_000);
+}
+// A diferencia de fmtInt (que muestra "0" para null), acá null significa
+// "Google no estima esta métrica con esta estrategia de puja" — confirmado
+// contra una cuenta real: CPC manual/maximizar clics trae clics pero no
+// conversiones, maximizar conversiones trae conversiones pero no clics.
+// Mostrar "0" sería engañoso (parece que no va a traer nada, no que la
+// métrica no aplica).
+function fmtIntOrNA(n) {
+  return (n === null || n === undefined) ? 'N/D' : fmtInt(n);
+}
+const KWP_MONTH_LABELS = {
+  JANUARY: 'Ene', FEBRUARY: 'Feb', MARCH: 'Mar', APRIL: 'Abr', MAY: 'May', JUNE: 'Jun',
+  JULY: 'Jul', AUGUST: 'Ago', SEPTEMBER: 'Sep', OCTOBER: 'Oct', NOVEMBER: 'Nov', DECEMBER: 'Dic',
+};
+// Mini gráfica de barras (sin librería, mismo criterio del resto de la app:
+// CSS/HTML puro) con la tendencia mensual de una keyword — el título de
+// cada barra trae el valor exacto al pasar el mouse.
+function kwpTrendBars(volumes) {
+  if (!volumes || !volumes.length) return '<span class="footnote">—</span>';
+  const max = Math.max(1, ...volumes.map((v) => v.monthly_searches || 0));
+  const bars = volumes.map((v) => {
+    const h = Math.max(4, Math.round(((v.monthly_searches || 0) / max) * 36));
+    const label = `${KWP_MONTH_LABELS[v.month] || v.month} ${v.year}: ${fmtInt(v.monthly_searches)}`;
+    return `<div title="${escapeHtml(label)}" style="width:14px;height:${h}px;background:var(--navy-800);border-radius:2px 2px 0 0"></div>`;
+  }).join('');
+  const monthLetters = volumes.map((v) => `<div style="width:14px;font-size:8.5px;text-align:center;color:var(--color-text-muted)">${escapeHtml((KWP_MONTH_LABELS[v.month] || v.month).slice(0, 1))}</div>`).join('');
+  return `
+    <div style="display:flex;align-items:flex-end;gap:3px;height:40px">${bars}</div>
+    <div style="display:flex;gap:3px;margin-top:2px">${monthLetters}</div>`;
+}
+
+// Barra horizontal (mismo patrón que Rendimiento/Oportunidad de ingresos —
+// ver barRowsHtml) con el top de keywords por volumen de búsqueda, para ver
+// de un vistazo las de más oportunidad sin leer toda la tabla. El color de
+// la barra es el mismo de la competencia (rojo=alta, verde=baja).
+const KWP_COMPETITION_BAR_COLOR = { HIGH: 'var(--danger)', MEDIUM: 'var(--navy-800)', LOW: 'var(--ok-text)' };
+function renderKeywordPlannerVolumeChart(rows, title) {
+  if (!rows.length) return '';
+  const top = [...rows].sort((a, b) => (b.avg_monthly_searches || 0) - (a.avg_monthly_searches || 0)).slice(0, 10);
+  const max = Math.max(1, ...top.map((r) => r.avg_monthly_searches || 0));
+  const chartRows = top.map((r) => ({
+    campaign: r.text,
+    width: pctWidth(r.avg_monthly_searches || 0, max),
+    valueLabel: fmtInt(r.avg_monthly_searches),
+    color: KWP_COMPETITION_BAR_COLOR[r.competition] || 'var(--navy-800)',
+  }));
+  return `
+    <div class="card table-panel" style="margin-bottom:20px">
+      <h3 class="dense-chart-title">${escapeHtml(title)}</h3>
+      <div class="bar-rows compact">${barRowsHtml(chartRows)}</div>
+    </div>`;
+}
+
+// Solo limpia RESULTADOS ya traídos de la cuenta anterior (para no
+// mostrarlos pegados a la cuenta nueva, el mismo bug que ya se corrigió en
+// IA Max) — no toca lo que el usuario ya escribió (keywords, fechas,
+// presupuesto), que sigue siendo válido sin importar qué cuenta elija.
+function resetKeywordPlannerAccountData() {
+  const s = state.keywordPlanner;
+  s.languages = { status: 'idle', list: [], selectedResourceName: '', error: null };
+  s.ideas.status = 'idle'; s.ideas.error = null; s.ideas.rows = null; s.ideas.totalSize = 0;
+  s.historico.status = 'idle'; s.historico.error = null; s.historico.rows = null;
+  s.pronostico.status = 'idle'; s.pronostico.error = null; s.pronostico.result = null;
+}
+
+function ensureKeywordPlannerStatusLoaded() {
+  const a = state.keywordPlanner.api;
+  if (a.statusChecked) return;
+  fetch('/api/google-ads/status')
+    .then((r) => r.json())
+    .then((data) => { a.statusChecked = true; a.configured = !!data.configured; render(); })
+    .catch(() => { a.statusChecked = true; a.configured = false; render(); });
+}
+
+function loadKeywordPlannerAccounts() {
+  const a = state.keywordPlanner.api;
+  a.accountsStatus = 'loading'; a.error = null;
+  render();
+  fetch('/api/google-ads/accounts')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.accounts = data.accounts || [];
+      a.simulated = !!data.simulated;
+      a.accountsStatus = 'ready';
+      render();
+    })
+    .catch((err) => {
+      a.accountsStatus = 'error'; a.error = err.message || String(err);
+      render();
+    });
+}
+
+function keywordPlannerCustomerId() {
+  const a = state.keywordPlanner.api;
+  const manualId = (a.accountIdManual || '').replace(/[^0-9]/g, '');
+  return manualId || a.accountId;
+}
+
+function ensureKeywordPlannerLanguagesLoaded() {
+  const s = state.keywordPlanner;
+  const customerId = keywordPlannerCustomerId();
+  if (s.languages.status !== 'idle') return;
+  if (!s.api.statusChecked) return; // esperar a saber si la API real está configurada
+  // Si la API real está configurada, hace falta elegir cuenta primero; si
+  // no, el servidor siempre responde con datos simulados sin importar el
+  // customer_id, así que no hay que esperar a que s.api.simulated se ponga
+  // en true reactivamente (todavía no pasó ninguna llamada que lo confirme).
+  if (!customerId && s.api.configured) return;
+  s.languages.status = 'loading';
+  const params = new URLSearchParams({ customer_id: customerId || '' });
+  fetch(`/api/google-ads/keyword-planner/languages?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      s.languages.list = data.languages || [];
+      s.languages.status = 'ready';
+      if (!s.languages.selectedResourceName && s.languages.list.length) {
+        const es = s.languages.list.find((l) => l.code === 'es');
+        s.languages.selectedResourceName = (es || s.languages.list[0]).resource_name;
+      }
+      render();
+    })
+    .catch((err) => {
+      s.languages.status = 'error'; s.languages.error = err.message || String(err);
+      render();
+    });
+}
+
+function searchKeywordPlannerGeo() {
+  const g = state.keywordPlanner.geo;
+  if (!g.query.trim()) { g.results = []; render(); return; }
+  g.status = 'loading'; g.error = null;
+  render();
+  const params = new URLSearchParams({ q: g.query.trim() });
+  fetch(`/api/google-ads/keyword-planner/geo-search?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      g.results = data.results || [];
+      g.status = 'ready';
+      render();
+    })
+    .catch((err) => {
+      g.status = 'error'; g.error = err.message || String(err);
+      render();
+    });
+}
+
+function addKeywordPlannerGeo(resourceName, name, canonicalName) {
+  const g = state.keywordPlanner.geo;
+  if (g.selected.some((x) => x.resource_name === resourceName)) return;
+  g.selected.push({ resource_name: resourceName, name, canonical_name: canonicalName });
+  render();
+}
+function removeKeywordPlannerGeo(resourceName) {
+  const g = state.keywordPlanner.geo;
+  g.selected = g.selected.filter((x) => x.resource_name !== resourceName);
+  render();
+}
+
+function fetchKeywordIdeas() {
+  const s = state.keywordPlanner;
+  const i = s.ideas;
+  const customerId = keywordPlannerCustomerId();
+  const seedKeywords = kwpParseKeywords(i.seedKeywords);
+  const seedUrl = i.seedUrl.trim();
+  if (!seedKeywords.length && !seedUrl) { i.error = 'Escribe al menos una keyword semilla o una URL.'; render(); return; }
+  if (!customerId && !s.api.simulated) { i.error = 'Elige una cuenta primero.'; render(); return; }
+
+  i.status = 'loading'; i.error = null;
+  render();
+  fetch('/api/google-ads/keyword-planner/ideas', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customer_id: customerId,
+      seed_keywords: seedKeywords,
+      seed_url: seedUrl || null,
+      geo_resource_names: s.geo.selected.map((g) => g.resource_name),
+      language_resource_name: s.languages.selectedResourceName || null,
+      network: s.network,
+    }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      s.api.simulated = !!data.simulated;
+      i.rows = data.rows || [];
+      i.totalSize = data.total_size || i.rows.length;
+      i.status = 'ready';
+      render();
+    })
+    .catch((err) => {
+      i.status = 'error'; i.error = err.message || String(err);
+      render();
+    });
+}
+
+const KWP_IDEAS_SORT_KEYS = {
+  text: (r) => r.text.toLowerCase(),
+  avg_monthly_searches: (r) => r.avg_monthly_searches || 0,
+  competition_index: (r) => r.competition_index || 0,
+  low_bid: (r) => r.low_top_of_page_bid_micros || 0,
+  high_bid: (r) => r.high_top_of_page_bid_micros || 0,
+};
+function getKeywordIdeasSorted() {
+  const i = state.keywordPlanner.ideas;
+  const rows = [...(i.rows || [])];
+  const keyFn = KWP_IDEAS_SORT_KEYS[i.sortBy] || KWP_IDEAS_SORT_KEYS.avg_monthly_searches;
+  const dir = i.sortDir === 'desc' ? -1 : 1;
+  if (i.sortBy === 'text') {
+    rows.sort((a, b) => dir * keyFn(a).localeCompare(keyFn(b)));
+  } else {
+    rows.sort((a, b) => dir * (keyFn(a) - keyFn(b)));
+  }
+  return rows;
+}
+function kwpIdeasSortTh(label, key) {
+  const i = state.keywordPlanner.ideas;
+  const active = i.sortBy === key;
+  const arrow = active ? (i.sortDir === 'desc' ? ' ▼' : ' ▲') : '';
+  return `<th data-kwp-ideas-sort="${key}" style="cursor:pointer;user-select:none${active ? ';color:var(--color-text-heading)' : ''}">${escapeHtml(label)}${arrow}</th>`;
+}
+
+function fetchKeywordHistorical() {
+  const s = state.keywordPlanner;
+  const h = s.historico;
+  const customerId = keywordPlannerCustomerId();
+  const keywords = kwpParseKeywords(h.keywordsText);
+  if (!keywords.length) { h.error = 'Escribe al menos una keyword.'; render(); return; }
+  if (!customerId && !s.api.simulated) { h.error = 'Elige una cuenta primero.'; render(); return; }
+
+  h.status = 'loading'; h.error = null;
+  render();
+  fetch('/api/google-ads/keyword-planner/historical', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customer_id: customerId,
+      keywords,
+      geo_resource_names: s.geo.selected.map((g) => g.resource_name),
+      language_resource_name: s.languages.selectedResourceName || null,
+      network: s.network,
+    }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      s.api.simulated = !!data.simulated;
+      h.rows = data.rows || [];
+      h.status = 'ready';
+      render();
+    })
+    .catch((err) => {
+      h.status = 'error'; h.error = err.message || String(err);
+      render();
+    });
+}
+
+function fetchKeywordForecast() {
+  const s = state.keywordPlanner;
+  const p = s.pronostico;
+  const customerId = keywordPlannerCustomerId();
+  const keywords = kwpParseKeywords(p.keywordsText);
+  if (!keywords.length) { p.error = 'Escribe al menos una keyword.'; render(); return; }
+  if (!p.startDate || !p.endDate) { p.error = 'Elige el rango de fechas del pronóstico.'; render(); return; }
+  if (p.biddingMode === 'MANUAL_CPC' && !p.maxCpcBid) { p.error = 'Falta la puja máxima de CPC.'; render(); return; }
+  if (p.biddingMode !== 'MANUAL_CPC' && !p.dailyTargetSpend) { p.error = 'Falta el gasto objetivo diario.'; render(); return; }
+  if (!customerId && !s.api.simulated) { p.error = 'Elige una cuenta primero.'; render(); return; }
+
+  p.status = 'loading'; p.error = null;
+  render();
+  fetch('/api/google-ads/keyword-planner/forecast', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customer_id: customerId,
+      keywords,
+      match_type: p.matchType,
+      geo_resource_names: s.geo.selected.map((g) => g.resource_name),
+      language_resource_names: s.languages.selectedResourceName ? [s.languages.selectedResourceName] : [],
+      bidding_mode: p.biddingMode,
+      start_date: p.startDate,
+      end_date: p.endDate,
+      daily_budget: p.dailyBudget || null,
+      max_cpc_bid: p.maxCpcBid || null,
+      daily_target_spend: p.dailyTargetSpend || null,
+      max_cpc_bid_ceiling: p.maxCpcBidCeiling || null,
+      currency_code: p.currencyCode || null,
+    }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      s.api.simulated = !!data.simulated;
+      p.result = data;
+      p.status = 'ready';
+      render();
+    })
+    .catch((err) => {
+      p.status = 'error'; p.error = err.message || String(err);
+      render();
+    });
+}
+
+function renderKeywordPlannerApiPanel() {
+  const a = state.keywordPlanner.api;
+
+  if (!a.statusChecked) {
+    return `<div class="field"><p class="footnote">Consultando la conexión con Google Ads…</p></div>`;
+  }
+
+  const simulatedNotice = a.simulated ? `
+    <div class="ok-panel" style="margin:10px 0">
+      <strong>Modo simulado.</strong> La API de Google Ads todavía no está configurada en el servidor
+      (falta la aprobación del developer token de Google) — estos son datos de ejemplo, no de una cuenta real.
+    </div>` : '';
+
+  if (a.accountsStatus === 'idle') {
+    return `
+      <div class="card control-panel align-end">
+        <div class="field">
+          <p class="footnote">${a.configured ? 'Conectado a la API de Google Ads.' : 'La API de Google Ads aún no está configurada — se usarán datos simulados para probar el flujo.'}</p>
+          <button class="btn-outline" data-action="kwp-api-load-accounts">Ver cuentas disponibles</button>
+        </div>
+      </div>`;
+  }
+  if (a.accountsStatus === 'loading') {
+    return `<div class="card control-panel align-end"><div class="field"><p class="footnote">Cargando cuentas…</p></div></div>`;
+  }
+  if (a.accountsStatus === 'error') {
+    return `<div class="error-panel"><strong>No se pudieron cargar las cuentas.</strong> ${escapeHtml(a.error)}</div>`;
+  }
+
+  const accountOptions = ['<option value="">Elige una cuenta…</option>']
+    .concat(a.accounts.map((acc) => `<option value="${escapeHtml(acc.id)}" ${a.accountId === acc.id ? 'selected' : ''}>${escapeHtml(acc.name)} (${escapeHtml(acc.id)})</option>`))
+    .join('');
+
+  return `
+    <div class="card control-panel align-end">
+      ${simulatedNotice}
+      <div class="field">
+        <label>Cuenta</label>
+        <select id="kwp-api-account" style="width:320px">${accountOptions}</select>
+      </div>
+      <div class="field">
+        <label>...o escribe el ID de la cuenta</label>
+        <input type="text" id="kwp-api-account-manual" value="${escapeHtml(a.accountIdManual)}" placeholder="ej. 6862893390" style="width:160px" />
+      </div>
+      ${a.error ? `<div class="error-panel" style="margin-top:10px">${escapeHtml(a.error)}</div>` : ''}
+    </div>`;
+}
+
+function renderKeywordPlannerGeoLangPanel() {
+  const s = state.keywordPlanner;
+  const g = s.geo;
+  ensureKeywordPlannerLanguagesLoaded();
+
+  const geoResultsHtml = g.results.length ? `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0">
+      ${g.results.map((r) => `<button class="btn-outline xs" data-kwp-geo-add="${escapeHtml(r.resource_name)}" data-kwp-geo-name="${escapeHtml(r.name)}" data-kwp-geo-canonical="${escapeHtml(r.canonical_name || r.name)}">+ ${escapeHtml(r.canonical_name || r.name)}</button>`).join('')}
+    </div>` : (g.status === 'ready' ? '<p class="footnote">Sin resultados para esa búsqueda.</p>' : '');
+
+  const selectedHtml = g.selected.length ? `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+      ${g.selected.map((sel) => `<span class="delta-badge good" style="display:inline-flex;align-items:center;gap:6px">${escapeHtml(sel.canonical_name || sel.name)} <button data-kwp-geo-remove="${escapeHtml(sel.resource_name)}" style="border:none;background:none;cursor:pointer;color:inherit;font-weight:700">×</button></span>`).join('')}
+    </div>` : `<p class="footnote" style="margin-top:8px">Sin geo-segmentación — Google usará su alcance por defecto (todo el mundo).</p>`;
+
+  const languageOptions = ['<option value="">(automático)</option>']
+    .concat((s.languages.list || []).map((l) => `<option value="${escapeHtml(l.resource_name)}" ${s.languages.selectedResourceName === l.resource_name ? 'selected' : ''}>${escapeHtml(l.name)}</option>`))
+    .join('');
+
+  return `
+    <div class="card control-panel" style="margin-bottom:20px">
+      <div class="field">
+        <label>Buscar geo-segmentación (país, ciudad, región)</label>
+        <div style="display:flex;gap:8px">
+          <input type="text" id="kwp-geo-query" value="${escapeHtml(g.query)}" placeholder="ej. Colombia, Bogotá" style="width:260px" />
+          <button class="btn-outline sm" data-action="kwp-geo-search" ${g.status === 'loading' ? 'disabled' : ''}>Buscar</button>
+        </div>
+        ${g.error ? `<div class="error-panel" style="margin-top:8px">${escapeHtml(g.error)}</div>` : ''}
+        ${geoResultsHtml}
+        ${selectedHtml}
+      </div>
+      <div class="field" style="margin-top:14px">
+        <label>Idioma</label>
+        <select id="kwp-language-select" style="width:260px">${languageOptions}</select>
+      </div>
+      <div class="field" style="margin-top:14px">
+        <label>Red</label>
+        <div class="seg-control">
+          <button class="seg-btn ${s.network === 'GOOGLE_SEARCH' ? 'active' : ''}" data-action="kwp-network-search">Solo Google Search</button>
+          <button class="seg-btn ${s.network === 'GOOGLE_SEARCH_AND_PARTNERS' ? 'active' : ''}" data-action="kwp-network-partners">Search + Partners</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderKeywordPlannerIdeasTab() {
+  const i = state.keywordPlanner.ideas;
+  return `
+    <div class="card table-panel" style="margin-bottom:20px">
+      <h3 class="dense-chart-title">Descubre nuevas palabras clave</h3>
+      <p style="margin:0 0 12px;font-size:12.5px;color:var(--color-text-muted)">Escribe keywords semilla (una por línea), una URL, o ambas — Google sugiere ideas relacionadas con volumen de búsqueda y competencia.</p>
+      <div class="field" style="margin-bottom:10px">
+        <label>Keywords semilla (una por línea)</label>
+        <textarea id="kwp-ideas-seed-keywords" rows="4" style="width:100%;font-family:inherit" placeholder="hotel en cartagena&#10;hoteles todo incluido">${escapeHtml(i.seedKeywords)}</textarea>
+      </div>
+      <div class="field" style="margin-bottom:12px">
+        <label>...o una URL (landing, sitio del cliente)</label>
+        <input type="text" id="kwp-ideas-seed-url" value="${escapeHtml(i.seedUrl)}" placeholder="https://..." style="width:100%" />
+      </div>
+      <button class="btn-accent" data-action="kwp-ideas-fetch" ${i.status === 'loading' ? 'disabled' : ''}>Buscar ideas</button>
+      ${i.error ? `<div class="error-panel" style="margin-top:10px">${escapeHtml(i.error)}</div>` : ''}
+    </div>
+    ${renderKeywordPlannerIdeasResults()}`;
+}
+
+function renderKeywordPlannerIdeasResults() {
+  const i = state.keywordPlanner.ideas;
+  if (i.status === 'loading') {
+    return `<div class="card state-panel loading"><div class="spinner"></div><p>Buscando ideas…</p></div>`;
+  }
+  if (i.rows === null) return '';
+  if (!i.rows.length) {
+    return `<div class="ok-panel">Sin resultados para esta búsqueda.</div>`;
+  }
+  const rows = getKeywordIdeasSorted();
+  const rowsHtml = rows.map((r) => `
+    <tr>
+      <td>${escapeHtml(r.text)}</td>
+      <td>${fmtInt(r.avg_monthly_searches)}</td>
+      <td>${kwpCompetitionBadge(r.competition)}</td>
+      <td>${r.competition_index !== null && r.competition_index !== undefined ? r.competition_index : 'N/D'}</td>
+      <td>${fmtMoneyFromMicros(r.low_top_of_page_bid_micros)}</td>
+      <td>${fmtMoneyFromMicros(r.high_top_of_page_bid_micros)}</td>
+    </tr>`).join('');
+  return `
+    ${renderKeywordPlannerVolumeChart(rows, 'Top 10 por volumen de búsqueda')}
+    <div class="card table-panel">
+      <div class="table-panel-head">
+        <h3>Ideas (${rows.length}${i.totalSize > rows.length ? ` de ${fmtInt(i.totalSize)}` : ''})</h3>
+        <button class="btn-outline sm" data-action="download-kwp-ideas">Descargar CSV</button>
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr>
+            ${kwpIdeasSortTh('Keyword', 'text')}
+            ${kwpIdeasSortTh('Búsquedas prom./mes', 'avg_monthly_searches')}
+            <th>Competencia</th>
+            ${kwpIdeasSortTh('Índice', 'competition_index')}
+            ${kwpIdeasSortTh('Puja baja', 'low_bid')}
+            ${kwpIdeasSortTh('Puja alta', 'high_bid')}
+          </tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>
+      <p class="footnote" style="margin-top:14px">Puja baja/alta = rango estimado para aparecer arriba de la página de resultados, no lo que vas a pagar necesariamente.</p>
+    </div>`;
+}
+
+function renderKeywordPlannerHistoricoTab() {
+  const h = state.keywordPlanner.historico;
+  let resultsHtml = '';
+  if (h.status === 'loading') {
+    resultsHtml = `<div class="card state-panel loading"><div class="spinner"></div><p>Trayendo histórico…</p></div>`;
+  } else if (h.rows !== null) {
+    if (!h.rows.length) {
+      resultsHtml = `<div class="ok-panel">Sin datos históricos para estas keywords.</div>`;
+    } else {
+      const rowsHtml = h.rows.map((r) => `
+        <tr>
+          <td>${escapeHtml(r.text)}</td>
+          <td>${fmtInt(r.avg_monthly_searches)}</td>
+          <td>${kwpCompetitionBadge(r.competition)}</td>
+          <td>${fmtMoneyFromMicros(r.low_top_of_page_bid_micros)}</td>
+          <td>${fmtMoneyFromMicros(r.high_top_of_page_bid_micros)}</td>
+          <td>${kwpTrendBars(r.monthly_search_volumes)}</td>
+        </tr>`).join('');
+      resultsHtml = `
+        <div class="card table-panel">
+          <div class="table-panel-head">
+            <h3>Histórico (${h.rows.length})</h3>
+            <button class="btn-outline sm" data-action="download-kwp-historico">Descargar CSV</button>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th>Keyword</th><th>Búsquedas prom./mes</th><th>Competencia</th><th>Puja baja</th><th>Puja alta</th><th>Tendencia mensual</th></tr></thead>
+              <tbody>${rowsHtml}</tbody>
+            </table>
+          </div>
+        </div>`;
+    }
+  }
+  return `
+    <div class="card table-panel" style="margin-bottom:20px">
+      <h3 class="dense-chart-title">Métricas históricas</h3>
+      <p style="margin:0 0 12px;font-size:12.5px;color:var(--color-text-muted)">Pega las keywords que ya tienes (una por línea) para ver su volumen de búsqueda mes a mes de los últimos 12 meses.</p>
+      <div class="field" style="margin-bottom:12px">
+        <label>Keywords (una por línea)</label>
+        <textarea id="kwp-historico-keywords" rows="5" style="width:100%;font-family:inherit" placeholder="hotel en cartagena&#10;hoteles todo incluido cartagena">${escapeHtml(h.keywordsText)}</textarea>
+      </div>
+      <button class="btn-accent" data-action="kwp-historico-fetch" ${h.status === 'loading' ? 'disabled' : ''}>Traer histórico</button>
+      ${h.error ? `<div class="error-panel" style="margin-top:10px">${escapeHtml(h.error)}</div>` : ''}
+    </div>
+    ${resultsHtml}`;
+}
+
+function renderKeywordPlannerPronosticoTab() {
+  const p = state.keywordPlanner.pronostico;
+  const biddingFieldsHtml = p.biddingMode === 'MANUAL_CPC' ? `
+      <div class="field">
+        <label>Presupuesto diario (opcional)</label>
+        <input type="number" id="kwp-pronostico-daily-budget" value="${escapeHtml(p.dailyBudget)}" placeholder="ej. 50000" style="width:160px" />
+      </div>
+      <div class="field">
+        <label>Puja máxima de CPC</label>
+        <input type="number" id="kwp-pronostico-max-cpc" value="${escapeHtml(p.maxCpcBid)}" placeholder="ej. 1500" style="width:160px" />
+      </div>` : `
+      <div class="field">
+        <label>Gasto objetivo diario</label>
+        <input type="number" id="kwp-pronostico-daily-target" value="${escapeHtml(p.dailyTargetSpend)}" placeholder="ej. 50000" style="width:160px" />
+      </div>
+      ${p.biddingMode === 'MAXIMIZE_CLICKS' ? `
+      <div class="field">
+        <label>Techo de puja CPC (opcional)</label>
+        <input type="number" id="kwp-pronostico-max-cpc-ceiling" value="${escapeHtml(p.maxCpcBidCeiling)}" placeholder="ej. 1500" style="width:160px" />
+      </div>` : ''}`;
+
+  let resultHtml = '';
+  if (p.status === 'loading') {
+    resultHtml = `<div class="card state-panel loading"><div class="spinner"></div><p>Generando pronóstico…</p></div>`;
+  } else if (p.status === 'ready' && p.result) {
+    const r = p.result;
+    resultHtml = `
+      <div class="card table-panel">
+        <div class="table-panel-head">
+          <h3>Pronóstico estimado</h3>
+          <button class="btn-outline sm" data-action="download-kwp-pronostico">Descargar CSV</button>
+        </div>
+        <div class="stat-grid">
+          <div class="card stat-card"><div class="stat-label">Clics</div><div class="stat-value">${fmtIntOrNA(r.clicks)}</div></div>
+          <div class="card stat-card"><div class="stat-label">Costo</div><div class="stat-value">${fmtMoneyFromMicros(r.cost_micros)}</div></div>
+          <div class="card stat-card"><div class="stat-label">Conversiones</div><div class="stat-value">${fmtIntOrNA(r.conversions)}</div></div>
+          <div class="card stat-card"><div class="stat-label">CPC promedio</div><div class="stat-value">${fmtMoneyFromMicros(r.average_cpc_micros)}</div></div>
+          <div class="card stat-card"><div class="stat-label">CPA promedio</div><div class="stat-value">${fmtMoneyFromMicros(r.average_cpa_micros)}</div></div>
+        </div>
+        <p class="footnote" style="margin-top:14px">Estimado para ESTA combinación puntual de keywords, geo, presupuesto y estrategia — no es una curva ni una optimización automática (Performance Planner no tiene API pública). "N/D" = Google no estima esa métrica con la estrategia de puja elegida (ej. "Maximizar conversiones" no estima clics, "CPC manual" no estima conversiones).</p>
+      </div>`;
+  }
+
+  return `
+    <div class="card table-panel" style="margin-bottom:20px">
+      <h3 class="dense-chart-title">Pronóstico</h3>
+      <p style="margin:0 0 12px;font-size:12.5px;color:var(--color-text-muted)">Arma una campaña hipotética con estas keywords y una estrategia de puja, y estima clics/costo/conversiones para el rango de fechas elegido.</p>
+      <div class="field" style="margin-bottom:12px">
+        <label>Keywords (una por línea)</label>
+        <textarea id="kwp-pronostico-keywords" rows="4" style="width:100%;font-family:inherit" placeholder="hotel en cartagena&#10;hoteles todo incluido cartagena">${escapeHtml(p.keywordsText)}</textarea>
+      </div>
+      <div class="control-panel align-end" style="margin-bottom:12px;padding:0">
+        <div class="field">
+          <label>Concordancia</label>
+          <select id="kwp-pronostico-match-type" style="width:160px">
+            <option value="BROAD" ${p.matchType === 'BROAD' ? 'selected' : ''}>Amplia</option>
+            <option value="PHRASE" ${p.matchType === 'PHRASE' ? 'selected' : ''}>Frase</option>
+            <option value="EXACT" ${p.matchType === 'EXACT' ? 'selected' : ''}>Exacta</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Estrategia de puja</label>
+          <select id="kwp-pronostico-bidding-mode" style="width:220px">
+            <option value="MAXIMIZE_CONVERSIONS" ${p.biddingMode === 'MAXIMIZE_CONVERSIONS' ? 'selected' : ''}>Maximizar conversiones</option>
+            <option value="MAXIMIZE_CLICKS" ${p.biddingMode === 'MAXIMIZE_CLICKS' ? 'selected' : ''}>Maximizar clics</option>
+            <option value="MANUAL_CPC" ${p.biddingMode === 'MANUAL_CPC' ? 'selected' : ''}>CPC manual</option>
+          </select>
+        </div>
+        ${biddingFieldsHtml}
+        <div class="field">
+          <label>Desde</label>
+          <input type="date" id="kwp-pronostico-start-date" value="${escapeHtml(p.startDate)}" style="width:160px" />
+        </div>
+        <div class="field">
+          <label>Hasta</label>
+          <input type="date" id="kwp-pronostico-end-date" value="${escapeHtml(p.endDate)}" style="width:160px" />
+        </div>
+        <div class="field">
+          <label>Moneda (opcional)</label>
+          <input type="text" id="kwp-pronostico-currency" value="${escapeHtml(p.currencyCode)}" placeholder="ej. COP" style="width:100px" />
+        </div>
+      </div>
+      <button class="btn-accent" data-action="kwp-pronostico-fetch" ${p.status === 'loading' ? 'disabled' : ''}>Generar pronóstico</button>
+      ${p.error ? `<div class="error-panel" style="margin-top:10px">${escapeHtml(p.error)}</div>` : ''}
+    </div>
+    ${resultHtml}`;
+}
+
+function renderKeywordPlannerPage() {
+  const s = state.keywordPlanner;
+  ensureKeywordPlannerStatusLoaded();
+
+  if (!s.pronostico.startDate) {
+    const today = new Date();
+    const in30 = new Date(today.getTime() + 30 * 24 * 60 * 60 * 1000);
+    s.pronostico.startDate = today.toISOString().slice(0, 10);
+    s.pronostico.endDate = in30.toISOString().slice(0, 10);
+  }
+
+  const controlPanel = renderKeywordPlannerApiPanel();
+  const geoLangPanel = renderKeywordPlannerGeoLangPanel();
+
+  const tabs = `
+    <div class="seg-control" style="margin-bottom:20px">
+      <button class="seg-btn ${s.tab === 'ideas' ? 'active' : ''}" data-action="kwp-tab-ideas">Descubre keywords</button>
+      <button class="seg-btn ${s.tab === 'historico' ? 'active' : ''}" data-action="kwp-tab-historico">Histórico</button>
+      <button class="seg-btn ${s.tab === 'pronostico' ? 'active' : ''}" data-action="kwp-tab-pronostico">Pronóstico</button>
+    </div>`;
+
+  let body = '';
+  if (s.tab === 'ideas') body = renderKeywordPlannerIdeasTab();
+  else if (s.tab === 'historico') body = renderKeywordPlannerHistoricoTab();
+  else body = renderKeywordPlannerPronosticoTab();
+
+  return `${controlPanel}${geoLangPanel}${tabs}${body}`;
+}
+
+// ---------------------------------------------------------------------------
 // Página — Administración (solo is_admin)
 // ---------------------------------------------------------------------------
 
@@ -5836,6 +6525,69 @@ function bindEvents() {
     });
   });
 
+  // Planificador de palabras clave
+  const kwpApiAccount = document.getElementById('kwp-api-account');
+  if (kwpApiAccount) kwpApiAccount.addEventListener('change', (e) => {
+    state.keywordPlanner.api.accountId = e.target.value;
+    resetKeywordPlannerAccountData();
+    render();
+  });
+  const kwpApiAccountManual = document.getElementById('kwp-api-account-manual');
+  if (kwpApiAccountManual) kwpApiAccountManual.addEventListener('input', (e) => {
+    state.keywordPlanner.api.accountIdManual = e.target.value;
+    resetKeywordPlannerAccountData();
+  });
+  const kwpGeoQuery = document.getElementById('kwp-geo-query');
+  if (kwpGeoQuery) kwpGeoQuery.addEventListener('input', (e) => { state.keywordPlanner.geo.query = e.target.value; });
+  document.querySelectorAll('[data-kwp-geo-add]').forEach((btn) => {
+    btn.addEventListener('click', () => addKeywordPlannerGeo(btn.dataset.kwpGeoAdd, btn.dataset.kwpGeoName, btn.dataset.kwpGeoCanonical));
+  });
+  document.querySelectorAll('[data-kwp-geo-remove]').forEach((btn) => {
+    btn.addEventListener('click', () => removeKeywordPlannerGeo(btn.dataset.kwpGeoRemove));
+  });
+  const kwpLanguageSelect = document.getElementById('kwp-language-select');
+  if (kwpLanguageSelect) kwpLanguageSelect.addEventListener('change', (e) => {
+    state.keywordPlanner.languages.selectedResourceName = e.target.value;
+  });
+  const kwpIdeasSeedKeywords = document.getElementById('kwp-ideas-seed-keywords');
+  if (kwpIdeasSeedKeywords) kwpIdeasSeedKeywords.addEventListener('input', (e) => { state.keywordPlanner.ideas.seedKeywords = e.target.value; });
+  const kwpIdeasSeedUrl = document.getElementById('kwp-ideas-seed-url');
+  if (kwpIdeasSeedUrl) kwpIdeasSeedUrl.addEventListener('input', (e) => { state.keywordPlanner.ideas.seedUrl = e.target.value; });
+  document.querySelectorAll('[data-kwp-ideas-sort]').forEach((th) => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.kwpIdeasSort;
+      const i = state.keywordPlanner.ideas;
+      if (i.sortBy === key) i.sortDir = i.sortDir === 'desc' ? 'asc' : 'desc';
+      else { i.sortBy = key; i.sortDir = 'desc'; }
+      render();
+    });
+  });
+  const kwpHistoricoKeywords = document.getElementById('kwp-historico-keywords');
+  if (kwpHistoricoKeywords) kwpHistoricoKeywords.addEventListener('input', (e) => { state.keywordPlanner.historico.keywordsText = e.target.value; });
+  const kwpPronosticoKeywords = document.getElementById('kwp-pronostico-keywords');
+  if (kwpPronosticoKeywords) kwpPronosticoKeywords.addEventListener('input', (e) => { state.keywordPlanner.pronostico.keywordsText = e.target.value; });
+  const kwpPronosticoMatchType = document.getElementById('kwp-pronostico-match-type');
+  if (kwpPronosticoMatchType) kwpPronosticoMatchType.addEventListener('change', (e) => { state.keywordPlanner.pronostico.matchType = e.target.value; });
+  const kwpPronosticoBiddingMode = document.getElementById('kwp-pronostico-bidding-mode');
+  if (kwpPronosticoBiddingMode) kwpPronosticoBiddingMode.addEventListener('change', (e) => {
+    state.keywordPlanner.pronostico.biddingMode = e.target.value;
+    render();
+  });
+  const kwpPronosticoDailyBudget = document.getElementById('kwp-pronostico-daily-budget');
+  if (kwpPronosticoDailyBudget) kwpPronosticoDailyBudget.addEventListener('input', (e) => { state.keywordPlanner.pronostico.dailyBudget = e.target.value; });
+  const kwpPronosticoMaxCpc = document.getElementById('kwp-pronostico-max-cpc');
+  if (kwpPronosticoMaxCpc) kwpPronosticoMaxCpc.addEventListener('input', (e) => { state.keywordPlanner.pronostico.maxCpcBid = e.target.value; });
+  const kwpPronosticoDailyTarget = document.getElementById('kwp-pronostico-daily-target');
+  if (kwpPronosticoDailyTarget) kwpPronosticoDailyTarget.addEventListener('input', (e) => { state.keywordPlanner.pronostico.dailyTargetSpend = e.target.value; });
+  const kwpPronosticoMaxCpcCeiling = document.getElementById('kwp-pronostico-max-cpc-ceiling');
+  if (kwpPronosticoMaxCpcCeiling) kwpPronosticoMaxCpcCeiling.addEventListener('input', (e) => { state.keywordPlanner.pronostico.maxCpcBidCeiling = e.target.value; });
+  const kwpPronosticoStartDate = document.getElementById('kwp-pronostico-start-date');
+  if (kwpPronosticoStartDate) kwpPronosticoStartDate.addEventListener('input', (e) => { state.keywordPlanner.pronostico.startDate = e.target.value; });
+  const kwpPronosticoEndDate = document.getElementById('kwp-pronostico-end-date');
+  if (kwpPronosticoEndDate) kwpPronosticoEndDate.addEventListener('input', (e) => { state.keywordPlanner.pronostico.endDate = e.target.value; });
+  const kwpPronosticoCurrency = document.getElementById('kwp-pronostico-currency');
+  if (kwpPronosticoCurrency) kwpPronosticoCurrency.addEventListener('input', (e) => { state.keywordPlanner.pronostico.currencyCode = e.target.value; });
+
   document.querySelectorAll('[data-opp-sort]').forEach((th) => {
     th.addEventListener('click', () => {
       const key = th.dataset.oppSort;
@@ -6191,6 +6943,66 @@ function handleAction(action) {
     case 'exclusiones-remove-cancel': {
       state.contentExclusions.remove = { resourceName: null, status: 'idle', error: null, preview: null, result: null };
       render();
+      break;
+    }
+
+    case 'kwp-api-load-accounts': loadKeywordPlannerAccounts(); break;
+    case 'kwp-geo-search': searchKeywordPlannerGeo(); break;
+    case 'kwp-network-search': state.keywordPlanner.network = 'GOOGLE_SEARCH'; render(); break;
+    case 'kwp-network-partners': state.keywordPlanner.network = 'GOOGLE_SEARCH_AND_PARTNERS'; render(); break;
+    case 'kwp-tab-ideas': state.keywordPlanner.tab = 'ideas'; render(); break;
+    case 'kwp-tab-historico': state.keywordPlanner.tab = 'historico'; render(); break;
+    case 'kwp-tab-pronostico': state.keywordPlanner.tab = 'pronostico'; render(); break;
+    case 'kwp-ideas-fetch': fetchKeywordIdeas(); break;
+    case 'kwp-historico-fetch': fetchKeywordHistorical(); break;
+    case 'kwp-pronostico-fetch': fetchKeywordForecast(); break;
+
+    case 'download-kwp-ideas': {
+      const rows = getKeywordIdeasSorted();
+      const header = ['Keyword', 'Búsquedas prom./mes', 'Competencia', 'Índice', 'Puja baja', 'Puja alta'];
+      const data = [header, ...rows.map((r) => [
+        r.text, r.avg_monthly_searches || 0, KWP_COMPETITION_LABELS[r.competition] || 'N/D',
+        r.competition_index ?? 'N/D',
+        r.low_top_of_page_bid_micros !== null && r.low_top_of_page_bid_micros !== undefined ? (r.low_top_of_page_bid_micros / 1_000_000).toFixed(2) : 'N/D',
+        r.high_top_of_page_bid_micros !== null && r.high_top_of_page_bid_micros !== undefined ? (r.high_top_of_page_bid_micros / 1_000_000).toFixed(2) : 'N/D',
+      ])];
+      engine.downloadCsv('keyword_planner_ideas.csv', data);
+      break;
+    }
+    case 'download-kwp-historico': {
+      const rows = state.keywordPlanner.historico.rows || [];
+      const months = (rows[0] && rows[0].monthly_search_volumes) || [];
+      const monthHeaders = months.map((v) => `${KWP_MONTH_LABELS[v.month] || v.month} ${v.year}`);
+      const header = ['Keyword', 'Búsquedas prom./mes', 'Competencia', 'Puja baja', 'Puja alta', ...monthHeaders];
+      const data = [header, ...rows.map((r) => [
+        r.text, r.avg_monthly_searches || 0, KWP_COMPETITION_LABELS[r.competition] || 'N/D',
+        r.low_top_of_page_bid_micros !== null && r.low_top_of_page_bid_micros !== undefined ? (r.low_top_of_page_bid_micros / 1_000_000).toFixed(2) : 'N/D',
+        r.high_top_of_page_bid_micros !== null && r.high_top_of_page_bid_micros !== undefined ? (r.high_top_of_page_bid_micros / 1_000_000).toFixed(2) : 'N/D',
+        ...(r.monthly_search_volumes || []).map((v) => v.monthly_searches ?? 0),
+      ])];
+      engine.downloadCsv('keyword_planner_historico.csv', data);
+      break;
+    }
+    case 'download-kwp-pronostico': {
+      const p = state.keywordPlanner.pronostico;
+      const r = p.result;
+      if (!r) break;
+      const header = ['Métrica', 'Valor'];
+      const moneyOrNA = (micros) => (micros === null || micros === undefined) ? 'N/D' : (micros / 1_000_000).toFixed(2);
+      const data = [
+        header,
+        ['Keywords', kwpParseKeywords(p.keywordsText).join(' | ')],
+        ['Concordancia', p.matchType],
+        ['Estrategia de puja', p.biddingMode],
+        ['Desde', p.startDate],
+        ['Hasta', p.endDate],
+        ['Clics', r.clicks ?? 'N/D'],
+        ['Costo', moneyOrNA(r.cost_micros)],
+        ['Conversiones', r.conversions ?? 'N/D'],
+        ['CPC promedio', moneyOrNA(r.average_cpc_micros)],
+        ['CPA promedio', moneyOrNA(r.average_cpa_micros)],
+      ];
+      engine.downloadCsv('keyword_planner_pronostico.csv', data);
       break;
     }
 

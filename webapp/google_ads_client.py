@@ -1207,6 +1207,206 @@ def dismiss_recommendation(customer_id, resource_name):
 
 
 # ---------------------------------------------------------------------------
+# Planificador de palabras clave (Keyword Planner) — Ideas, Histórico, y
+# Pronóstico. A diferencia del resto de la integración, estas no son
+# consultas GAQL sino tres RPCs de KeywordPlanIdeaService
+# (GenerateKeywordIdeas, GenerateKeywordHistoricalMetrics,
+# GenerateKeywordForecastMetrics) más
+# GeoTargetConstantService.SuggestGeoTargetConstants para buscar geos por
+# nombre — todas de solo lectura, no escriben nada en la cuenta. A pedido
+# explícito de cesar (2026-09-29), después de confirmar contra el .proto
+# real que Performance Planner (la curva de presupuesto vs. conversiones de
+# campañas ya activas) NO tiene API pública — esto es lo más cercano que sí
+# existe: un pronóstico puntual para una campaña hipotética, no una
+# optimización automática. Nombres de campo verificados contra los .proto
+# reales de la API v25 antes de escribir esto.
+# ---------------------------------------------------------------------------
+
+def _units_to_micros(v):
+    return None if v in (None, "") else int(round(float(v) * MICROS))
+
+
+def _post_json(url, body):
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Google Ads API respondió {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"No se pudo conectar a la API de Google Ads: {e.reason}") from e
+
+
+def fetch_geo_target_suggestions(query_text):
+    """Busca geo-targets (países, ciudades, regiones) por nombre — recurso
+    global de Google (no depende de una cuenta en particular), pero igual
+    exige autenticarse con un developer token real."""
+    url = f"{BASE_URL}/geoTargetConstants:suggest"
+    body = {"locationNames": {"names": [query_text]}}
+    payload = _post_json(url, body)
+    rows = []
+    for s in payload.get("geoTargetConstantSuggestions", []):
+        g = s.get("geoTargetConstant", {})
+        rows.append({
+            "resource_name": g.get("resourceName"),
+            "name": g.get("name"),
+            "country_code": g.get("countryCode"),
+            "canonical_name": g.get("canonicalName"),
+        })
+    return rows
+
+
+def fetch_targetable_languages(customer_id):
+    """Catálogo de idiomas que se pueden targetear — recurso "constante"
+    (igual que mobile_app_category_constant en Exclusiones de contenido),
+    filtrado a los targeteables."""
+    query = """
+        SELECT language_constant.code, language_constant.name,
+               language_constant.resource_name
+        FROM language_constant
+        WHERE language_constant.targetable = TRUE
+    """
+    results = _search(customer_id, query)
+    rows = []
+    for r in results:
+        lc = r.get("languageConstant", {})
+        name = lc.get("name")
+        resource_name = lc.get("resourceName")
+        if not name or not resource_name:
+            continue
+        rows.append({"resource_name": resource_name, "code": lc.get("code"), "name": name})
+    rows.sort(key=lambda x: x["name"])
+    return rows
+
+
+def _keyword_metrics_from(raw):
+    m = raw.get("keywordIdeaMetrics") or raw.get("keywordMetrics") or {}
+    return {
+        "avg_monthly_searches": _int_or_none(m.get("avgMonthlySearches")),
+        "competition": m.get("competition"),
+        "competition_index": _int_or_none(m.get("competitionIndex")),
+        "low_top_of_page_bid_micros": _int_or_none(m.get("lowTopOfPageBidMicros")),
+        "high_top_of_page_bid_micros": _int_or_none(m.get("highTopOfPageBidMicros")),
+        "monthly_search_volumes": [
+            {
+                "year": _int_or_none(v.get("year")),
+                "month": v.get("month"),
+                "monthly_searches": _int_or_none(v.get("monthlySearches")),
+            }
+            for v in m.get("monthlySearchVolumes", [])
+        ],
+    }
+
+
+def fetch_keyword_ideas(customer_id, seed_keywords=None, seed_url=None, geo_resource_names=None,
+                         language_resource_name=None, network="GOOGLE_SEARCH_AND_PARTNERS",
+                         include_adult=False, page_size=500):
+    """Ideas de palabras clave nuevas a partir de keywords semilla, una URL,
+    o ambas — la pestaña "Descubre nuevas palabras clave" de Keyword
+    Planner. Al menos una de seed_keywords/seed_url debe venir."""
+    body = {
+        "keywordPlanNetwork": network,
+        "includeAdultKeywords": include_adult,
+        "pageSize": page_size,
+    }
+    if geo_resource_names:
+        body["geoTargetConstants"] = geo_resource_names
+    if language_resource_name:
+        body["language"] = language_resource_name
+    if seed_keywords and seed_url:
+        body["keywordAndUrlSeed"] = {"url": seed_url, "keywords": seed_keywords}
+    elif seed_url:
+        body["urlSeed"] = {"url": seed_url}
+    elif seed_keywords:
+        body["keywordSeed"] = {"keywords": seed_keywords}
+    else:
+        raise ValueError("Se necesita al menos una keyword semilla o una URL.")
+
+    url = f"{BASE_URL}/customers/{customer_id}:generateKeywordIdeas"
+    payload = _post_json(url, body)
+    results = payload.get("results", [])
+    rows = [{"text": r.get("text"), **_keyword_metrics_from(r)} for r in results]
+    return {"rows": rows, "total_size": _int_or_none(payload.get("totalSize")) or len(rows)}
+
+
+def fetch_keyword_historical_metrics(customer_id, keywords, geo_resource_names=None,
+                                      language_resource_name=None,
+                                      network="GOOGLE_SEARCH_AND_PARTNERS", include_adult=False):
+    """Volumen de búsqueda histórico (mes a mes) para una lista de keywords
+    que el usuario ya trae — la pestaña "Ver métricas históricas" de
+    Keyword Planner."""
+    if not keywords:
+        return {"rows": []}
+    body = {
+        "keywords": keywords,
+        "keywordPlanNetwork": network,
+        "includeAdultKeywords": include_adult,
+    }
+    if geo_resource_names:
+        body["geoTargetConstants"] = geo_resource_names
+    if language_resource_name:
+        body["language"] = language_resource_name
+
+    url = f"{BASE_URL}/customers/{customer_id}:generateKeywordHistoricalMetrics"
+    payload = _post_json(url, body)
+    results = payload.get("results", [])
+    rows = [{"text": r.get("text"), **_keyword_metrics_from(r)} for r in results]
+    return {"rows": rows}
+
+
+def fetch_keyword_forecast(customer_id, keywords, match_type, geo_resource_names,
+                            language_resource_names, bidding_mode, start_date, end_date,
+                            daily_budget=None, max_cpc_bid=None, daily_target_spend=None,
+                            max_cpc_bid_ceiling=None, currency_code=None):
+    """Pronóstico de clics/costo/conversiones para una campaña hipotética
+    armada con estas keywords, geo, idioma, y estrategia de puja — la
+    pestaña "Pronosticar" de Keyword Planner. No optimiza nada por sí solo:
+    el usuario elige el presupuesto y la estrategia, esto solo estima el
+    resultado de ESA combinación puntual (no hay curva automática como en
+    Performance Planner, que no tiene API pública)."""
+    if not keywords:
+        raise ValueError("Se necesita al menos una keyword.")
+    if bidding_mode == "MANUAL_CPC":
+        bidding_strategy = {"manualCpcBiddingStrategy": {"maxCpcBidMicros": _units_to_micros(max_cpc_bid)}}
+        if daily_budget:
+            bidding_strategy["manualCpcBiddingStrategy"]["dailyBudgetMicros"] = _units_to_micros(daily_budget)
+    elif bidding_mode == "MAXIMIZE_CLICKS":
+        bidding_strategy = {"maximizeClicksBiddingStrategy": {"dailyTargetSpendMicros": _units_to_micros(daily_target_spend)}}
+        if max_cpc_bid_ceiling:
+            bidding_strategy["maximizeClicksBiddingStrategy"]["maxCpcBidCeilingMicros"] = _units_to_micros(max_cpc_bid_ceiling)
+    elif bidding_mode == "MAXIMIZE_CONVERSIONS":
+        bidding_strategy = {"maximizeConversionsBiddingStrategy": {"dailyTargetSpendMicros": _units_to_micros(daily_target_spend)}}
+    else:
+        raise ValueError(f"Estrategia de puja desconocida: {bidding_mode}")
+
+    body = {
+        "forecastPeriod": {"startDate": start_date, "endDate": end_date},
+        "campaign": {
+            "geoTargetConstants": geo_resource_names or [],
+            "languageConstants": language_resource_names or [],
+            "biddingStrategy": bidding_strategy,
+            "adGroups": [{"keywords": [{"text": k, "matchType": match_type} for k in keywords]}],
+        },
+    }
+    if currency_code:
+        body["currencyCode"] = currency_code
+
+    url = f"{BASE_URL}/customers/{customer_id}:generateKeywordForecastMetrics"
+    payload = _post_json(url, body)
+    m = payload.get("campaignForecastMetrics", {})
+    return {
+        "clicks": _float_or_none(m.get("clicks")),
+        "cost_micros": _int_or_none(m.get("costMicros")),
+        "conversions": _float_or_none(m.get("conversions")),
+        "average_cpc_micros": _int_or_none(m.get("averageCpcMicros")),
+        "average_cpa_micros": _int_or_none(m.get("averageCpaMicros")),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Datos simulados — mismas cuentas/campañas "de mentira" para poder construir
 # y probar todo el flujo (selector de cuenta, rango de fechas, tabla,
 # recomendaciones) mientras Google aprueba el developer token real. Se usan
@@ -1533,3 +1733,107 @@ def simulated_apply_recommendation(resource_name):
 
 def simulated_dismiss_recommendation(resource_name):
     return {"dismissed": True, "simulated": True}
+
+
+# Planificador de palabras clave simulado — geos y keywords típicas de la
+# industria de hoteles/viajes de las cuentas simuladas de arriba.
+SIMULATED_GEO_TARGETS = [
+    {"resource_name": "geoTargetConstants/2170", "name": "Colombia", "country_code": "CO", "canonical_name": "Colombia"},
+    {"resource_name": "geoTargetConstants/1005224", "name": "Bogotá", "country_code": "CO", "canonical_name": "Bogotá,Bogota,Colombia"},
+    {"resource_name": "geoTargetConstants/1005265", "name": "Medellín", "country_code": "CO", "canonical_name": "Medellín,Antioquia,Colombia"},
+    {"resource_name": "geoTargetConstants/2484", "name": "México", "country_code": "MX", "canonical_name": "Mexico"},
+    {"resource_name": "geoTargetConstants/2724", "name": "España", "country_code": "ES", "canonical_name": "Spain"},
+]
+
+SIMULATED_LANGUAGES = [
+    {"resource_name": "languageConstants/1003", "code": "es", "name": "Spanish"},
+    {"resource_name": "languageConstants/1000", "code": "en", "name": "English"},
+    {"resource_name": "languageConstants/1014", "code": "pt", "name": "Portuguese"},
+]
+
+_SIMULATED_KEYWORD_CATALOG = [
+    {"text": "hotel en cartagena", "avg_monthly_searches": 40500, "competition": "HIGH", "competition_index": 82, "low_top_of_page_bid_micros": 850_000, "high_top_of_page_bid_micros": 2_400_000},
+    {"text": "hoteles todo incluido cartagena", "avg_monthly_searches": 8100, "competition": "HIGH", "competition_index": 76, "low_top_of_page_bid_micros": 900_000, "high_top_of_page_bid_micros": 2_600_000},
+    {"text": "hotel boutique bogota", "avg_monthly_searches": 2900, "competition": "MEDIUM", "competition_index": 54, "low_top_of_page_bid_micros": 600_000, "high_top_of_page_bid_micros": 1_800_000},
+    {"text": "reserva de hotel online", "avg_monthly_searches": 5400, "competition": "MEDIUM", "competition_index": 48, "low_top_of_page_bid_micros": 500_000, "high_top_of_page_bid_micros": 1_500_000},
+    {"text": "mejores hoteles playa colombia", "avg_monthly_searches": 1600, "competition": "LOW", "competition_index": 29, "low_top_of_page_bid_micros": 400_000, "high_top_of_page_bid_micros": 1_100_000},
+    {"text": "paquetes hotel mas vuelo", "avg_monthly_searches": 3600, "competition": "MEDIUM", "competition_index": 51, "low_top_of_page_bid_micros": 550_000, "high_top_of_page_bid_micros": 1_650_000},
+]
+
+
+def _simulated_monthly_volumes(base):
+    months = [("2025", "OCTOBER"), ("2025", "NOVEMBER"), ("2025", "DECEMBER"),
+              ("2026", "JANUARY"), ("2026", "FEBRUARY"), ("2026", "MARCH")]
+    return [
+        {"year": int(y), "month": m, "monthly_searches": int(base * (0.85 + 0.05 * i))}
+        for i, (y, m) in enumerate(months)
+    ]
+
+
+def simulated_geo_target_suggestions(query_text):
+    q = (query_text or "").strip().lower()
+    if not q:
+        return []
+    return [g for g in SIMULATED_GEO_TARGETS if q in g["name"].lower()]
+
+
+def simulated_targetable_languages():
+    return list(SIMULATED_LANGUAGES)
+
+
+def simulated_keyword_ideas(seed_keywords=None, seed_url=None):
+    rows = [{**k, "monthly_search_volumes": _simulated_monthly_volumes(k["avg_monthly_searches"])} for k in _SIMULATED_KEYWORD_CATALOG]
+    return {"rows": rows, "total_size": len(rows)}
+
+
+def simulated_keyword_historical_metrics(keywords):
+    catalog_by_text = {k["text"]: k for k in _SIMULATED_KEYWORD_CATALOG}
+    rows = []
+    for kw in keywords or []:
+        base = catalog_by_text.get(kw.lower())
+        if base:
+            rows.append({**base, "monthly_search_volumes": _simulated_monthly_volumes(base["avg_monthly_searches"])})
+        else:
+            fake_base = 200 + (abs(hash(kw)) % 3000)
+            rows.append({
+                "text": kw, "avg_monthly_searches": fake_base, "competition": "MEDIUM",
+                "competition_index": 40, "low_top_of_page_bid_micros": 400_000,
+                "high_top_of_page_bid_micros": 1_200_000,
+                "monthly_search_volumes": _simulated_monthly_volumes(fake_base),
+            })
+    return {"rows": rows}
+
+
+def simulated_keyword_forecast(keywords, bidding_mode, start_date, end_date,
+                                daily_budget=None, max_cpc_bid=None, daily_target_spend=None,
+                                max_cpc_bid_ceiling=None):
+    from datetime import date
+    try:
+        days = max(1, (date.fromisoformat(end_date) - date.fromisoformat(start_date)).days + 1)
+    except (ValueError, TypeError):
+        days = 30
+    avg_cpc_units = 1.1
+    if bidding_mode == "MANUAL_CPC":
+        daily_spend = min(float(daily_budget or 0) or float(max_cpc_bid or avg_cpc_units) * 20, float(max_cpc_bid or avg_cpc_units) * 40)
+        avg_cpc_units = float(max_cpc_bid or avg_cpc_units) * 0.8
+    else:
+        daily_spend = float(daily_target_spend or 0)
+        if bidding_mode == "MAXIMIZE_CLICKS" and max_cpc_bid_ceiling:
+            avg_cpc_units = min(avg_cpc_units, float(max_cpc_bid_ceiling) * 0.8)
+    total_cost = daily_spend * days
+    clicks = round(total_cost / avg_cpc_units, 1) if avg_cpc_units else 0
+    conversions = round(clicks * 0.045, 1)
+    # Igual que la API real (confirmado contra una cuenta real): con
+    # "Maximizar conversiones" Google no estima clics/CPC, y con CPC manual/
+    # maximizar clics no estima conversiones/CPA — nunca trae las 4 a la vez.
+    if bidding_mode == "MAXIMIZE_CONVERSIONS":
+        return {
+            "clicks": None, "cost_micros": int(round(total_cost * MICROS)),
+            "conversions": conversions, "average_cpc_micros": None,
+            "average_cpa_micros": int(round((total_cost / conversions) * MICROS)) if conversions else None,
+        }
+    return {
+        "clicks": clicks, "cost_micros": int(round(total_cost * MICROS)),
+        "conversions": None, "average_cpc_micros": int(round(avg_cpc_units * MICROS)) if clicks else None,
+        "average_cpa_micros": None,
+    }
