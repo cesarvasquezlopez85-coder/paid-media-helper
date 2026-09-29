@@ -6629,7 +6629,7 @@ function bindEvents() {
   const kwpPronosticoEndDate = document.getElementById('kwp-pronostico-end-date');
   if (kwpPronosticoEndDate) kwpPronosticoEndDate.addEventListener('input', (e) => { state.keywordPlanner.pronostico.endDate = e.target.value; });
   const kwpPronosticoCurrency = document.getElementById('kwp-pronostico-currency');
-  if (kwpPronosticoCurrency) kwpPronosticoCurrency.addEventListener('input', (e) => { state.keywordPlanner.pronostico.currencyCode = e.target.value; });
+  if (kwpPronosticoCurrency) kwpPronosticoCurrency.addEventListener('input', (e) => { state.keywordPlanner.pronostico.currencyCode = e.target.value.toUpperCase(); });
 
   document.querySelectorAll('[data-opp-sort]').forEach((th) => {
     th.addEventListener('click', () => {

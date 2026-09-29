@@ -1798,7 +1798,12 @@ class Handler(SimpleHTTPRequestHandler):
         max_cpc_bid = payload.get("max_cpc_bid")
         daily_target_spend = payload.get("daily_target_spend")
         max_cpc_bid_ceiling = payload.get("max_cpc_bid_ceiling")
-        currency_code = str(payload.get("currency_code") or "").strip() or None
+        # Google Ads exige el código en mayúsculas (ISO 4217, ej. "COP") — en
+        # minúsculas Google lo rechaza con un 400 INVALID_ARGUMENT genérico
+        # ("The input has an invalid value.", sin decir qué campo), confirmado
+        # contra una cuenta real. Normalizamos acá para no depender de que el
+        # usuario lo escriba bien.
+        currency_code = str(payload.get("currency_code") or "").strip().upper() or None
 
         if not google_ads_client.is_configured():
             self._send_json(200, {
