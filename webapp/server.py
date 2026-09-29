@@ -1842,6 +1842,19 @@ class Handler(SimpleHTTPRequestHandler):
             )
             self._send_json(200, {**result, "simulated": False})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            # El error de Google (ver _send_google_ads_error) casi nunca dice
+            # qué campo es inválido — loguear los parámetros de la solicitud
+            # es la única forma de diagnosticarlo sin tener que reproducirlo
+            # a ciegas.
+            print(
+                f"[keyword-planner-forecast-params] customer_id={customer_id} keywords={keywords} "
+                f"match_type={match_type} geo={geo_resource_names} lang={language_resource_names} "
+                f"bidding_mode={bidding_mode} start={start_date} end={end_date} "
+                f"daily_budget={daily_budget!r} max_cpc_bid={max_cpc_bid!r} "
+                f"daily_target_spend={daily_target_spend!r} max_cpc_bid_ceiling={max_cpc_bid_ceiling!r} "
+                f"currency_code={currency_code!r}",
+                flush=True,
+            )
             self._send_google_ads_error(e)
 
     # ------------------------------------------------- Generador de copys ---
@@ -1891,7 +1904,12 @@ class Handler(SimpleHTTPRequestHandler):
     # ..." en google_ads_client.py).
     def _send_google_ads_error(self, exc):
         detail = str(exc)
-        print(f"[google-ads-error] {detail}", flush=True)
+        # Railway (y otros recolectores de logs) parten un solo print() con
+        # saltos de línea en una entrada POR LÍNEA, y no garantizan que lleguen
+        # en orden cuando hay requests concurrentes — un JSON multilínea queda
+        # imposible de leer (o reconstruir) en `railway logs`. Una sola línea
+        # evita el problema de raíz.
+        print(f"[google-ads-error] {' '.join(detail.split())}", flush=True)
         match = re.search(r"respondió (\d{3})", detail)
         status = match.group(1) if match else None
         if status == "400":
