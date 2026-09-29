@@ -247,6 +247,7 @@ const state = {
     historico: {
       keywordsText: '',
       status: 'idle', error: null, rows: null,
+      sortBy: 'avg_monthly_searches', sortDir: 'desc',
     },
     // No optimiza nada solo — el usuario elige presupuesto/puja y esto
     // estima el resultado de ESA combinación puntual (sin curva automática).
@@ -5506,6 +5507,31 @@ function kwpIdeasSortTh(label, key) {
   return `<th data-kwp-ideas-sort="${key}" style="cursor:pointer;user-select:none${active ? ';color:var(--color-text-heading)' : ''}">${escapeHtml(label)}${arrow}</th>`;
 }
 
+const KWP_HISTORICO_SORT_KEYS = {
+  text: (r) => r.text.toLowerCase(),
+  avg_monthly_searches: (r) => r.avg_monthly_searches || 0,
+  low_bid: (r) => r.low_top_of_page_bid_micros || 0,
+  high_bid: (r) => r.high_top_of_page_bid_micros || 0,
+};
+function getKeywordHistoricoSorted() {
+  const h = state.keywordPlanner.historico;
+  const rows = [...(h.rows || [])];
+  const keyFn = KWP_HISTORICO_SORT_KEYS[h.sortBy] || KWP_HISTORICO_SORT_KEYS.avg_monthly_searches;
+  const dir = h.sortDir === 'desc' ? -1 : 1;
+  if (h.sortBy === 'text') {
+    rows.sort((a, b) => dir * keyFn(a).localeCompare(keyFn(b)));
+  } else {
+    rows.sort((a, b) => dir * (keyFn(a) - keyFn(b)));
+  }
+  return rows;
+}
+function kwpHistoricoSortTh(label, key) {
+  const h = state.keywordPlanner.historico;
+  const active = h.sortBy === key;
+  const arrow = active ? (h.sortDir === 'desc' ? ' ▼' : ' ▲') : '';
+  return `<th data-kwp-historico-sort="${key}" style="cursor:pointer;user-select:none${active ? ';color:var(--color-text-heading)' : ''}">${escapeHtml(label)}${arrow}</th>`;
+}
+
 function fetchKeywordHistorical() {
   const s = state.keywordPlanner;
   const h = s.historico;
@@ -5752,7 +5778,8 @@ function renderKeywordPlannerHistoricoTab() {
     if (!h.rows.length) {
       resultsHtml = `<div class="ok-panel">Sin datos históricos para estas keywords.</div>`;
     } else {
-      const rowsHtml = h.rows.map((r) => `
+      const sortedRows = getKeywordHistoricoSorted();
+      const rowsHtml = sortedRows.map((r) => `
         <tr>
           <td>${escapeHtml(r.text)}</td>
           <td>${fmtInt(r.avg_monthly_searches)}</td>
@@ -5769,7 +5796,14 @@ function renderKeywordPlannerHistoricoTab() {
           </div>
           <div class="table-scroll">
             <table>
-              <thead><tr><th>Keyword</th><th>Búsquedas prom./mes</th><th>Competencia</th><th>Puja baja</th><th>Puja alta</th><th>Tendencia mensual</th></tr></thead>
+              <thead><tr>
+                ${kwpHistoricoSortTh('Keyword', 'text')}
+                ${kwpHistoricoSortTh('Búsquedas prom./mes', 'avg_monthly_searches')}
+                <th>Competencia</th>
+                ${kwpHistoricoSortTh('Puja baja', 'low_bid')}
+                ${kwpHistoricoSortTh('Puja alta', 'high_bid')}
+                <th>Tendencia mensual</th>
+              </tr></thead>
               <tbody>${rowsHtml}</tbody>
             </table>
           </div>
@@ -6562,6 +6596,15 @@ function bindEvents() {
       render();
     });
   });
+  document.querySelectorAll('[data-kwp-historico-sort]').forEach((th) => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.kwpHistoricoSort;
+      const h = state.keywordPlanner.historico;
+      if (h.sortBy === key) h.sortDir = h.sortDir === 'desc' ? 'asc' : 'desc';
+      else { h.sortBy = key; h.sortDir = 'desc'; }
+      render();
+    });
+  });
   const kwpHistoricoKeywords = document.getElementById('kwp-historico-keywords');
   if (kwpHistoricoKeywords) kwpHistoricoKeywords.addEventListener('input', (e) => { state.keywordPlanner.historico.keywordsText = e.target.value; });
   const kwpPronosticoKeywords = document.getElementById('kwp-pronostico-keywords');
@@ -6970,7 +7013,7 @@ function handleAction(action) {
       break;
     }
     case 'download-kwp-historico': {
-      const rows = state.keywordPlanner.historico.rows || [];
+      const rows = getKeywordHistoricoSorted();
       const months = (rows[0] && rows[0].monthly_search_volumes) || [];
       const monthHeaders = months.map((v) => `${KWP_MONTH_LABELS[v.month] || v.month} ${v.year}`);
       const header = ['Keyword', 'Búsquedas prom./mes', 'Competencia', 'Puja baja', 'Puja alta', ...monthHeaders];
