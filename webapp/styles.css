@@ -366,6 +366,20 @@ main.content { flex: 1; overflow-y: auto; height: 100%; }
 .stat-card.danger { border-color: var(--danger-border); }
 .stat-card.danger .stat-label { color: var(--danger); }
 
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 100; background: rgba(20, 33, 61, 0.55);
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.modal-box {
+  position: relative; width: 100%; max-width: 560px; max-height: 85vh; overflow-y: auto;
+  padding: 28px;
+}
+.modal-close {
+  position: absolute; top: 18px; right: 18px; border: none; background: transparent;
+  color: var(--color-text-muted); cursor: pointer; padding: 4px; line-height: 0; border-radius: var(--radius-sm);
+}
+.modal-close:hover { background: var(--gray-100); color: var(--color-text-heading); }
+
 .chart-card { padding: 22px 24px; margin-bottom: 20px; }
 .forecast-hover-col { cursor: crosshair; }
 .forecast-tooltip {

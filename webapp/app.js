@@ -248,6 +248,7 @@ const state = {
       keywordsText: '',
       status: 'idle', error: null, rows: null,
       sortBy: 'avg_monthly_searches', sortDir: 'desc',
+      modalKeyword: null, // texto de la keyword cuyo detalle está abierto, o null
     },
     // No optimiza nada solo — el usuario elige presupuesto/puja y esto
     // estima el resultado de ESA combinación puntual (sin curva automática).
@@ -1197,6 +1198,7 @@ function mountKeywordPlannerCharts() {
     getKeywordHistoricoSorted().forEach((r, idx) => {
       mountSparklineChart(`kwp-trend-${idx}`, r.monthly_search_volumes);
     });
+    mountKeywordHistoricoModalChart();
   }
 }
 
@@ -5612,7 +5614,7 @@ function resetKeywordPlannerAccountData() {
   const s = state.keywordPlanner;
   s.languages = { status: 'idle', list: [], selectedResourceName: '', error: null };
   s.ideas.status = 'idle'; s.ideas.error = null; s.ideas.rows = null; s.ideas.totalSize = 0;
-  s.historico.status = 'idle'; s.historico.error = null; s.historico.rows = null;
+  s.historico.status = 'idle'; s.historico.error = null; s.historico.rows = null; s.historico.modalKeyword = null;
   s.pronostico.status = 'idle'; s.pronostico.error = null; s.pronostico.result = null;
 }
 
@@ -5828,6 +5830,7 @@ function fetchKeywordHistorical() {
       s.api.simulated = !!data.simulated;
       h.rows = data.rows || [];
       h.status = 'ready';
+      h.modalKeyword = null;
       render();
     })
     .catch((err) => {
@@ -6050,7 +6053,7 @@ function renderKeywordPlannerHistoricoTab() {
       const sortedRows = getKeywordHistoricoSorted();
       const rowsHtml = sortedRows.map((r, idx) => `
         <tr>
-          <td>${escapeHtml(r.text)}</td>
+          <td><button class="btn-link" data-kwp-historico-open="${escapeHtml(r.text)}">${escapeHtml(r.text)}</button></td>
           <td>${fmtInt(r.avg_monthly_searches)}</td>
           <td>${kwpCompetitionBadge(r.competition)}</td>
           <td>${fmtMoneyFromMicros(r.low_top_of_page_bid_micros)}</td>
@@ -6090,7 +6093,85 @@ function renderKeywordPlannerHistoricoTab() {
       <button class="btn-accent" data-action="kwp-historico-fetch" ${h.status === 'loading' ? 'disabled' : ''}>Traer histórico</button>
       ${h.error ? `<div class="error-panel" style="margin-top:10px">${escapeHtml(h.error)}</div>` : ''}
     </div>
-    ${resultsHtml}`;
+    ${resultsHtml}
+    ${renderKeywordHistoricoModal()}`;
+}
+
+// Ventana flotante con el detalle completo de una keyword del histórico —
+// se abre al hacer click sobre la keyword en la tabla. Reutiliza la misma
+// keyword (texto) como llave en vez del índice de fila para que sobreviva
+// a un resort de la tabla mientras está abierta.
+function renderKeywordHistoricoModal() {
+  const h = state.keywordPlanner.historico;
+  if (!h.modalKeyword || !h.rows) return '';
+  const row = h.rows.find((r) => r.text === h.modalKeyword);
+  if (!row) return '';
+  return `
+    <div class="modal-overlay">
+      <div class="modal-box card" data-modal-stop-propagation>
+        <button class="modal-close" data-action="kwp-historico-close" aria-label="Cerrar">${icon('x', 18)}</button>
+        <h3 class="dense-chart-title" style="margin:0 0 16px;padding-right:28px">${escapeHtml(row.text)}</h3>
+        <div class="stat-grid">
+          <div class="card stat-card"><div class="stat-label">Búsquedas prom./mes</div><div class="stat-value">${fmtInt(row.avg_monthly_searches)}</div></div>
+          <div class="card stat-card"><div class="stat-label">Competencia</div><div class="stat-value" style="font-size:18px">${kwpCompetitionBadge(row.competition)}</div></div>
+          <div class="card stat-card"><div class="stat-label">Índice de competencia</div><div class="stat-value">${fmtIntOrNA(row.competition_index)}</div></div>
+          <div class="card stat-card"><div class="stat-label">Puja baja</div><div class="stat-value">${fmtMoneyFromMicros(row.low_top_of_page_bid_micros)}</div></div>
+          <div class="card stat-card"><div class="stat-label">Puja alta</div><div class="stat-value">${fmtMoneyFromMicros(row.high_top_of_page_bid_micros)}</div></div>
+        </div>
+        <h4 style="margin:0 0 10px;font-size:12.5px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:.04em">Tendencia mensual (últimos 12 meses)</h4>
+        <div style="height:260px"><canvas id="kwp-modal-trend-chart"></canvas></div>
+      </div>
+    </div>`;
+}
+
+// Versión grande (con ejes, meses completos y datalabels) del mismo gráfico
+// de tendencia que la sparkline de la tabla — ver mountSparklineChart.
+function mountKeywordHistoricoModalChart() {
+  const h = state.keywordPlanner.historico;
+  if (!h.modalKeyword || !h.rows) return;
+  const row = h.rows.find((r) => r.text === h.modalKeyword);
+  const canvas = document.getElementById('kwp-modal-trend-chart');
+  if (!row || !canvas || !window.Chart || !row.monthly_search_volumes || !row.monthly_search_volumes.length) return;
+  const volumes = row.monthly_search_volumes;
+  const chart = new window.Chart(canvas.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: volumes.map((v) => `${KWP_MONTH_LABELS[v.month] || v.month} ${String(v.year).slice(2)}`),
+      datasets: [{
+        data: volumes.map((v) => v.monthly_searches || 0),
+        backgroundColor: resolveChartColor('var(--navy-800)'),
+        borderRadius: 4,
+        borderSkipped: false,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 350 },
+      layout: { padding: { top: 24 } },
+      scales: {
+        y: { display: false, grid: { display: false } },
+        x: { grid: { display: false }, ticks: { font: { size: 11 }, color: cssVar('--color-text-muted') || '#666' } },
+      },
+      plugins: {
+        legend: { display: false },
+        datalabels: {
+          anchor: 'end', align: 'top', color: cssVar('--color-text-heading') || '#14213d',
+          font: { size: 10.5, weight: '600' },
+          formatter: (v) => fmtInt(v),
+        },
+        tooltip: {
+          backgroundColor: cssVar('--navy-900') || '#0f172a',
+          padding: 8,
+          cornerRadius: 6,
+          displayColors: false,
+          callbacks: { label: (item) => fmtInt(item.parsed.y) + ' búsquedas' },
+        },
+      },
+    },
+    plugins: window.ChartDataLabels ? [window.ChartDataLabels] : [],
+  });
+  chartRegistry['kwp-modal-trend-chart'] = chart;
 }
 
 function renderKeywordPlannerPronosticoTab() {
@@ -6874,6 +6955,18 @@ function bindEvents() {
       render();
     });
   });
+  document.querySelectorAll('[data-kwp-historico-open]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.keywordPlanner.historico.modalKeyword = btn.dataset.kwpHistoricoOpen;
+      render();
+    });
+  });
+  const kwpHistoricoModalOverlay = document.querySelector('.modal-overlay');
+  if (kwpHistoricoModalOverlay) kwpHistoricoModalOverlay.addEventListener('click', (e) => {
+    if (e.target.closest('[data-modal-stop-propagation]')) return;
+    state.keywordPlanner.historico.modalKeyword = null;
+    render();
+  });
   const kwpHistoricoKeywords = document.getElementById('kwp-historico-keywords');
   if (kwpHistoricoKeywords) kwpHistoricoKeywords.addEventListener('input', (e) => { state.keywordPlanner.historico.keywordsText = e.target.value; });
   const kwpPronosticoKeywords = document.getElementById('kwp-pronostico-keywords');
@@ -7267,6 +7360,7 @@ function handleAction(action) {
     case 'kwp-tab-pronostico': state.keywordPlanner.tab = 'pronostico'; render(); break;
     case 'kwp-ideas-fetch': fetchKeywordIdeas(); break;
     case 'kwp-historico-fetch': fetchKeywordHistorical(); break;
+    case 'kwp-historico-close': state.keywordPlanner.historico.modalKeyword = null; render(); break;
     case 'kwp-pronostico-fetch': fetchKeywordForecast(); break;
 
     case 'download-kwp-ideas': {
@@ -7512,6 +7606,14 @@ sidebarToggleBtn?.addEventListener('click', () => {
   localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : '0');
   sidebarToggleBtn.title = collapsed ? 'Expandir menú' : 'Colapsar menú';
   sidebarToggleBtn.setAttribute('aria-label', sidebarToggleBtn.title);
+});
+
+// Cerrar la ventana flotante del histórico de keywords con Escape.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && state.keywordPlanner.historico.modalKeyword) {
+    state.keywordPlanner.historico.modalKeyword = null;
+    render();
+  }
 });
 
 render();
