@@ -385,6 +385,97 @@ function icon(name, size = 18) {
 }
 
 // ---------------------------------------------------------------------------
+// Gráficas con Chart.js (piloto en Rendimiento, ver mountRendCharts) — el
+// resto de la app sigue con las barras CSS (barRowsHtml) hasta decidir si
+// se extiende. root.innerHTML se reemplaza entero en cada render(), así que
+// cualquier <canvas> y su Chart.js asociado quedan huérfanos — hay que
+// destruirlos a mano antes de pisar el DOM y volver a montarlos después.
+// ---------------------------------------------------------------------------
+
+const chartRegistry = {};
+function destroyAllCharts() {
+  Object.keys(chartRegistry).forEach((id) => {
+    chartRegistry[id].destroy();
+    delete chartRegistry[id];
+  });
+}
+function cssVar(name, depth = 0) {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  // Algunas variables apuntan a otra variable (ej. --color-border: var(--gray-300))
+  // — la mayoría de los navegadores ya la resuelven en getComputedStyle, pero
+  // por si acaso, se resuelve un nivel más a mano.
+  const nested = depth < 3 && /^var\((--[\w-]+)\)$/.exec(raw);
+  return nested ? cssVar(nested[1], depth + 1) : raw;
+}
+// Traduce los colores var(--foo) que ya usan los builders de barras (CSS) a
+// colores reales — el canvas de Chart.js no resuelve custom properties.
+function resolveChartColor(raw) {
+  const match = /^var\((--[\w-]+)\)$/.exec((raw || '').trim());
+  return match ? (cssVar(match[1]) || raw) : raw;
+}
+// rows: misma forma que ya devuelven buildGastoRows/buildCpaRows/etc.
+// ({campaign, value, valueLabel, color}) — un solo builder de config para
+// no repetir la configuración de Chart.js en cada gráfica de barras
+// horizontal de Rendimiento.
+function mountHorizontalBarChart(canvasId, rows) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas || !window.Chart) return;
+  const ctx = canvas.getContext('2d');
+  const gridColor = cssVar('--color-border') || '#e5e7eb';
+  const textColor = cssVar('--color-text-body') || '#333';
+  const datalabelFont = '600 11px ' + (getComputedStyle(document.body).fontFamily || 'sans-serif');
+  // El texto de valueLabel varía mucho de largo entre pestañas ("$630.00" vs
+  // "Presup. 22% · Rank 30%") — un padding fijo a la derecha se queda corto
+  // con las etiquetas largas o deja demasiado aire con las cortas. Se mide
+  // el texto real con el mismo canvas antes de crear la gráfica.
+  ctx.font = datalabelFont;
+  const maxLabelWidth = rows.reduce((max, r) => Math.max(max, ctx.measureText(r.valueLabel).width), 0);
+  const chart = new window.Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: rows.map((r) => r.campaign),
+      datasets: [{
+        data: rows.map((r) => r.value),
+        backgroundColor: rows.map((r) => resolveChartColor(r.color)),
+        borderRadius: 6,
+        borderSkipped: false,
+        maxBarThickness: 28,
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 500, easing: 'easeOutQuart' },
+      layout: { padding: { right: Math.ceil(maxLabelWidth) + 20 } },
+      scales: {
+        x: { display: false, grid: { display: false } },
+        y: { grid: { color: gridColor }, ticks: { color: textColor, font: { size: 12 } } },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: cssVar('--navy-900') || '#0f172a',
+          padding: 10,
+          cornerRadius: 8,
+          displayColors: false,
+          callbacks: { label: (item) => rows[item.dataIndex].valueLabel },
+        },
+        datalabels: {
+          anchor: 'end',
+          align: 'end',
+          color: textColor,
+          font: { size: 11, weight: '600', family: getComputedStyle(document.body).fontFamily },
+          formatter: (_v, ctx) => rows[ctx.dataIndex].valueLabel,
+        },
+      },
+    },
+    plugins: window.ChartDataLabels ? [window.ChartDataLabels] : [],
+  });
+  chartRegistry[canvasId] = chart;
+}
+
+// ---------------------------------------------------------------------------
 // Render raíz
 // ---------------------------------------------------------------------------
 
@@ -455,6 +546,12 @@ function submitPasswordChange() {
 }
 
 function render() {
+  // Los <canvas> de Chart.js (ver mountHorizontalBarChart) quedan huérfanos
+  // en cuanto root.innerHTML se reemplace abajo — hay que destruir las
+  // instancias viejas ANTES, si no Chart.js sigue dibujando sobre un canvas
+  // que ya no existe en el DOM.
+  destroyAllCharts();
+
   document.querySelectorAll('.nav-btn').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.nav === state.page);
   });
@@ -526,6 +623,7 @@ function render() {
 
   bindEvents();
   if (window.lucide) window.lucide.createIcons();
+  mountCharts();
 
   if (focusId) {
     const el = document.getElementById(focusId);
@@ -706,6 +804,7 @@ function buildGastoRows(rows) {
   const maxVal = Math.max(1, ...rows.map((r) => r.cost || 0));
   return [...rows].sort((a, b) => (b.cost || 0) - (a.cost || 0)).map((r) => ({
     campaign: r.campaign,
+    value: r.cost || 0,
     valueLabel: fmtMoney(r.cost || 0),
     width: pctWidth(r.cost || 0, maxVal),
     color: 'var(--navy-800)',
@@ -718,6 +817,7 @@ function buildCpaRows(rows, avgCpaSimple) {
     const flagged = avgCpaSimple && r.cpa > avgCpaSimple * 1.2;
     return {
       campaign: r.campaign,
+      value: r.cpa,
       valueLabel: fmtMoney(r.cpa) + (flagged ? ' · alto' : ''),
       width: pctWidth(r.cpa, maxVal),
       color: flagged ? 'var(--danger)' : 'var(--navy-800)',
@@ -733,6 +833,7 @@ function buildCtrRows(rows) {
     const flagged = r.ctr < threshold;
     return {
       campaign: r.campaign,
+      value: r.ctr * 100,
       valueLabel: (r.ctr * 100).toFixed(2) + '% · mín. ' + (threshold * 100).toFixed(0) + '%',
       width: pctWidth(r.ctr, maxVal),
       color: flagged ? 'var(--danger)' : 'var(--navy-800)',
@@ -747,6 +848,7 @@ function buildCpaFilePctRows(rows) {
   const maxVal = Math.max(0.01, ...valid.map((r) => r.cpa_file_pct));
   return [...valid].sort((a, b) => b.cpa_file_pct - a.cpa_file_pct).map((r) => ({
     campaign: r.campaign,
+    value: r.cpa_file_pct * 100,
     valueLabel: (r.cpa_file_pct * 100).toFixed(2) + '%',
     width: pctWidth(r.cpa_file_pct, maxVal),
     color: 'var(--navy-800)',
@@ -758,6 +860,7 @@ function buildIsRows(rows) {
     const budget = r.lost_is_budget || 0, rank = r.lost_is_rank || 0;
     return {
       campaign: r.campaign,
+      value: (budget + rank) * 100,
       valueLabel: `Presup. ${(budget * 100).toFixed(0)}% · Rank ${(rank * 100).toFixed(0)}%`,
       width: pctWidth(budget + rank, maxVal),
       color: 'var(--gold-600)',
@@ -885,7 +988,7 @@ function renderRendLayoutA() {
 
     <div class="card chart-card">
       <div class="tab-row">${tabs}</div>
-      <div class="bar-rows">${barRowsHtml(activeRows)}</div>
+      <div style="height:${Math.max(240, activeRows.length * 34)}px"><canvas id="rend-chart-main"></canvas></div>
     </div>
 
     <div>
@@ -941,28 +1044,160 @@ function renderRendLayoutB() {
       <div class="dense-col-right">
         <div class="card dense-panel">
           <h3 class="dense-chart-title">Gasto por campaña</h3>
-          <div class="bar-rows compact">${barRowsHtml(gastoRows)}</div>
+          <div style="height:${Math.max(160, gastoRows.length * 24)}px"><canvas id="rend-chart-gasto"></canvas></div>
         </div>
         <div class="card dense-panel">
           <h3 class="dense-chart-title">CPA por campaña</h3>
-          <div class="bar-rows compact">${barRowsHtml(cpaRows)}</div>
+          <div style="height:${Math.max(160, cpaRows.length * 24)}px"><canvas id="rend-chart-cpa"></canvas></div>
         </div>
         <div class="card dense-panel">
           <h3 class="dense-chart-title">CTR por campaña</h3>
-          <div class="bar-rows compact">${barRowsHtml(ctrRows)}</div>
+          <div style="height:${Math.max(160, ctrRows.length * 24)}px"><canvas id="rend-chart-ctr"></canvas></div>
         </div>
         <div class="card dense-panel">
           <h3 class="dense-chart-title">Impression share perdido</h3>
-          <div class="bar-rows compact">${barRowsHtml(isRows)}</div>
+          <div style="height:${Math.max(160, isRows.length * 24)}px"><canvas id="rend-chart-is"></canvas></div>
         </div>
         ${hasCpaFilePct ? `
         <div class="card dense-panel">
           <h3 class="dense-chart-title">CPA %</h3>
-          <div class="bar-rows compact">${barRowsHtml(cpaFilePctRows)}</div>
+          <div style="height:${Math.max(160, cpaFilePctRows.length * 24)}px"><canvas id="rend-chart-cpafile"></canvas></div>
         </div>` : ''}
       </div>
     </div>
   `;
+}
+
+// Se llama después de que render() reemplaza root.innerHTML y bindEvents() —
+// necesita que los <canvas> ya existan en el DOM. Solo Rendimiento por ahora
+// (piloto); las demás páginas siguen con las barras CSS (barRowsHtml).
+function mountCharts() {
+  if (state.page === 'rendimiento') mountRendCharts();
+  else if (state.page === 'roas') mountRoasCharts();
+  else if (state.page === 'keywordplanner') mountKeywordPlannerCharts();
+}
+
+function mountRendCharts() {
+  const s = state.rend;
+  if (s.status !== 'ready') return;
+  const rows = getRendFilteredRows();
+  const resumen = engine.summarize(rows);
+  const hasCpaFilePct = rows.some((r) => !Number.isNaN(r.cpa_file_pct));
+
+  if (state.layoutVariant === 'B') {
+    mountHorizontalBarChart('rend-chart-gasto', buildGastoRows(rows));
+    mountHorizontalBarChart('rend-chart-cpa', buildCpaRows(rows, resumen.avg_cpa_simple));
+    mountHorizontalBarChart('rend-chart-ctr', buildCtrRows(rows));
+    mountHorizontalBarChart('rend-chart-is', buildIsRows(rows));
+    if (hasCpaFilePct) mountHorizontalBarChart('rend-chart-cpafile', buildCpaFilePctRows(rows));
+  } else {
+    const tabMap = {
+      gasto: buildGastoRows(rows),
+      cpa: buildCpaRows(rows, resumen.avg_cpa_simple),
+      ctr: buildCtrRows(rows),
+      is: buildIsRows(rows),
+    };
+    if (hasCpaFilePct) tabMap.cpa_file = buildCpaFilePctRows(rows);
+    const activeRows = tabMap[s.chartTab] || tabMap.gasto;
+    mountHorizontalBarChart('rend-chart-main', activeRows);
+  }
+}
+
+// Piloto de Chart.js extendido a ROAS — a diferencia de Rendimiento (una
+// sola serie por gráfica), acá se comparan 2 series por campaña (logrado
+// vs. objetivo) en la misma barra agrupada, así que necesita su propia
+// función en vez de reusar mountHorizontalBarChart.
+function mountRoasCharts() {
+  const s = state.roas;
+  if (s.status !== 'ready') return;
+  const rows = [...(s.rows || [])]
+    .filter((r) => r.target_roas != null)
+    .sort((a, b) => (b.roas ?? -1) - (a.roas ?? -1));
+  if (!rows.length) return;
+  mountRoasComparisonChart('roas-chart-main', rows);
+}
+
+function mountRoasComparisonChart(canvasId, rows) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas || !window.Chart) return;
+  const ctx = canvas.getContext('2d');
+  const gridColor = cssVar('--color-border') || '#e5e7eb';
+  const textColor = cssVar('--color-text-body') || '#333';
+  const navy = cssVar('--navy-800') || '#14213d';
+  const gold = cssVar('--gold-600') || '#daa802';
+  const fontFamily = getComputedStyle(document.body).fontFamily || 'sans-serif';
+  const fmtPct = (v) => Math.round(v) + '%';
+  const achieved = rows.map((r) => (r.roas ?? 0) * 100);
+  const target = rows.map((r) => (r.target_roas ?? 0) * 100);
+  const datalabelFont = '600 10.5px ' + fontFamily;
+  ctx.font = datalabelFont;
+  const maxLabelWidth = [...achieved, ...target].reduce((max, v) => Math.max(max, ctx.measureText(fmtPct(v)).width), 0);
+  const chart = new window.Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: rows.map((r) => r.campaign_name),
+      datasets: [
+        { label: 'ROAS logrado', data: achieved, backgroundColor: navy, borderRadius: 6, borderSkipped: false },
+        { label: 'ROAS objetivo', data: target, backgroundColor: gold, borderRadius: 6, borderSkipped: false },
+      ],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 500, easing: 'easeOutQuart' },
+      layout: { padding: { right: Math.ceil(maxLabelWidth) + 20 } },
+      scales: {
+        x: { display: false, grid: { display: false } },
+        y: { grid: { color: gridColor }, ticks: { color: textColor, font: { size: 12 } } },
+      },
+      plugins: {
+        legend: {
+          display: true,
+          position: 'top',
+          align: 'end',
+          labels: { color: textColor, boxWidth: 12, font: { size: 11.5, family: fontFamily } },
+        },
+        tooltip: {
+          backgroundColor: cssVar('--navy-900') || '#0f172a',
+          padding: 10,
+          cornerRadius: 8,
+          callbacks: { label: (item) => `${item.dataset.label}: ${fmtPct(item.parsed.x)}` },
+        },
+        datalabels: {
+          anchor: 'end',
+          align: 'end',
+          color: textColor,
+          font: { size: 10.5, weight: '600', family: fontFamily },
+          formatter: (v) => fmtPct(v),
+        },
+      },
+    },
+    plugins: window.ChartDataLabels ? [window.ChartDataLabels] : [],
+  });
+  chartRegistry[canvasId] = chart;
+}
+
+// Piloto de Chart.js en Planificador de keywords: el top 10 por volumen
+// (Descubre keywords) reusa mountHorizontalBarChart tal cual; el histórico
+// necesita una mini-gráfica (sparkline) POR FILA, así que se monta una
+// instancia de Chart.js por keyword en vez de una sola para toda la tabla.
+function mountKeywordPlannerCharts() {
+  const s = state.keywordPlanner;
+  if (s.tab === 'ideas' && s.ideas.rows && s.ideas.rows.length) {
+    const top = getKeywordPlannerTop10(s.ideas.rows);
+    const chartRows = top.map((r) => ({
+      campaign: r.text,
+      value: r.avg_monthly_searches || 0,
+      valueLabel: fmtInt(r.avg_monthly_searches),
+      color: KWP_COMPETITION_BAR_COLOR[r.competition] || 'var(--navy-800)',
+    }));
+    mountHorizontalBarChart('kwp-chart-volume', chartRows);
+  } else if (s.tab === 'historico' && s.historico.rows && s.historico.rows.length) {
+    getKeywordHistoricoSorted().forEach((r, idx) => {
+      mountSparklineChart(`kwp-trend-${idx}`, r.monthly_search_volumes);
+    });
+  }
 }
 
 // Los exports de Google Ads en español a veces vienen en UTF-16 (con BOM) en
@@ -4020,7 +4255,14 @@ function renderRoasPage() {
         <td>${renderRoasAdjustRow(r)}</td>
       </tr>`).join('');
 
+    const roasChartRows = rows.filter((r) => r.target_roas != null);
+
     body = rows.length ? `
+      ${roasChartRows.length ? `
+      <div class="card chart-card" style="margin-bottom:20px">
+        <h3 class="dense-chart-title">ROAS logrado vs. objetivo (${roasChartRows.length})</h3>
+        <div style="height:${Math.max(240, roasChartRows.length * 34)}px"><canvas id="roas-chart-main"></canvas></div>
+      </div>` : ''}
       <div class="card table-panel">
         <div class="table-panel-head">
           <h3>ROAS por campaña (${rows.length})</h3>
@@ -5296,42 +5538,69 @@ const KWP_MONTH_LABELS = {
   JANUARY: 'Ene', FEBRUARY: 'Feb', MARCH: 'Mar', APRIL: 'Abr', MAY: 'May', JUNE: 'Jun',
   JULY: 'Jul', AUGUST: 'Ago', SEPTEMBER: 'Sep', OCTOBER: 'Oct', NOVEMBER: 'Nov', DECEMBER: 'Dic',
 };
-// Mini gráfica de barras (sin librería, mismo criterio del resto de la app:
-// CSS/HTML puro) con la tendencia mensual de una keyword — el título de
-// cada barra trae el valor exacto al pasar el mouse.
-function kwpTrendBars(volumes) {
-  if (!volumes || !volumes.length) return '<span class="footnote">—</span>';
-  const max = Math.max(1, ...volumes.map((v) => v.monthly_searches || 0));
-  const bars = volumes.map((v) => {
-    const h = Math.max(4, Math.round(((v.monthly_searches || 0) / max) * 36));
-    const label = `${KWP_MONTH_LABELS[v.month] || v.month} ${v.year}: ${fmtInt(v.monthly_searches)}`;
-    return `<div title="${escapeHtml(label)}" style="width:14px;height:${h}px;background:var(--navy-800);border-radius:2px 2px 0 0"></div>`;
-  }).join('');
-  const monthLetters = volumes.map((v) => `<div style="width:14px;font-size:8.5px;text-align:center;color:var(--color-text-muted)">${escapeHtml((KWP_MONTH_LABELS[v.month] || v.month).slice(0, 1))}</div>`).join('');
-  return `
-    <div style="display:flex;align-items:flex-end;gap:3px;height:40px">${bars}</div>
-    <div style="display:flex;gap:3px;margin-top:2px">${monthLetters}</div>`;
+// Mini gráfica de barras con Chart.js (sparkline) con la tendencia mensual
+// de una keyword — una instancia chiquita por fila, sin ejes ni leyenda,
+// con tooltip al pasar el mouse en vez del title="" de antes.
+function mountSparklineChart(canvasId, volumes) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas || !window.Chart || !volumes || !volumes.length) return;
+  const ctx = canvas.getContext('2d');
+  const chart = new window.Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: volumes.map((v) => (KWP_MONTH_LABELS[v.month] || v.month).slice(0, 1)),
+      datasets: [{
+        data: volumes.map((v) => v.monthly_searches || 0),
+        backgroundColor: resolveChartColor('var(--navy-800)'),
+        borderRadius: 2,
+        borderSkipped: false,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 350 },
+      layout: { padding: 2 },
+      scales: {
+        y: { display: false, grid: { display: false } },
+        x: { grid: { display: false }, ticks: { font: { size: 8.5 }, color: cssVar('--color-text-muted') || '#666' } },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: cssVar('--navy-900') || '#0f172a',
+          padding: 8,
+          cornerRadius: 6,
+          displayColors: false,
+          callbacks: {
+            title: (items) => {
+              const v = volumes[items[0].dataIndex];
+              return `${KWP_MONTH_LABELS[v.month] || v.month} ${v.year}`;
+            },
+            label: (item) => fmtInt(item.parsed.y) + ' búsquedas',
+          },
+        },
+      },
+    },
+  });
+  chartRegistry[canvasId] = chart;
 }
 
-// Barra horizontal (mismo patrón que Rendimiento/Oportunidad de ingresos —
-// ver barRowsHtml) con el top de keywords por volumen de búsqueda, para ver
-// de un vistazo las de más oportunidad sin leer toda la tabla. El color de
-// la barra es el mismo de la competencia (rojo=alta, verde=baja).
+// Barra horizontal con Chart.js (mismo patrón que Rendimiento/ROAS — ver
+// mountHorizontalBarChart) con el top de keywords por volumen de búsqueda,
+// para ver de un vistazo las de más oportunidad sin leer toda la tabla. El
+// color de la barra es el mismo de la competencia (rojo=alta, verde=baja).
 const KWP_COMPETITION_BAR_COLOR = { HIGH: 'var(--danger)', MEDIUM: 'var(--navy-800)', LOW: 'var(--ok-text)' };
-function renderKeywordPlannerVolumeChart(rows, title) {
+function getKeywordPlannerTop10(rows) {
+  return [...rows].sort((a, b) => (b.avg_monthly_searches || 0) - (a.avg_monthly_searches || 0)).slice(0, 10);
+}
+function renderKeywordPlannerVolumeChart(rows, title, canvasId) {
   if (!rows.length) return '';
-  const top = [...rows].sort((a, b) => (b.avg_monthly_searches || 0) - (a.avg_monthly_searches || 0)).slice(0, 10);
-  const max = Math.max(1, ...top.map((r) => r.avg_monthly_searches || 0));
-  const chartRows = top.map((r) => ({
-    campaign: r.text,
-    width: pctWidth(r.avg_monthly_searches || 0, max),
-    valueLabel: fmtInt(r.avg_monthly_searches),
-    color: KWP_COMPETITION_BAR_COLOR[r.competition] || 'var(--navy-800)',
-  }));
+  const top = getKeywordPlannerTop10(rows);
   return `
     <div class="card table-panel" style="margin-bottom:20px">
       <h3 class="dense-chart-title">${escapeHtml(title)}</h3>
-      <div class="bar-rows compact">${barRowsHtml(chartRows)}</div>
+      <div style="height:${Math.max(240, top.length * 34)}px"><canvas id="${canvasId}"></canvas></div>
     </div>`;
 }
 
@@ -5746,7 +6015,7 @@ function renderKeywordPlannerIdeasResults() {
       <td>${fmtMoneyFromMicros(r.high_top_of_page_bid_micros)}</td>
     </tr>`).join('');
   return `
-    ${renderKeywordPlannerVolumeChart(rows, 'Top 10 por volumen de búsqueda')}
+    ${renderKeywordPlannerVolumeChart(rows, 'Top 10 por volumen de búsqueda', 'kwp-chart-volume')}
     <div class="card table-panel">
       <div class="table-panel-head">
         <h3>Ideas (${rows.length}${i.totalSize > rows.length ? ` de ${fmtInt(i.totalSize)}` : ''})</h3>
@@ -5779,14 +6048,14 @@ function renderKeywordPlannerHistoricoTab() {
       resultsHtml = `<div class="ok-panel">Sin datos históricos para estas keywords.</div>`;
     } else {
       const sortedRows = getKeywordHistoricoSorted();
-      const rowsHtml = sortedRows.map((r) => `
+      const rowsHtml = sortedRows.map((r, idx) => `
         <tr>
           <td>${escapeHtml(r.text)}</td>
           <td>${fmtInt(r.avg_monthly_searches)}</td>
           <td>${kwpCompetitionBadge(r.competition)}</td>
           <td>${fmtMoneyFromMicros(r.low_top_of_page_bid_micros)}</td>
           <td>${fmtMoneyFromMicros(r.high_top_of_page_bid_micros)}</td>
-          <td>${kwpTrendBars(r.monthly_search_volumes)}</td>
+          <td><div style="width:110px;height:40px"><canvas id="kwp-trend-${idx}"></canvas></div></td>
         </tr>`).join('');
       resultsHtml = `
         <div class="card table-panel">
