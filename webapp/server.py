@@ -353,6 +353,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_pacing_watchlist()
             return
 
+        if path == "/api/google-ads/pacing/account-campaigns":
+            if not self._require_auth_json():
+                return
+            self._handle_pacing_account_campaigns(parse_qs(parsed.query))
+            return
+
         if path == "/api/google-ads/mcc-groups":
             if not self._require_auth_json():
                 return
@@ -490,6 +496,10 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_pacing_watchlist_add_mcc_group(payload)
+        elif path == "/api/google-ads/pacing/campaign-budget-adjust":
+            if not self._require_auth_json():
+                return
+            self._handle_pacing_campaign_budget_adjust(payload)
         elif path == "/api/google-ads/negative-keywords":
             if not self._require_auth_json():
                 return
@@ -1224,6 +1234,75 @@ class Handler(SimpleHTTPRequestHandler):
                     "error": "No se pudo traer el ritmo de esta cuenta.",
                 })
         self._send_json(200, {"rows": rows, "simulated": simulated})
+
+    # Campañas activas de una cuenta vigilada, con KPIs del mes en curso y
+    # su presupuesto diario — para poder ajustarlo sin salir de Ritmo de
+    # consumo. Lectura: cualquier usuario con acceso a la cuenta. El ajuste
+    # en sí (POST más abajo) es la única escritura real de esta sección.
+    def _handle_pacing_account_campaigns(self, query):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not google_ads_client.is_configured():
+            self._send_json(200, {"rows": google_ads_client.simulated_account_campaigns_budget(customer_id), "simulated": True})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+        try:
+            rows = google_ads_client.fetch_account_campaigns_budget(customer_id)
+            self._send_json(200, {"rows": rows, "simulated": False})
+        except Exception as e:  # noqa: BLE001
+            self._send_google_ads_error(e)
+
+    def _handle_pacing_campaign_budget_adjust(self, payload):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not _write_limiter.allow(f"user:{user['id']}", *WRITE_RATE_LIMIT):
+            self._send_json(429, {"error": "Demasiadas escrituras seguidas. Espera un minuto y vuelve a intentar."})
+            return
+        customer_id = str(payload.get("customer_id") or "").strip()
+        budget_resource_name = str(payload.get("budget_resource_name") or "").strip()
+        validate_only = payload.get("validate_only", True) is not False
+        try:
+            new_daily_budget = float(payload.get("new_daily_budget"))
+        except (TypeError, ValueError):
+            self._send_json(400, {"error": "new_daily_budget debe ser un número."})
+            return
+
+        if not customer_id or not budget_resource_name:
+            self._send_json(400, {"error": "Faltan customer_id o budget_resource_name."})
+            return
+
+        if not google_ads_client.is_configured():
+            try:
+                result = google_ads_client.simulated_update_campaign_daily_budget(new_daily_budget, validate_only)
+                self._send_json(200, result)
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            result = google_ads_client.update_campaign_daily_budget(customer_id, budget_resource_name, new_daily_budget, validate_only)
+            self._send_json(200, result)
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+        except Exception as e:  # noqa: BLE001
+            self._send_google_ads_error(e)
 
     # Sub-MCCs del MCC — usado tanto por Ritmo de consumo (agregar todas sus
     # cuentas a la vez) como por el selector de cuenta de ROAS (filtrar la

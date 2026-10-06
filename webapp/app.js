@@ -322,6 +322,21 @@ const state = {
       status: 'idle', groups: [], filter: '', error: null,
       addStatus: 'idle', addError: null, addResult: null, // addResult: {found, added}
     },
+    // Ventana flotante con las campañas activas de una cuenta vigilada
+    // (KPIs del mes en curso + presupuesto diario, ajustable) — se abre al
+    // hacer click en el nombre de la cuenta en la tabla.
+    campaignsModal: {
+      customerId: null, accountName: null,
+      status: 'idle', rows: null, error: null, simulated: false,
+      adjust: {
+        budgetResourceName: null, newBudget: '',
+        status: 'idle', preview: null, result: null, error: null,
+      },
+      // IDs de campaña cuyo ROAS objetivo ya se mostró al hacer click en
+      // la estrategia de puja — se arma al vuelo, nada que traer del
+      // servidor (target_roas ya viene en la fila).
+      revealedRoasIds: new Set(),
+    },
   },
 
   // Solo visible/usable para usuarios con is_admin=1 (el servidor también
@@ -7751,7 +7766,7 @@ function pacingRowHtml(r) {
   const c = pacingComputed(r);
   return `
     <tr>
-      <td>${escapeHtml(r.account_name)}<div class="footnote">${escapeHtml(r.customer_id)}</div></td>
+      <td><button class="btn-link" data-pacing-campaigns-open="${escapeHtml(r.customer_id)}" data-pacing-campaigns-open-name="${escapeHtml(r.account_name)}">${escapeHtml(r.account_name)}</button><div class="footnote">${escapeHtml(r.customer_id)}</div></td>
       <td>${c.hasTarget ? fmtMoney(r.monthly_target) : 'N/D'}</td>
       <td>${fmtMoney(r.spend_mtd)}</td>
       <td>${c.hasTarget ? `<strong style="color:${pacingSemaforoColor(c.deviationPct)}">${fmtPct0(c.consumedPct)}</strong>` : 'N/D'}</td>
@@ -7798,6 +7813,217 @@ function renderPacingTable() {
     </div>`;
 }
 
+function openPacingCampaignsModal(customerId, accountName) {
+  const cm = state.pacing.campaignsModal;
+  cm.customerId = customerId; cm.accountName = accountName;
+  cm.status = 'loading'; cm.rows = null; cm.error = null;
+  cm.adjust = { budgetResourceName: null, newBudget: '', status: 'idle', preview: null, result: null, error: null };
+  cm.revealedRoasIds = new Set();
+  render();
+  fetch(`/api/google-ads/pacing/account-campaigns?customer_id=${encodeURIComponent(customerId)}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      cm.rows = data.rows || [];
+      cm.simulated = !!data.simulated;
+      cm.status = 'ready';
+      render();
+    })
+    .catch((err) => {
+      cm.status = 'error'; cm.error = err.message || String(err);
+      render();
+    });
+}
+
+function closePacingCampaignsModal() {
+  const cm = state.pacing.campaignsModal;
+  cm.customerId = null; cm.accountName = null; cm.status = 'idle'; cm.rows = null; cm.error = null;
+  render();
+}
+
+function startPacingBudgetEdit(budgetResourceName) {
+  const cm = state.pacing.campaignsModal;
+  cm.adjust = { budgetResourceName, newBudget: '', status: 'idle', preview: null, result: null, error: null };
+  render();
+}
+
+function cancelPacingBudgetEdit() {
+  const cm = state.pacing.campaignsModal;
+  cm.adjust = { budgetResourceName: null, newBudget: '', status: 'idle', preview: null, result: null, error: null };
+  render();
+}
+
+function adjustPacingCampaignBudget(preview) {
+  const cm = state.pacing.campaignsModal;
+  const adj = cm.adjust;
+  const row = (cm.rows || []).find((r) => r.budget_resource_name === adj.budgetResourceName);
+  if (!row) { adj.error = 'No se encontró la campaña.'; render(); return; }
+
+  const newBudget = parseFloat(adj.newBudget);
+  if (Number.isNaN(newBudget) || newBudget <= 0) {
+    adj.error = 'Escribe un presupuesto diario válido, mayor que cero.';
+    render();
+    return;
+  }
+
+  adj.status = preview ? 'previewing' : 'applying';
+  adj.error = null;
+  render();
+
+  fetch('/api/google-ads/pacing/campaign-budget-adjust', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customer_id: cm.customerId,
+      budget_resource_name: row.budget_resource_name,
+      new_daily_budget: newBudget,
+      validate_only: preview,
+    }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      if (preview) {
+        adj.status = 'preview_ready';
+        adj.preview = { newBudget, campaignName: row.campaign_name };
+      } else {
+        adj.status = 'done';
+        adj.result = { newBudget, campaignName: row.campaign_name };
+        row.daily_budget = newBudget; // refleja el nuevo valor en la tabla sin tener que volver a traer todo
+      }
+      render();
+    })
+    .catch((err) => {
+      adj.status = 'error';
+      adj.error = err.message || String(err);
+      render();
+    });
+}
+
+function pacingBudgetAdjustCell(row) {
+  const cm = state.pacing.campaignsModal;
+  const adj = cm.adjust;
+  const isEditing = adj.budgetResourceName === row.budget_resource_name;
+
+  if (!isEditing) {
+    if (row.is_shared) {
+      return `<span class="footnote" title="Esta campaña usa un presupuesto compartido con otras campañas — ajustarlo desde acá afectaría a todas, así que se deja en solo lectura.">Compartido — solo lectura</span>`;
+    }
+    return `<button class="btn-outline xs" data-action="pacing-budget-edit-start" data-budget="${escapeHtml(row.budget_resource_name)}">Ajustar</button>`;
+  }
+
+  const busy = adj.status === 'previewing' || adj.status === 'applying';
+
+  if (adj.status === 'idle' || adj.status === 'error') {
+    return `
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <input type="text" id="pacing-budget-adjust-input" value="${escapeHtml(adj.newBudget)}" placeholder="ej. 50" style="width:70px" />
+        <button class="btn-accent xs" data-action="pacing-budget-edit-preview" ${busy ? 'disabled' : ''}>Vista previa</button>
+        <button class="btn-outline xs" data-action="pacing-budget-edit-cancel">Cancelar</button>
+      </div>
+      ${adj.error ? `<div class="error-panel" style="margin-top:6px;font-size:11.5px">${escapeHtml(adj.error)}</div>` : ''}`;
+  }
+
+  if (busy) {
+    return `<p class="footnote">${adj.status === 'previewing' ? 'Validando…' : 'Aplicando…'}</p>`;
+  }
+
+  if (adj.status === 'preview_ready' && adj.preview) {
+    return `
+      <div class="ok-panel" style="margin:4px 0;padding:8px 10px;font-size:11.5px">
+        <strong>Vista previa lista.</strong> Presupuesto diario de "${escapeHtml(adj.preview.campaignName)}" a ${fmtMoney(adj.preview.newBudget)} — cambia el gasto real en producción.
+        <div style="margin-top:6px;display:flex;gap:6px">
+          <button class="btn-accent xs" data-action="pacing-budget-edit-confirm">Confirmar y aplicar</button>
+          <button class="btn-outline xs" data-action="pacing-budget-edit-cancel">Cancelar</button>
+        </div>
+      </div>`;
+  }
+
+  if (adj.status === 'done' && adj.result) {
+    return `<div class="ok-panel" style="margin:4px 0;padding:6px 10px;font-size:11.5px"><strong>Listo.</strong> Presupuesto actualizado a ${fmtMoney(adj.result.newBudget)}.</div>`;
+  }
+
+  return '';
+}
+
+function togglePacingRoasReveal(campaignId) {
+  const ids = state.pacing.campaignsModal.revealedRoasIds;
+  if (ids.has(campaignId)) ids.delete(campaignId);
+  else ids.add(campaignId);
+  render();
+}
+
+function pacingStrategyCell(row) {
+  const label = BID_STRATEGY_LABELS_ES[row.bidding_strategy_type] || row.bidding_strategy_type;
+  if (row.target_roas == null) return escapeHtml(label);
+  const revealed = state.pacing.campaignsModal.revealedRoasIds.has(row.campaign_id);
+  const text = revealed ? `${escapeHtml(label)} — ${(row.target_roas * 100).toFixed(0)}%` : escapeHtml(label);
+  return `<button class="btn-link" data-pacing-roas-toggle="${escapeHtml(row.campaign_id)}" title="Click para ${revealed ? 'ocultar' : 'ver'} el ROAS objetivo">${text}</button>`;
+}
+
+function pacingCampaignRowHtml(row) {
+  return `
+    <tr>
+      <td>${escapeHtml(row.campaign_name)}</td>
+      <td>${pacingStrategyCell(row)}</td>
+      <td>${fmtInt(row.impressions)}</td>
+      <td>${fmtInt(row.clicks)}</td>
+      <td>${row.ctr != null ? (row.ctr * 100).toFixed(2) + '%' : 'N/D'}</td>
+      <td>${fmtMoney(row.cost)}</td>
+      <td>${fmtInt(row.conversions)}</td>
+      <td>${row.cost_per_conv != null ? fmtMoney(row.cost_per_conv) : 'N/D'}</td>
+      <td>${row.daily_budget != null ? fmtMoney(row.daily_budget) : 'N/D'}</td>
+      <td>${pacingBudgetAdjustCell(row)}</td>
+    </tr>`;
+}
+
+function renderPacingCampaignsModal() {
+  const cm = state.pacing.campaignsModal;
+  if (!cm.customerId) return '';
+
+  let body = '';
+  if (cm.status === 'loading') {
+    body = `<div class="state-panel loading"><div class="spinner"></div><p>Trayendo campañas…</p></div>`;
+  } else if (cm.status === 'error') {
+    body = `<div class="error-panel">${escapeHtml(cm.error)}</div>`;
+  } else if (cm.status === 'ready') {
+    if (!cm.rows || !cm.rows.length) {
+      body = `<div class="ok-panel">Sin campañas activas para esta cuenta.</div>`;
+    } else {
+      const rowsHtml = cm.rows.map((r) => pacingCampaignRowHtml(r)).join('');
+      body = `
+        ${cm.simulated ? `<div class="ok-panel" style="margin-bottom:12px"><strong>Modo simulado.</strong> Datos de ejemplo, no de una cuenta real.</div>` : ''}
+        <div class="table-scroll">
+          <table>
+            <thead><tr>
+              <th>Campaña</th>
+              <th>Estrategia de puja</th>
+              <th>Impresiones</th>
+              <th>Clics</th>
+              <th>CTR</th>
+              <th>Costo (mes)</th>
+              <th>Conversiones</th>
+              <th>Costo/conv</th>
+              <th>Presupuesto diario</th>
+              <th></th>
+            </tr></thead>
+            <tbody>${rowsHtml}</tbody>
+          </table>
+        </div>
+        <p class="footnote" style="margin-top:12px">Solo campañas con status ENABLED. KPIs del mes en curso (mismo rango que el resto de Ritmo de consumo). Ajustar el presupuesto diario escribe de inmediato en la cuenta real de Google Ads — siempre pasa por vista previa antes de aplicar.</p>`;
+    }
+  }
+
+  return `
+    <div class="modal-overlay pacing-campaigns-overlay">
+      <div class="modal-box card" data-modal-stop-propagation style="max-width:860px">
+        <button class="modal-close" data-action="pacing-campaigns-close" aria-label="Cerrar">${icon('x', 18)}</button>
+        <h3 class="dense-chart-title" style="margin:0 0 16px;padding-right:28px">${escapeHtml(cm.accountName)}</h3>
+        ${body}
+      </div>
+    </div>`;
+}
+
 function renderPacingPage() {
   const p = state.pacing;
   ensurePacingStatusLoaded();
@@ -7815,6 +8041,7 @@ function renderPacingPage() {
     ${renderPacingAddPanel()}
     ${renderPacingTable()}
     ${p.error ? `<div class="error-panel" style="margin-top:12px">${escapeHtml(p.error)}</div>` : ''}
+    ${renderPacingCampaignsModal()}
   `;
 }
 
@@ -8591,6 +8818,24 @@ function bindEvents() {
   document.querySelectorAll('[data-pacing-mcc-pick]').forEach((btn) => {
     btn.addEventListener('click', () => addPacingMccGroup(btn.dataset.pacingMccPick, btn.dataset.pacingMccPickName));
   });
+  document.querySelectorAll('[data-pacing-campaigns-open]').forEach((btn) => {
+    btn.addEventListener('click', () => openPacingCampaignsModal(btn.dataset.pacingCampaignsOpen, btn.dataset.pacingCampaignsOpenName));
+  });
+  const pacingCampaignsOverlay = document.querySelector('.pacing-campaigns-overlay');
+  if (pacingCampaignsOverlay) pacingCampaignsOverlay.addEventListener('click', (e) => {
+    if (e.target.closest('[data-modal-stop-propagation]')) return;
+    closePacingCampaignsModal();
+  });
+  const pacingBudgetAdjustInput = document.getElementById('pacing-budget-adjust-input');
+  if (pacingBudgetAdjustInput) pacingBudgetAdjustInput.addEventListener('input', (e) => {
+    state.pacing.campaignsModal.adjust.newBudget = e.target.value;
+  });
+  document.querySelectorAll('[data-action="pacing-budget-edit-start"]').forEach((btn) => {
+    btn.addEventListener('click', () => startPacingBudgetEdit(btn.dataset.budget));
+  });
+  document.querySelectorAll('[data-pacing-roas-toggle]').forEach((btn) => {
+    btn.addEventListener('click', () => togglePacingRoasReveal(btn.dataset.pacingRoasToggle));
+  });
   // Administración
   const adminGrantUser = document.getElementById('admin-grant-user');
   if (adminGrantUser) adminGrantUser.addEventListener('change', (e) => { state.admin.grant.userId = e.target.value; });
@@ -8777,6 +9022,10 @@ function handleAction(action) {
     case 'pacing-load-accounts': loadPacingAccounts(); break;
     case 'pacing-mcc-load': loadPacingMccGroups(); break;
     case 'pacing-clear-watchlist': clearPacingWatchlist(); break;
+    case 'pacing-campaigns-close': closePacingCampaignsModal(); break;
+    case 'pacing-budget-edit-preview': adjustPacingCampaignBudget(true); break;
+    case 'pacing-budget-edit-confirm': adjustPacingCampaignBudget(false); break;
+    case 'pacing-budget-edit-cancel': cancelPacingBudgetEdit(); break;
     case 'pacing-add-account': addPacingWatchlistAccount(); break;
     case 'kwp-geo-search': searchKeywordPlannerGeo(); break;
     case 'kwp-network-search': state.keywordPlanner.network = 'GOOGLE_SEARCH'; render(); break;
@@ -9036,11 +9285,15 @@ sidebarToggleBtn?.addEventListener('click', () => {
   sidebarToggleBtn.setAttribute('aria-label', sidebarToggleBtn.title);
 });
 
-// Cerrar la ventana flotante del histórico de keywords con Escape.
+// Cerrar la ventana flotante del histórico de keywords, o la de campañas
+// de Ritmo de consumo, con Escape.
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && state.keywordPlanner.historico.modalKeyword) {
+  if (e.key !== 'Escape') return;
+  if (state.keywordPlanner.historico.modalKeyword) {
     state.keywordPlanner.historico.modalKeyword = null;
     render();
+  } else if (state.pacing.campaignsModal.customerId) {
+    closePacingCampaignsModal();
   }
 });
 

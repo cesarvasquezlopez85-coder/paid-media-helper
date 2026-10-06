@@ -37,6 +37,7 @@ import datetime
 import json
 import os
 import time
+from collections import Counter
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -389,6 +390,110 @@ def fetch_account_pacing(customer_id):
         "days_elapsed": today.day,
         "days_in_month": days_in_month,
     }
+
+
+def fetch_account_campaigns_budget(customer_id):
+    """Campañas ACTIVAS de la cuenta con sus KPIs principales del mes en
+    curso y su presupuesto diario — para poder ajustarlo directo desde
+    Ritmo de consumo sin saltar a Rendimiento. A diferencia de
+    fetch_campaign_rows (que trae también Impression Share en una segunda
+    consulta aparte), acá solo lo necesario para esta vista, más liviano.
+
+    campaign_budget.explicitly_shared: una campaña puede usar un
+    presupuesto COMPARTIDO con otras — ajustarlo de acá afectaría a todas
+    las que lo comparten sin que quede claro cuáles son, así que esas
+    quedan marcadas is_shared=True para que la interfaz las deje en solo
+    lectura (mismo criterio que is_portfolio en ROAS).
+
+    OJO: explicitly_shared NO alcanza para detectar todos los casos reales
+    — confirmado contra una cuenta real, dos campañas (una de ellas
+    claramente una de prueba sin gasto) apuntaban al MISMO
+    campaign_budget.resource_name con explicitly_shared=False en ambas
+    (un presupuesto se puede reutilizar entre campañas sin pasar por el
+    flujo de "presupuesto compartido" de la UI, y ese flag no lo refleja).
+    Por eso acá se cuenta cuántas campañas activas usan cada
+    resource_name y se marca is_shared=True también cuando aparece más de
+    una vez, sin depender solo del flag de Google."""
+    today = datetime.date.today()
+    month_start = today.replace(day=1)
+    query = f"""
+        SELECT campaign.id, campaign.name, campaign.bidding_strategy_type,
+               campaign.target_roas.target_roas, campaign.maximize_conversion_value.target_roas,
+               campaign_budget.resource_name, campaign_budget.amount_micros,
+               campaign_budget.explicitly_shared,
+               metrics.impressions, metrics.clicks, metrics.ctr,
+               metrics.cost_micros, metrics.conversions, metrics.cost_per_conversion
+        FROM campaign
+        WHERE campaign.status = 'ENABLED'
+          AND segments.date BETWEEN '{month_start.isoformat()}' AND '{today.isoformat()}'
+    """
+    results = _search(customer_id, query)
+    rows = []
+    for r in results:
+        campaign = r.get("campaign", {})
+        budget = r.get("campaignBudget", {})
+        metrics = r.get("metrics", {})
+        target_roas = campaign.get("targetRoas", {}).get("targetRoas")
+        if target_roas is None:
+            target_roas = campaign.get("maximizeConversionValue", {}).get("targetRoas")
+        rows.append({
+            "campaign_id": str(campaign.get("id")),
+            "campaign_name": campaign.get("name") or "(sin nombre)",
+            "bidding_strategy_type": campaign.get("biddingStrategyType") or "UNSPECIFIED",
+            "target_roas": _float_or_none(target_roas),
+            "budget_resource_name": budget.get("resourceName"),
+            "daily_budget": _micros_to_units(_int_or_none(budget.get("amountMicros"))),
+            "is_shared": bool(budget.get("explicitlyShared")),
+            "impressions": _int_or_none(metrics.get("impressions")),
+            "clicks": _int_or_none(metrics.get("clicks")),
+            "ctr": _float_or_none(metrics.get("ctr")),
+            "cost": _micros_to_units(_int_or_none(metrics.get("costMicros"))) or 0,
+            "conversions": _float_or_none(metrics.get("conversions")),
+            "cost_per_conv": _micros_to_units(_float_or_none(metrics.get("costPerConversion"))),
+        })
+    budget_counts = Counter(r["budget_resource_name"] for r in rows)
+    for r in rows:
+        if budget_counts[r["budget_resource_name"]] > 1:
+            r["is_shared"] = True
+    rows.sort(key=lambda r: r["cost"], reverse=True)
+    return rows
+
+
+def update_campaign_daily_budget(customer_id, budget_resource_name, new_daily_budget, validate_only=True):
+    """Ajusta el presupuesto DIARIO de una campaña (campaign_budget, no
+    campaign — son recursos separados en la API). new_daily_budget en
+    unidades de cuenta (no micros). Mismo patrón que
+    update_campaign_target_roas: validate_only=True es solo vista previa,
+    False escribe de verdad."""
+    if not new_daily_budget or new_daily_budget <= 0:
+        raise ValueError("El presupuesto diario debe ser un número mayor que cero.")
+    if not budget_resource_name or f"/customers/{customer_id}/" not in f"/{budget_resource_name}":
+        raise ValueError("El presupuesto no corresponde a esta cuenta.")
+
+    url = f"{BASE_URL}/customers/{customer_id}/campaignBudgets:mutate"
+    body = {
+        "operations": [{
+            "update": {
+                "resourceName": budget_resource_name,
+                "amountMicros": str(_units_to_micros(new_daily_budget)),
+            },
+            "updateMask": "amount_micros",
+        }],
+        "validateOnly": validate_only,
+    }
+    req = urllib.request.Request(
+        url, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Google Ads API respondió {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"No se pudo conectar a la API de Google Ads: {e.reason}") from e
+
+    return {"validate_only": validate_only, "applied": not validate_only, "new_daily_budget": new_daily_budget}
 
 
 # ---------------------------------------------------------------------------
@@ -1573,6 +1678,36 @@ def simulated_account_pacing(customer_id):
         "days_elapsed": today.day,
         "days_in_month": days_in_month,
     }
+
+
+def simulated_account_campaigns_budget(customer_id):
+    rows = simulated_campaign_rows(only_active=True)
+    out = []
+    for c in rows:
+        cid = _SIMULATED_CAMPAIGN_IDS_BY_NAME.get(c["campaign"], c["campaign"])
+        out.append({
+            "campaign_id": cid,
+            "campaign_name": c["campaign"],
+            "bidding_strategy_type": c["bid_strategy"],
+            "target_roas": _SIMULATED_TARGET_ROAS_BY_NAME.get(c["campaign"]),
+            "budget_resource_name": f"customers/{customer_id}/campaignBudgets/{cid}",
+            "daily_budget": c["budget"],
+            "is_shared": False,
+            "impressions": c["impressions"],
+            "clicks": c["clicks"],
+            "ctr": c["ctr"],
+            "cost": c["cost"],
+            "conversions": c["conversions"],
+            "cost_per_conv": c["cost_per_conv"],
+        })
+    out.sort(key=lambda r: r["cost"], reverse=True)
+    return out
+
+
+def simulated_update_campaign_daily_budget(new_daily_budget, validate_only=True):
+    if not new_daily_budget or new_daily_budget <= 0:
+        raise ValueError("El presupuesto diario debe ser un número mayor que cero.")
+    return {"validate_only": validate_only, "applied": not validate_only, "new_daily_budget": new_daily_budget, "simulated": True}
 
 
 # IDs consistentes con SIMULATED_ACCOUNT_CAMPAIGNS donde coinciden, más uno
