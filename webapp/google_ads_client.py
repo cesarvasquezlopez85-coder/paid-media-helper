@@ -153,6 +153,67 @@ def list_client_accounts():
     return accounts
 
 
+def list_mcc_groups():
+    """Sub-MCCs de nivel 1 bajo el MCC raíz (una "marca" de hotel, por
+    ejemplo "Estelar Hoteles MCC") — para poder elegir UNA y agregar sus
+    ~40 cuentas de un jalón en Ritmo de consumo, en vez de una por una. No
+    baja más niveles acá (eso lo hace list_mcc_group_accounts cuando el
+    usuario ya eligió cuál)."""
+    mcc_id = os.environ["GOOGLE_ADS_LOGIN_CUSTOMER_ID"]
+    query = """
+        SELECT customer_client.id, customer_client.descriptive_name
+        FROM customer_client
+        WHERE customer_client.status = 'ENABLED'
+          AND customer_client.level = 1
+          AND customer_client.manager = TRUE
+    """
+    rows = _search(mcc_id, query)
+    groups = []
+    for r in rows:
+        cc = r.get("customerClient", {})
+        groups.append({
+            "id": str(cc.get("id")),
+            "name": cc.get("descriptiveName") or f"MCC {cc.get('id')}",
+        })
+    return groups
+
+
+def list_mcc_group_accounts(group_customer_id):
+    """Todas las cuentas de cliente (hoja, no sub-MCC) debajo de un sub-MCC
+    — confirmado contra cuentas reales que algunas marcas tienen sub-MCCs
+    anidados adentro (ej. una agrupación regional), así que no basta con
+    mirar un solo nivel: se recorre recursivamente, consultando
+    customer_client con level<=1 desde CADA sub-MCC encontrado (nivel 0 =
+    el propio nodo consultado, se descarta) hasta agotar la rama."""
+    accounts = []
+    to_visit = [group_customer_id]
+    visited = set()
+    query = """
+        SELECT customer_client.id, customer_client.descriptive_name, customer_client.manager
+        FROM customer_client
+        WHERE customer_client.status = 'ENABLED' AND customer_client.level <= 1
+    """
+    while to_visit:
+        current = to_visit.pop()
+        if current in visited:
+            continue
+        visited.add(current)
+        rows = _search(current, query)
+        for r in rows:
+            cc = r.get("customerClient", {})
+            cid = str(cc.get("id"))
+            if cid == current:
+                continue  # nivel 0: el propio nodo consultado
+            if cc.get("manager"):
+                to_visit.append(cid)
+            else:
+                accounts.append({
+                    "id": cid,
+                    "name": cc.get("descriptiveName") or f"Cuenta {cid}",
+                })
+    return accounts
+
+
 _CHANNEL_TYPE_ALIASES = {
     "SEARCH": "search",
     "DISPLAY": "display",

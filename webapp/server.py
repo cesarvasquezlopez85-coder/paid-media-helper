@@ -353,6 +353,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_pacing_watchlist()
             return
 
+        if path == "/api/google-ads/pacing/mcc-groups":
+            if not self._require_auth_json():
+                return
+            self._handle_pacing_mcc_groups()
+            return
+
         if path == "/api/google-ads/campaigns":
             if not self._require_auth_json():
                 return
@@ -470,6 +476,10 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_pacing_watchlist_remove(payload)
+        elif path == "/api/google-ads/pacing/watchlist/add-mcc-group":
+            if not self._require_auth_json():
+                return
+            self._handle_pacing_watchlist_add_mcc_group(payload)
         elif path == "/api/google-ads/negative-keywords":
             if not self._require_auth_json():
                 return
@@ -1191,6 +1201,56 @@ class Handler(SimpleHTTPRequestHandler):
                     "error": "No se pudo traer el ritmo de esta cuenta.",
                 })
         self._send_json(200, {"rows": rows, "simulated": simulated})
+
+    # Agregar un sub-MCC completo (ej. "Estelar Hoteles MCC", con 40+
+    # cuentas) de un jalón — solo para administradores, mismo criterio que
+    # "Buscar en las cuentas del MCC" en Administración: ver los nombres de
+    # TODAS las agrupaciones de clientes del MCC no es algo que cualquier
+    # usuario no-admin deba poder explorar.
+    def _handle_pacing_mcc_groups(self):
+        user = self._require_admin_json()
+        if not user:
+            return
+        if not google_ads_client.is_configured():
+            self._send_json(200, {"groups": [], "simulated": True})
+            return
+        try:
+            groups = google_ads_client.list_mcc_groups()
+            self._send_json(200, {"groups": groups, "simulated": False})
+        except Exception as e:  # noqa: BLE001
+            self._send_google_ads_error(e)
+
+    def _handle_pacing_watchlist_add_mcc_group(self, payload):
+        user = self._require_admin_json()
+        if not user:
+            return
+        group_customer_id = str(payload.get("group_customer_id") or "").strip()
+        if not group_customer_id.isdigit():
+            self._send_json(400, {"error": "group_customer_id debe ser numérico."})
+            return
+        if not google_ads_client.is_configured():
+            self._send_json(400, {"error": "La API de Google Ads no está configurada."})
+            return
+        try:
+            accounts = google_ads_client.list_mcc_group_accounts(group_customer_id)
+        except Exception as e:  # noqa: BLE001
+            self._send_google_ads_error(e)
+            return
+        conn = get_db()
+        try:
+            added = 0
+            for acc in accounts:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO user_pacing_watchlist (user_id, customer_id, account_name, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (user["id"], acc["id"], acc["name"], time.time()),
+                )
+                if cur.rowcount:
+                    added += 1
+            conn.commit()
+        finally:
+            conn.close()
+        self._send_json(200, {"ok": True, "found": len(accounts), "added": added})
 
     def _handle_google_ads_campaigns(self, query):
         customer_id = (query.get("customer_id") or [""])[0].strip()

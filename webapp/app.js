@@ -269,6 +269,12 @@ const state = {
     accountsStatus: 'idle', accounts: [], accountToAdd: '', accountsError: null,
     watchlistStatus: 'idle', watchlist: null, // [{customer_id, account_name}]
     rowsStatus: 'idle', rows: null, error: null, simulated: false,
+    // Agregar un sub-MCC completo de un jalón (solo admins) — ver
+    // list_mcc_groups/list_mcc_group_accounts en google_ads_client.py.
+    mcc: {
+      status: 'idle', groups: [], filter: '', error: null,
+      addStatus: 'idle', addError: null, addResult: null, // addResult: {found, added}
+    },
   },
 
   // Solo visible/usable para usuarios con is_admin=1 (el servidor también
@@ -6612,6 +6618,97 @@ function removePacingWatchlistAccount(customerId) {
     .catch((err) => { p.error = err.message || String(err); render(); });
 }
 
+function loadPacingMccGroups() {
+  const m = state.pacing.mcc;
+  m.status = 'loading'; m.error = null;
+  render();
+  fetch('/api/google-ads/pacing/mcc-groups')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      m.groups = data.groups || [];
+      m.status = 'ready';
+      render();
+    })
+    .catch((err) => {
+      m.status = 'error'; m.error = err.message || String(err);
+      render();
+    });
+}
+
+function addPacingMccGroup(groupCustomerId, groupName) {
+  const m = state.pacing.mcc;
+  m.addStatus = 'loading'; m.addError = null; m.addResult = null;
+  render();
+  fetch('/api/google-ads/pacing/watchlist/add-mcc-group', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_customer_id: groupCustomerId }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      m.addStatus = 'idle';
+      m.addResult = { name: groupName, found: data.found, added: data.added };
+      loadPacingWatchlist();
+    })
+    .catch((err) => {
+      m.addStatus = 'error'; m.addError = err.message || String(err);
+      render();
+    });
+}
+
+function renderPacingMccPanel() {
+  if (!currentUser.isAdmin) return '';
+  const m = state.pacing.mcc;
+
+  let body = '';
+  if (m.status === 'idle') {
+    body = `<button class="btn-outline sm" data-action="pacing-mcc-load">Buscar un MCC completo (ej. una cadena de hoteles)</button>`;
+  } else if (m.status === 'loading') {
+    body = `<p class="footnote">Cargando las agrupaciones del MCC…</p>`;
+  } else if (m.status === 'error') {
+    body = `<div class="error-panel">${escapeHtml(m.error)}</div>`;
+  } else if (m.status === 'ready') {
+    if (!m.groups.length) {
+      body = `<p class="footnote">No hay sub-MCCs disponibles en modo simulado.</p>`;
+    } else {
+      const filter = (m.filter || '').trim().toLowerCase();
+      let matches = [];
+      if (filter.length >= 2) {
+        matches = m.groups.filter((g) => g.id.includes(filter) || (g.name || '').toLowerCase().includes(filter)).slice(0, 25);
+      }
+      const matchesHtml = matches.length
+        ? `<div class="table-scroll" style="max-height:220px;margin-top:8px">
+            <table>
+              <tbody>
+                ${matches.map((g) => `
+                  <tr>
+                    <td>${escapeHtml(g.name)}</td>
+                    <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(g.id)}</td>
+                    <td><button class="btn-outline xs" data-pacing-mcc-pick="${escapeHtml(g.id)}" data-pacing-mcc-pick-name="${escapeHtml(g.name)}" ${m.addStatus === 'loading' ? 'disabled' : ''}>Agregar sus cuentas</button></td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>`
+        : (filter.length >= 2 ? `<p class="footnote" style="margin-top:8px">Sin resultados para "${escapeHtml(filter)}".</p>` : '');
+      body = `
+        <input type="text" id="pacing-mcc-filter" placeholder="Busca por nombre o ID del MCC (${m.groups.length} agrupaciones)…" value="${escapeHtml(m.filter)}" style="width:100%" />
+        ${matchesHtml}
+        ${m.addStatus === 'loading' ? '<p class="footnote" style="margin-top:8px">Agregando sus cuentas…</p>' : ''}
+        ${m.addError ? `<div class="error-panel" style="margin-top:8px">${escapeHtml(m.addError)}</div>` : ''}
+        ${m.addResult ? `<div class="ok-panel" style="margin-top:8px">"${escapeHtml(m.addResult.name)}" — ${m.addResult.found} cuenta(s) encontradas, ${m.addResult.added} nueva(s) agregada(s) a vigilar.</div>` : ''}`;
+    }
+  }
+
+  return `
+    <div class="card control-panel" style="flex-direction:column;align-items:stretch;gap:10px;margin-bottom:20px">
+      <label style="font-weight:600">Agregar un MCC completo</label>
+      <p class="footnote" style="margin:0">Para hoteles con muchas cuentas (40 o más) — agrega de un jalón todas las cuentas que cuelgan de un sub-MCC, en vez de elegirlas una por una.</p>
+      ${body}
+    </div>`;
+}
+
 function renderPacingAddPanel() {
   const p = state.pacing;
   const watchedIds = new Set((p.watchlist || []).map((w) => w.customer_id));
@@ -6739,6 +6836,7 @@ function renderPacingPage() {
 
   return `
     ${simulatedNotice}
+    ${renderPacingMccPanel()}
     ${renderPacingAddPanel()}
     ${renderPacingTable()}
     ${p.error ? `<div class="error-panel" style="margin-top:12px">${escapeHtml(p.error)}</div>` : ''}
@@ -7456,6 +7554,14 @@ function bindEvents() {
   document.querySelectorAll('[data-pacing-remove]').forEach((btn) => {
     btn.addEventListener('click', () => removePacingWatchlistAccount(btn.dataset.pacingRemove));
   });
+  const pacingMccFilter = document.getElementById('pacing-mcc-filter');
+  if (pacingMccFilter) pacingMccFilter.addEventListener('input', (e) => {
+    state.pacing.mcc.filter = e.target.value;
+    render();
+  });
+  document.querySelectorAll('[data-pacing-mcc-pick]').forEach((btn) => {
+    btn.addEventListener('click', () => addPacingMccGroup(btn.dataset.pacingMccPick, btn.dataset.pacingMccPickName));
+  });
   // Administración
   const adminGrantUser = document.getElementById('admin-grant-user');
   if (adminGrantUser) adminGrantUser.addEventListener('change', (e) => { state.admin.grant.userId = e.target.value; });
@@ -7624,6 +7730,7 @@ function handleAction(action) {
     case 'kwp-api-load-accounts': loadKeywordPlannerAccounts(); break;
 
     case 'pacing-load-accounts': loadPacingAccounts(); break;
+    case 'pacing-mcc-load': loadPacingMccGroups(); break;
     case 'pacing-add-account': addPacingWatchlistAccount(); break;
     case 'kwp-geo-search': searchKeywordPlannerGeo(); break;
     case 'kwp-network-search': state.keywordPlanner.network = 'GOOGLE_SEARCH'; render(); break;
