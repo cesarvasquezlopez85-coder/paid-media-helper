@@ -154,17 +154,19 @@ def list_client_accounts():
 
 
 def list_mcc_groups():
-    """Sub-MCCs de nivel 1 bajo el MCC raíz (una "marca" de hotel, por
-    ejemplo "Estelar Hoteles MCC") — para poder elegir UNA y agregar sus
-    ~40 cuentas de un jalón en Ritmo de consumo, en vez de una por una. No
-    baja más niveles acá (eso lo hace list_mcc_group_accounts cuando el
-    usuario ya eligió cuál)."""
+    """Todos los sub-MCCs bajo el MCC raíz, en CUALQUIER nivel — no solo los
+    de nivel 1 (una "marca" de hotel, ej. "Estelar Hoteles MCC"). Confirmado
+    contra cuentas reales: algunas marcas tienen un sub-MCC anidado adentro
+    (ej. "GHL Hoteles MCC Nuevo" vive en nivel 2, dentro de otro MCC), y si
+    solo mostramos nivel 1 esos quedan invisibles en el buscador aunque
+    existan y tengan cuentas propias. No baja a las cuentas hoja acá (eso lo
+    hace list_mcc_group_accounts cuando el usuario ya eligió cuál)."""
     mcc_id = os.environ["GOOGLE_ADS_LOGIN_CUSTOMER_ID"]
     query = """
         SELECT customer_client.id, customer_client.descriptive_name
         FROM customer_client
         WHERE customer_client.status = 'ENABLED'
-          AND customer_client.level = 1
+          AND customer_client.level > 0
           AND customer_client.manager = TRUE
     """
     rows = _search(mcc_id, query)
