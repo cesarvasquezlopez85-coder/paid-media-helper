@@ -160,6 +160,13 @@ const state = {
       statusChecked: false, configured: false,
       accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
       simulated: false, error: null,
+      // Filtrar el selector de cuenta por sub-MCC (ej. una marca de hotel
+      // con decenas de cuentas) en vez de buscar en el listado plano —
+      // mismo patrón que ROAS/Rendimiento. Solo admins.
+      mcc: {
+        status: 'idle', groups: [], filter: '',
+        selectedId: '', selectedName: '', accountIdsStatus: 'idle', accountIds: null, error: null,
+      },
     },
     // Aplicar/descartar no tienen vista previa de Google (a diferencia de
     // negativos y ROAS) — cada clic ejecuta de inmediato, por eso la
@@ -4657,6 +4664,100 @@ function recImpactLabel(r) {
   return 'Ver en Google Ads';
 }
 
+function loadRecsMccGroups() {
+  const m = state.recs.api.mcc;
+  m.status = 'loading'; m.error = null;
+  render();
+  fetch('/api/google-ads/mcc-groups')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      m.groups = data.groups || [];
+      m.status = 'ready';
+      render();
+    })
+    .catch((err) => { m.status = 'error'; m.error = err.message || String(err); render(); });
+}
+
+function applyRecsMccFilter(groupId, groupName) {
+  const a = state.recs.api;
+  const m = a.mcc;
+  m.selectedId = groupId; m.selectedName = groupName;
+  m.accountIdsStatus = 'loading'; m.error = null;
+  render();
+  fetch(`/api/google-ads/mcc-group-accounts?group_customer_id=${encodeURIComponent(groupId)}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      m.accountIds = new Set((data.accounts || []).map((acc) => acc.id));
+      m.accountIdsStatus = 'ready';
+      // Si la cuenta que ya estaba elegida no cuelga de este MCC, se limpia.
+      if (a.accountId && !m.accountIds.has(a.accountId)) a.accountId = '';
+      render();
+    })
+    .catch((err) => { m.accountIdsStatus = 'error'; m.error = err.message || String(err); render(); });
+}
+
+function clearRecsMccFilter() {
+  const m = state.recs.api.mcc;
+  m.selectedId = ''; m.selectedName = ''; m.accountIds = null; m.accountIdsStatus = 'idle'; m.filter = '';
+  render();
+}
+
+function renderRecsMccFilterPanel() {
+  if (!currentUser.isAdmin) return '';
+  const m = state.recs.api.mcc;
+
+  if (m.selectedId) {
+    const countLabel = m.accountIdsStatus === 'loading' ? 'cargando…'
+      : m.accountIdsStatus === 'ready' ? `${m.accountIds.size} cuenta(s)`
+      : 'error';
+    return `
+      <div class="field">
+        <label>Filtrando por MCC</label>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="delta-badge neutral">${escapeHtml(m.selectedName)} — ${countLabel}</span>
+          <button class="btn-link" data-action="recs-mcc-clear">Quitar filtro</button>
+        </div>
+      </div>`;
+  }
+
+  if (m.status === 'idle') {
+    return `<div class="field"><button class="btn-outline sm" data-action="recs-mcc-load">Filtrar por MCC (ej. una cadena de hoteles)</button></div>`;
+  }
+  if (m.status === 'loading') {
+    return `<div class="field"><p class="footnote">Cargando agrupaciones del MCC…</p></div>`;
+  }
+  if (m.status === 'error') {
+    return `<div class="error-panel">${escapeHtml(m.error)}</div>`;
+  }
+
+  const filter = (m.filter || '').trim().toLowerCase();
+  let matches = [];
+  if (filter.length >= 2) {
+    matches = m.groups.filter((g) => g.id.includes(filter) || (g.name || '').toLowerCase().includes(filter)).slice(0, 25);
+  }
+  const matchesHtml = matches.length
+    ? `<div class="table-scroll" style="max-height:200px;margin-top:8px">
+        <table><tbody>
+          ${matches.map((g) => `
+            <tr>
+              <td>${escapeHtml(g.name)}</td>
+              <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(g.id)}</td>
+              <td><button class="btn-outline xs" data-recs-mcc-pick="${escapeHtml(g.id)}" data-recs-mcc-pick-name="${escapeHtml(g.name)}">Usar</button></td>
+            </tr>`).join('')}
+        </tbody></table>
+      </div>`
+    : (filter.length >= 2 ? `<p class="footnote" style="margin-top:8px">Sin resultados para "${escapeHtml(filter)}".</p>` : '');
+
+  return `
+    <div class="field">
+      <label>Filtrar por MCC</label>
+      <input type="text" id="recs-mcc-filter" placeholder="Busca por nombre o ID del MCC (${m.groups.length} agrupaciones)…" value="${escapeHtml(m.filter)}" style="width:320px" />
+      ${matchesHtml}
+    </div>`;
+}
+
 function renderRecsApiPanel() {
   const a = state.recs.api;
 
@@ -4686,15 +4787,18 @@ function renderRecsApiPanel() {
     return `<div class="error-panel"><strong>No se pudieron cargar las cuentas.</strong> ${escapeHtml(a.error)}</div>`;
   }
 
+  const mccFilterActive = a.mcc.selectedId && a.mcc.accountIds;
+  const visibleAccounts = mccFilterActive ? a.accounts.filter((acc) => a.mcc.accountIds.has(acc.id)) : a.accounts;
   const accountOptions = ['<option value="">Elige una cuenta…</option>']
-    .concat(a.accounts.map((acc) => `<option value="${escapeHtml(acc.id)}" ${a.accountId === acc.id ? 'selected' : ''}>${escapeHtml(acc.name)} (${escapeHtml(acc.id)})</option>`))
+    .concat(visibleAccounts.map((acc) => `<option value="${escapeHtml(acc.id)}" ${a.accountId === acc.id ? 'selected' : ''}>${escapeHtml(acc.name)} (${escapeHtml(acc.id)})</option>`))
     .join('');
 
   return `
     <div class="card control-panel align-end">
       ${simulatedNotice}
+      ${renderRecsMccFilterPanel()}
       <div class="field">
-        <label>Cuenta</label>
+        <label>Cuenta${mccFilterActive ? ` (${visibleAccounts.length} en "${escapeHtml(a.mcc.selectedName)}")` : ''}</label>
         <select id="recs-api-account" style="width:320px">${accountOptions}</select>
       </div>
       <div class="field">
@@ -7459,6 +7563,11 @@ function bindEvents() {
   if (recsApiAccount) recsApiAccount.addEventListener('change', (e) => { state.recs.api.accountId = e.target.value; });
   const recsApiAccountManual = document.getElementById('recs-api-account-manual');
   if (recsApiAccountManual) recsApiAccountManual.addEventListener('input', (e) => { state.recs.api.accountIdManual = e.target.value; });
+  const recsMccFilter = document.getElementById('recs-mcc-filter');
+  if (recsMccFilter) recsMccFilter.addEventListener('input', (e) => { state.recs.api.mcc.filter = e.target.value; render(); });
+  document.querySelectorAll('[data-recs-mcc-pick]').forEach((btn) => {
+    btn.addEventListener('click', () => applyRecsMccFilter(btn.dataset.recsMccPick, btn.dataset.recsMccPickName));
+  });
   const recsCampaignFilter = document.getElementById('recs-campaign-filter');
   if (recsCampaignFilter) recsCampaignFilter.addEventListener('change', (e) => {
     state.recs.campaignFilter = e.target.value;
@@ -7963,6 +8072,8 @@ function handleAction(action) {
     case 'roas-edit-confirm': adjustRoasTarget(false); break;
 
     case 'recs-api-load-accounts': loadRecsGoogleAdsAccounts(); break;
+    case 'recs-mcc-load': loadRecsMccGroups(); break;
+    case 'recs-mcc-clear': clearRecsMccFilter(); break;
     case 'recs-api-fetch': fetchRecommendations(); break;
 
     case 'iamax-api-load-accounts': loadIaMaxGoogleAdsAccounts(); break;
