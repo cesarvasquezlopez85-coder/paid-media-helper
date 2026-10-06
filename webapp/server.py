@@ -269,6 +269,24 @@ def init_db():
             )
             """
         )
+        # Qué cuentas quiere vigilar cada usuario en "Ritmo de consumo" —
+        # independiente de user_account_access (permiso para tocar/leer una
+        # cuenta): un admin puede acceder a cualquiera de las 1100+ cuentas
+        # del MCC pero eso no significa que quiera verlas TODAS en este
+        # tablero, así que acá cada quien arma su propia lista.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_pacing_watchlist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                customer_id TEXT NOT NULL,
+                account_name TEXT,
+                created_at REAL NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                UNIQUE(user_id, customer_id)
+            )
+            """
+        )
         # PMH_ADMIN_USERNAMES es solo un piso mínimo garantizado en cada
         # arranque (para nunca quedar sin ningún admin) — SOLO sube a admin
         # a esos usernames, nunca baja a nadie. Bajar el flag a alguien más
@@ -321,6 +339,18 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_google_ads_accounts()
+            return
+
+        if path == "/api/google-ads/pacing":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_pacing()
+            return
+
+        if path == "/api/google-ads/pacing/watchlist":
+            if not self._require_auth_json():
+                return
+            self._handle_pacing_watchlist()
             return
 
         if path == "/api/google-ads/campaigns":
@@ -432,6 +462,14 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_login(payload)
         elif path == "/api/logout":
             self._handle_logout()
+        elif path == "/api/google-ads/pacing/watchlist/add":
+            if not self._require_auth_json():
+                return
+            self._handle_pacing_watchlist_add(payload)
+        elif path == "/api/google-ads/pacing/watchlist/remove":
+            if not self._require_auth_json():
+                return
+            self._handle_pacing_watchlist_remove(payload)
         elif path == "/api/google-ads/negative-keywords":
             if not self._require_auth_json():
                 return
@@ -1040,6 +1078,119 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(200, {"accounts": accounts, "simulated": False})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)
+
+    # ---- Ritmo de consumo ---------------------------------------------
+    # Qué cuentas vigila cada usuario vive en user_pacing_watchlist, aparte
+    # de user_account_access (permiso de lectura/escritura) — ver el
+    # comentario en init_db. El flujo de "a cuáles tengo acceso para poder
+    # agregarlas" sigue siendo /api/google-ads/accounts de siempre.
+
+    def _handle_pacing_watchlist(self):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT customer_id, account_name FROM user_pacing_watchlist WHERE user_id = ? ORDER BY created_at",
+                (user["id"],),
+            ).fetchall()
+        finally:
+            conn.close()
+        self._send_json(200, {
+            "watchlist": [{"customer_id": r["customer_id"], "account_name": r["account_name"]} for r in rows],
+        })
+
+    def _handle_pacing_watchlist_add(self, payload):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        customer_id = str(payload.get("customer_id") or "").strip()
+        account_name = payload.get("account_name")
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "customer_id debe ser numérico."})
+            return
+        # Mismo criterio fail-secure que el resto de los endpoints: aunque
+        # esto es de solo lectura, no dejamos vigilar una cuenta a la que no
+        # se tiene acceso — pero solo aplica con la API real conectada; en
+        # modo simulado (is_configured() False) ninguna otra pantalla
+        # restringe las 2 cuentas de ejemplo, así que esta tampoco debería.
+        if google_ads_client.is_configured() and not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+        conn = get_db()
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO user_pacing_watchlist (user_id, customer_id, account_name, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (user["id"], customer_id, account_name, time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._send_json(200, {"ok": True})
+
+    def _handle_pacing_watchlist_remove(self, payload):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        customer_id = str(payload.get("customer_id") or "").strip()
+        if not customer_id:
+            self._send_json(400, {"error": "Falta customer_id."})
+            return
+        conn = get_db()
+        try:
+            conn.execute(
+                "DELETE FROM user_pacing_watchlist WHERE user_id = ? AND customer_id = ?",
+                (user["id"], customer_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._send_json(200, {"ok": True})
+
+    def _handle_google_ads_pacing(self):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        conn = get_db()
+        try:
+            watched = conn.execute(
+                "SELECT customer_id, account_name FROM user_pacing_watchlist WHERE user_id = ? ORDER BY created_at",
+                (user["id"],),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        simulated = not google_ads_client.is_configured()
+        rows = []
+        for w in watched:
+            customer_id = w["customer_id"]
+            name = w["account_name"] or f"Cuenta {customer_id}"
+            try:
+                if simulated:
+                    pacing = google_ads_client.simulated_account_pacing(customer_id)
+                elif not self._user_can_access_account(user, customer_id):
+                    # Pudo haber perdido el acceso después de agregarla a vigilar.
+                    rows.append({
+                        "customer_id": customer_id, "account_name": name,
+                        "error": "Ya no tienes acceso a esta cuenta.",
+                    })
+                    continue
+                else:
+                    pacing = google_ads_client.fetch_account_pacing(customer_id)
+                rows.append({"customer_id": customer_id, "account_name": name, "error": None, **pacing})
+            except Exception as e:  # noqa: BLE001 — una cuenta con error no debe tumbar el resto del tablero
+                print(f"[pacing-error] customer_id={customer_id} {' '.join(str(e).split())}", flush=True)
+                rows.append({
+                    "customer_id": customer_id, "account_name": name,
+                    "error": "No se pudo traer el ritmo de esta cuenta.",
+                })
+        self._send_json(200, {"rows": rows, "simulated": simulated})
 
     def _handle_google_ads_campaigns(self, query):
         customer_id = (query.get("customer_id") or [""])[0].strip()

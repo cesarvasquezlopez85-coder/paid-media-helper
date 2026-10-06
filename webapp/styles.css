@@ -353,6 +353,7 @@ main.content { flex: 1; overflow-y: auto; height: 100%; }
 }
 .delta-badge.good { background: var(--ok-bg); color: var(--ok-text); }
 .delta-badge.bad { background: var(--danger-bg); color: var(--danger); }
+.delta-badge.warn { background: #fdf3d9; color: var(--gold-700); }
 .delta-badge.neutral { background: var(--gray-100); color: var(--color-text-muted); }
 
 .stat-grid { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }

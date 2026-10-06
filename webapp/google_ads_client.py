@@ -32,6 +32,7 @@ con una cuenta real, correr una consulta de prueba y confirmar contra
 https://developers.google.com/google-ads/api/fields/latest/metrics.
 """
 
+import calendar
 import datetime
 import json
 import os
@@ -275,6 +276,56 @@ def fetch_campaign_rows(customer_id, date_from, date_to, only_active=False):
             "cpa_file_pct": None,  # esa columna solo existe en el CSV nativo, no en la API
         })
     return rows
+
+
+def fetch_account_pacing(customer_id):
+    """Ritmo de consumo del mes en curso para una cuenta: el objetivo
+    mensual sale de Billing > Presupuestos de cuenta (account_budget).
+
+    OJO: "status = APPROVED" NO identifica un único presupuesto vigente —
+    confirmado contra cuentas reales, una cuenta con años de historial
+    puede tener ~100+ account_budget con status APPROVED, uno por cada
+    periodo ya cerrado (acá las agencias arman uno por mes calendario,
+    start/end alineados al primero de cada mes). Hay que filtrar también
+    por fecha para quedarnos con el que cubre HOY. Si no hay ninguno (pago
+    automático sin límite) o su tipo es INFINITE, monthly_target queda en
+    None y el frontend lo muestra como "sin objetivo" en vez de semáforo.
+
+    El gasto a la fecha se calcula sumando el mismo campo "cost" que ya usa
+    Rendimiento (vía fetch_campaign_rows) para el mes en curso, en vez de
+    usar account_budget.amount_served_micros — así el número siempre
+    coincide con lo que el resto de la plataforma ya le muestra al usuario,
+    y no depende de qué tan al día esté Google con el prorrateo de la
+    facturación."""
+    today = datetime.date.today()
+    month_start = today.replace(day=1)
+    days_in_month = calendar.monthrange(today.year, today.month)[1]
+    end_of_today = f"{today.isoformat()} 23:59:59"
+
+    campaign_rows = fetch_campaign_rows(customer_id, month_start.isoformat(), today.isoformat())
+    spend_mtd = sum((r.get("cost") or 0) for r in campaign_rows)
+
+    budget_query = f"""
+        SELECT account_budget.adjusted_spending_limit_micros,
+               account_budget.adjusted_spending_limit_type
+        FROM account_budget
+        WHERE account_budget.status = 'APPROVED'
+          AND account_budget.approved_start_date_time <= '{end_of_today}'
+          AND account_budget.approved_end_date_time > '{end_of_today}'
+    """
+    budget_rows = _search(customer_id, budget_query)
+    monthly_target = None
+    if budget_rows:
+        ab = budget_rows[0].get("accountBudget", {})
+        if ab.get("adjustedSpendingLimitType") != "INFINITE":
+            monthly_target = _micros_to_units(_int_or_none(ab.get("adjustedSpendingLimitMicros")))
+
+    return {
+        "spend_mtd": spend_mtd,
+        "monthly_target": monthly_target,
+        "days_elapsed": today.day,
+        "days_in_month": days_in_month,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1431,6 +1482,34 @@ def simulated_campaign_rows(only_active=False):
     if only_active:
         return [c for c in SIMULATED_CAMPAIGNS if c["status"] == "ENABLED"]
     return SIMULATED_CAMPAIGNS
+
+
+# Ritmo de consumo simulado — montos fijos (no se recalculan del gasto real
+# simulado de arriba) para poder mostrar, con las mismas 2 cuentas de
+# siempre, un caso por arriba del ritmo y uno por debajo. Cualquier otra
+# cuenta (no debería ser alcanzable desde el selector en modo simulado)
+# cae al caso "sin objetivo definido en Billing".
+_SIMULATED_PACING = {
+    "1111111111": {"monthly_target": 42000, "spend_mtd_per_day": 1850},   # va por arriba del ritmo
+    "2222222222": {"monthly_target": 9000, "spend_mtd_per_day": 220},     # va por debajo del ritmo
+}
+
+
+def simulated_account_pacing(customer_id):
+    today = datetime.date.today()
+    days_in_month = calendar.monthrange(today.year, today.month)[1]
+    preset = _SIMULATED_PACING.get(customer_id)
+    if not preset:
+        return {
+            "spend_mtd": 0, "monthly_target": None,
+            "days_elapsed": today.day, "days_in_month": days_in_month,
+        }
+    return {
+        "spend_mtd": round(preset["spend_mtd_per_day"] * today.day, 2),
+        "monthly_target": preset["monthly_target"],
+        "days_elapsed": today.day,
+        "days_in_month": days_in_month,
+    }
 
 
 # IDs consistentes con SIMULATED_ACCOUNT_CAMPAIGNS donde coinciden, más uno

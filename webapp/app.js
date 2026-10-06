@@ -260,6 +260,17 @@ const state = {
     },
   },
 
+  // Ritmo de consumo — a diferencia del resto de las secciones, no trabaja
+  // sobre UNA cuenta elegida sino sobre una lista de cuentas que cada
+  // usuario arma a mano ("watchlist", ver user_pacing_watchlist en
+  // server.py), independiente de a cuántas cuentas tenga acceso en total.
+  pacing: {
+    statusChecked: false, configured: false,
+    accountsStatus: 'idle', accounts: [], accountToAdd: '', accountsError: null,
+    watchlistStatus: 'idle', watchlist: null, // [{customer_id, account_name}]
+    rowsStatus: 'idle', rows: null, error: null, simulated: false,
+  },
+
   // Solo visible/usable para usuarios con is_admin=1 (el servidor también
   // lo exige en cada endpoint /api/admin/*, esto es solo la UI).
   admin: {
@@ -337,6 +348,10 @@ const PAGE_META = {
   keywordplanner: {
     title: 'Planificador de palabras clave',
     caption: 'Descubre keywords nuevas, revisa su histórico de búsquedas, y pronostica clics/costo/conversiones para una campaña hipotética antes de pitchearla.',
+  },
+  pacing: {
+    title: 'Ritmo de consumo',
+    caption: 'Elige qué cuentas vigilar y compara el gasto del mes en curso contra el objetivo mensual configurado en Billing > Presupuestos de cuenta, para detectar si van por arriba o por abajo del ritmo esperado.',
   },
   administracion: {
     title: 'Administración',
@@ -608,6 +623,7 @@ function render() {
   else if (state.page === 'iamax') pageHtml = renderIaMaxPage();
   else if (state.page === 'exclusiones') pageHtml = renderContentExclusionsPage();
   else if (state.page === 'keywordplanner') pageHtml = renderKeywordPlannerPage();
+  else if (state.page === 'pacing') pageHtml = renderPacingPage();
   else if (state.page === 'administracion') pageHtml = renderAdminPage();
   else pageHtml = renderBookPage();
 
@@ -6484,6 +6500,235 @@ function revokeAdminAccess(userId, customerId) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Página — Ritmo de consumo
+// ---------------------------------------------------------------------------
+
+const PACING_TOLERANCE = 0.10; // ±10% del ritmo esperado se considera "en ritmo"
+
+function ensurePacingStatusLoaded() {
+  const p = state.pacing;
+  if (p.statusChecked) return;
+  fetch('/api/google-ads/status')
+    .then((r) => r.json())
+    .then((data) => { p.statusChecked = true; p.configured = !!data.configured; render(); })
+    .catch(() => { p.statusChecked = true; p.configured = false; render(); });
+}
+
+function loadPacingAccounts() {
+  const p = state.pacing;
+  p.accountsStatus = 'loading'; p.accountsError = null;
+  render();
+  fetch('/api/google-ads/accounts')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      p.accounts = data.accounts || [];
+      p.accountsStatus = 'ready';
+      render();
+    })
+    .catch((err) => {
+      p.accountsStatus = 'error'; p.accountsError = err.message || String(err);
+      render();
+    });
+}
+
+function loadPacingWatchlist() {
+  const p = state.pacing;
+  p.watchlistStatus = 'loading'; p.error = null;
+  render();
+  fetch('/api/google-ads/pacing/watchlist')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      p.watchlist = data.watchlist || [];
+      p.watchlistStatus = 'ready';
+      render();
+      if (p.watchlist.length) loadPacingRows();
+      else { p.rows = []; p.rowsStatus = 'ready'; }
+    })
+    .catch((err) => {
+      p.watchlistStatus = 'error'; p.error = err.message || String(err);
+      render();
+    });
+}
+
+function loadPacingRows() {
+  const p = state.pacing;
+  p.rowsStatus = 'loading';
+  render();
+  fetch('/api/google-ads/pacing')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      p.rows = data.rows || [];
+      p.simulated = !!data.simulated;
+      p.rowsStatus = 'ready';
+      render();
+    })
+    .catch((err) => {
+      p.rowsStatus = 'error'; p.error = err.message || String(err);
+      render();
+    });
+}
+
+function addPacingWatchlistAccount() {
+  const p = state.pacing;
+  if (!p.accountToAdd) return;
+  const account = p.accounts.find((a) => a.id === p.accountToAdd);
+  p.error = null;
+  fetch('/api/google-ads/pacing/watchlist/add', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ customer_id: p.accountToAdd, account_name: account ? account.name : null }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      p.accountToAdd = '';
+      loadPacingWatchlist();
+    })
+    .catch((err) => { p.error = err.message || String(err); render(); });
+}
+
+function removePacingWatchlistAccount(customerId) {
+  const p = state.pacing;
+  p.error = null;
+  fetch('/api/google-ads/pacing/watchlist/remove', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ customer_id: customerId }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      loadPacingWatchlist();
+    })
+    .catch((err) => { p.error = err.message || String(err); render(); });
+}
+
+function renderPacingAddPanel() {
+  const p = state.pacing;
+  const watchedIds = new Set((p.watchlist || []).map((w) => w.customer_id));
+
+  if (p.accountsStatus === 'idle') {
+    return `
+      <div class="card control-panel align-end" style="margin-bottom:20px">
+        <div class="field">
+          <p class="footnote">${!p.statusChecked ? 'Consultando la conexión con Google Ads…' : (p.configured ? 'Conectado a la API de Google Ads.' : 'La API de Google Ads aún no está configurada — se usarán datos simulados para probar el flujo.')}</p>
+          <button class="btn-outline" data-action="pacing-load-accounts" ${p.statusChecked ? '' : 'disabled'}>Ver cuentas disponibles</button>
+        </div>
+      </div>`;
+  }
+  if (p.accountsStatus === 'loading') {
+    return `<div class="card control-panel align-end" style="margin-bottom:20px"><div class="field"><p class="footnote">Cargando cuentas…</p></div></div>`;
+  }
+  if (p.accountsStatus === 'error') {
+    return `<div class="error-panel" style="margin-bottom:20px"><strong>No se pudieron cargar las cuentas.</strong> ${escapeHtml(p.accountsError)}</div>`;
+  }
+
+  const available = p.accounts.filter((a) => !watchedIds.has(a.id));
+  const options = ['<option value="">Elige una cuenta…</option>']
+    .concat(available.map((a) => `<option value="${escapeHtml(a.id)}" ${p.accountToAdd === a.id ? 'selected' : ''}>${escapeHtml(a.name)} (${escapeHtml(a.id)})</option>`))
+    .join('');
+
+  return `
+    <div class="card control-panel align-end" style="margin-bottom:20px">
+      <div class="field">
+        <label>Agregar cuenta a vigilar</label>
+        <select id="pacing-account-select" style="width:320px">${options}</select>
+      </div>
+      <button class="btn-accent" data-action="pacing-add-account" ${p.accountToAdd ? '' : 'disabled'}>Agregar</button>
+    </div>`;
+}
+
+function pacingStatusBadge(deviationPct) {
+  if (deviationPct > PACING_TOLERANCE) return '<span class="delta-badge bad">Por arriba del ritmo</span>';
+  if (deviationPct < -PACING_TOLERANCE) return '<span class="delta-badge warn">Por abajo del ritmo</span>';
+  return '<span class="delta-badge good">En ritmo</span>';
+}
+
+function pacingDeviationLabel(deviationPct) {
+  const arrow = deviationPct > 0 ? '▲' : (deviationPct < 0 ? '▼' : '—');
+  return `${arrow} ${Math.abs(deviationPct * 100).toFixed(0)}%`;
+}
+
+function pacingRowHtml(r) {
+  if (r.error) {
+    return `
+      <tr>
+        <td>${escapeHtml(r.account_name)}<div class="footnote">${escapeHtml(r.customer_id)}</div></td>
+        <td colspan="4"><span class="delta-badge bad">${escapeHtml(r.error)}</span></td>
+        <td><button class="btn-link" data-pacing-remove="${escapeHtml(r.customer_id)}">Quitar</button></td>
+      </tr>`;
+  }
+  const hasTarget = r.monthly_target !== null && r.monthly_target !== undefined && r.monthly_target > 0;
+  let expected = null, deviationPct = null;
+  if (hasTarget) {
+    expected = r.monthly_target * (r.days_elapsed / r.days_in_month);
+    deviationPct = expected > 0 ? (r.spend_mtd - expected) / expected : 0;
+  }
+  return `
+    <tr>
+      <td>${escapeHtml(r.account_name)}<div class="footnote">${escapeHtml(r.customer_id)}</div></td>
+      <td>${hasTarget ? fmtMoney(r.monthly_target) : 'N/D'}</td>
+      <td>${fmtMoney(r.spend_mtd)}</td>
+      <td>${hasTarget ? fmtMoney(expected) : 'N/D'}</td>
+      <td>${hasTarget ? pacingDeviationLabel(deviationPct) : 'N/D'}</td>
+      <td>${hasTarget ? pacingStatusBadge(deviationPct) : '<span class="delta-badge neutral">Sin objetivo en Billing</span>'}</td>
+      <td><button class="btn-link" data-pacing-remove="${escapeHtml(r.customer_id)}">Quitar</button></td>
+    </tr>`;
+}
+
+function renderPacingTable() {
+  const p = state.pacing;
+  if (p.watchlistStatus === 'loading' || p.rowsStatus === 'loading') {
+    return `<div class="card state-panel loading"><div class="spinner"></div><p>Trayendo ritmo de consumo…</p></div>`;
+  }
+  if (!p.watchlist || !p.watchlist.length) {
+    return `<div class="ok-panel">Todavía no estás vigilando ninguna cuenta — agrégala arriba para empezar.</div>`;
+  }
+  const rowsHtml = (p.rows || []).map((r) => pacingRowHtml(r)).join('');
+  return `
+    <div class="card table-panel">
+      <div class="table-panel-head"><h3>Cuentas vigiladas (${p.watchlist.length})</h3></div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr>
+            <th>Cuenta</th>
+            <th>Objetivo mensual</th>
+            <th>Gastado (mes a la fecha)</th>
+            <th>Esperado a hoy</th>
+            <th>Desviación</th>
+            <th>Estado</th>
+            <th></th>
+          </tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>
+      </div>
+      <p class="footnote" style="margin-top:14px">El objetivo mensual sale del presupuesto de cuenta activo en Billing (Google Ads); cuentas sin uno configurado (pago automático sin límite) se muestran solo con el gasto del mes. "En ritmo" = dentro de ±${(PACING_TOLERANCE * 100).toFixed(0)}% de lo esperado a la fecha.</p>
+    </div>`;
+}
+
+function renderPacingPage() {
+  const p = state.pacing;
+  ensurePacingStatusLoaded();
+  if (p.watchlistStatus === 'idle') loadPacingWatchlist();
+
+  const simulatedNotice = p.simulated ? `
+    <div class="ok-panel" style="margin-bottom:16px">
+      <strong>Modo simulado.</strong> La API de Google Ads todavía no está configurada en el servidor
+      (falta la aprobación del developer token de Google) — estos son datos de ejemplo, no de una cuenta real.
+    </div>` : '';
+
+  return `
+    ${simulatedNotice}
+    ${renderPacingAddPanel()}
+    ${renderPacingTable()}
+    ${p.error ? `<div class="error-panel" style="margin-top:12px">${escapeHtml(p.error)}</div>` : ''}
+  `;
+}
+
 function renderAdminPage() {
   if (!currentUser.isAdmin) {
     return `<div class="error-panel">Esta sección requiere permisos de administrador.</div>`;
@@ -7186,6 +7431,15 @@ function bindEvents() {
     state.book.compare.hotelFilter = e.target.value;
     render();
   });
+  // Ritmo de consumo
+  const pacingAccountSelect = document.getElementById('pacing-account-select');
+  if (pacingAccountSelect) pacingAccountSelect.addEventListener('change', (e) => {
+    state.pacing.accountToAdd = e.target.value;
+    render();
+  });
+  document.querySelectorAll('[data-pacing-remove]').forEach((btn) => {
+    btn.addEventListener('click', () => removePacingWatchlistAccount(btn.dataset.pacingRemove));
+  });
   // Administración
   const adminGrantUser = document.getElementById('admin-grant-user');
   if (adminGrantUser) adminGrantUser.addEventListener('change', (e) => { state.admin.grant.userId = e.target.value; });
@@ -7352,6 +7606,9 @@ function handleAction(action) {
     }
 
     case 'kwp-api-load-accounts': loadKeywordPlannerAccounts(); break;
+
+    case 'pacing-load-accounts': loadPacingAccounts(); break;
+    case 'pacing-add-account': addPacingWatchlistAccount(); break;
     case 'kwp-geo-search': searchKeywordPlannerGeo(); break;
     case 'kwp-network-search': state.keywordPlanner.network = 'GOOGLE_SEARCH'; render(); break;
     case 'kwp-network-partners': state.keywordPlanner.network = 'GOOGLE_SEARCH_AND_PARTNERS'; render(); break;
