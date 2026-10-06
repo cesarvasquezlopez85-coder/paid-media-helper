@@ -6618,6 +6618,21 @@ function removePacingWatchlistAccount(customerId) {
     .catch((err) => { p.error = err.message || String(err); render(); });
 }
 
+function clearPacingWatchlist() {
+  const p = state.pacing;
+  const count = (p.watchlist || []).length;
+  if (!count) return;
+  if (!window.confirm(`¿Quitar las ${count} cuenta(s) vigiladas? No borra nada en Google Ads, solo deja de mostrarlas acá — puedes volver a agregarlas cuando quieras.`)) return;
+  p.error = null;
+  fetch('/api/google-ads/pacing/watchlist/clear', { method: 'POST' })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      loadPacingWatchlist();
+    })
+    .catch((err) => { p.error = err.message || String(err); render(); });
+}
+
 function loadPacingMccGroups() {
   const m = state.pacing.mcc;
   m.status = 'loading'; m.error = null;
@@ -6802,7 +6817,10 @@ function renderPacingTable() {
   const rowsHtml = (p.rows || []).map((r) => pacingRowHtml(r)).join('');
   return `
     <div class="card table-panel">
-      <div class="table-panel-head"><h3>Cuentas vigiladas (${p.watchlist.length})</h3></div>
+      <div class="table-panel-head">
+        <h3>Cuentas vigiladas (${p.watchlist.length})</h3>
+        <button class="btn-outline sm" data-action="pacing-clear-watchlist">Quitar todas</button>
+      </div>
       <div class="table-scroll">
         <table>
           <thead><tr>
@@ -7731,6 +7749,7 @@ function handleAction(action) {
 
     case 'pacing-load-accounts': loadPacingAccounts(); break;
     case 'pacing-mcc-load': loadPacingMccGroups(); break;
+    case 'pacing-clear-watchlist': clearPacingWatchlist(); break;
     case 'pacing-add-account': addPacingWatchlistAccount(); break;
     case 'kwp-geo-search': searchKeywordPlannerGeo(); break;
     case 'kwp-network-search': state.keywordPlanner.network = 'GOOGLE_SEARCH'; render(); break;

@@ -476,6 +476,10 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_pacing_watchlist_remove(payload)
+        elif path == "/api/google-ads/pacing/watchlist/clear":
+            if not self._require_auth_json():
+                return
+            self._handle_pacing_watchlist_clear()
         elif path == "/api/google-ads/pacing/watchlist/add-mcc-group":
             if not self._require_auth_json():
                 return
@@ -1157,6 +1161,19 @@ class Handler(SimpleHTTPRequestHandler):
                 "DELETE FROM user_pacing_watchlist WHERE user_id = ? AND customer_id = ?",
                 (user["id"], customer_id),
             )
+            conn.commit()
+        finally:
+            conn.close()
+        self._send_json(200, {"ok": True})
+
+    def _handle_pacing_watchlist_clear(self):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        conn = get_db()
+        try:
+            conn.execute("DELETE FROM user_pacing_watchlist WHERE user_id = ?", (user["id"],))
             conn.commit()
         finally:
             conn.close()
