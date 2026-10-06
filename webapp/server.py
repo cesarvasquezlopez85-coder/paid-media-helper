@@ -353,10 +353,16 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_pacing_watchlist()
             return
 
-        if path == "/api/google-ads/pacing/mcc-groups":
+        if path == "/api/google-ads/mcc-groups":
             if not self._require_auth_json():
                 return
-            self._handle_pacing_mcc_groups()
+            self._handle_mcc_groups()
+            return
+
+        if path == "/api/google-ads/mcc-group-accounts":
+            if not self._require_auth_json():
+                return
+            self._handle_mcc_group_accounts(parse_qs(parsed.query))
             return
 
         if path == "/api/google-ads/campaigns":
@@ -1219,12 +1225,14 @@ class Handler(SimpleHTTPRequestHandler):
                 })
         self._send_json(200, {"rows": rows, "simulated": simulated})
 
-    # Agregar un sub-MCC completo (ej. "Estelar Hoteles MCC", con 40+
-    # cuentas) de un jalón — solo para administradores, mismo criterio que
-    # "Buscar en las cuentas del MCC" en Administración: ver los nombres de
-    # TODAS las agrupaciones de clientes del MCC no es algo que cualquier
-    # usuario no-admin deba poder explorar.
-    def _handle_pacing_mcc_groups(self):
+    # Sub-MCCs del MCC — usado tanto por Ritmo de consumo (agregar todas sus
+    # cuentas a la vez) como por el selector de cuenta de ROAS (filtrar la
+    # lista a solo las cuentas de una marca, en vez de buscar entre miles).
+    # Solo para administradores: ver los nombres de TODAS las agrupaciones
+    # de clientes del MCC no es algo que cualquier usuario no-admin deba
+    # poder explorar (mismo criterio que "Buscar en las cuentas del MCC" en
+    # Administración).
+    def _handle_mcc_groups(self):
         user = self._require_admin_json()
         if not user:
             return
@@ -1234,6 +1242,23 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             groups = google_ads_client.list_mcc_groups()
             self._send_json(200, {"groups": groups, "simulated": False})
+        except Exception as e:  # noqa: BLE001
+            self._send_google_ads_error(e)
+
+    def _handle_mcc_group_accounts(self, query):
+        user = self._require_admin_json()
+        if not user:
+            return
+        group_customer_id = (query.get("group_customer_id") or [""])[0].strip()
+        if not group_customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro group_customer_id."})
+            return
+        if not google_ads_client.is_configured():
+            self._send_json(200, {"accounts": [], "simulated": True})
+            return
+        try:
+            accounts = google_ads_client.list_mcc_group_accounts(group_customer_id)
+            self._send_json(200, {"accounts": accounts, "simulated": False})
         except Exception as e:  # noqa: BLE001
             self._send_google_ads_error(e)
 

@@ -116,6 +116,14 @@ const state = {
       accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
       dateFrom: '', dateTo: '', onlyActive: false,
       simulated: false, error: null,
+      // Filtrar el selector de cuenta por sub-MCC (ej. una marca de hotel
+      // con decenas de cuentas) en vez de buscar en el listado plano —
+      // mismo "Agregar un MCC completo" de Ritmo de consumo, pero acá solo
+      // angosta el <select> en vez de agregar a una watchlist. Solo admins.
+      mcc: {
+        status: 'idle', groups: [], filter: '',
+        selectedId: '', selectedName: '', accountIdsStatus: 'idle', accountIds: null, error: null,
+      },
     },
     // Ajuste de ROAS objetivo — un solo campaign_id "en edición" a la vez.
     // Nunca hay un solo clic entre decidir el nuevo valor y escribirlo en
@@ -269,6 +277,7 @@ const state = {
     accountsStatus: 'idle', accounts: [], accountToAdd: '', accountsError: null,
     watchlistStatus: 'idle', watchlist: null, // [{customer_id, account_name}]
     rowsStatus: 'idle', rows: null, error: null, simulated: false,
+    sortBy: 'account_name', sortDir: 'asc',
     // Agregar un sub-MCC completo de un jalón (solo admins) — ver
     // list_mcc_groups/list_mcc_group_accounts en google_ads_client.py.
     mcc: {
@@ -4133,6 +4142,100 @@ function adjustRoasTarget(preview) {
     });
 }
 
+function loadRoasMccGroups() {
+  const m = state.roas.api.mcc;
+  m.status = 'loading'; m.error = null;
+  render();
+  fetch('/api/google-ads/mcc-groups')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      m.groups = data.groups || [];
+      m.status = 'ready';
+      render();
+    })
+    .catch((err) => { m.status = 'error'; m.error = err.message || String(err); render(); });
+}
+
+function applyRoasMccFilter(groupId, groupName) {
+  const a = state.roas.api;
+  const m = a.mcc;
+  m.selectedId = groupId; m.selectedName = groupName;
+  m.accountIdsStatus = 'loading'; m.error = null;
+  render();
+  fetch(`/api/google-ads/mcc-group-accounts?group_customer_id=${encodeURIComponent(groupId)}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      m.accountIds = new Set((data.accounts || []).map((acc) => acc.id));
+      m.accountIdsStatus = 'ready';
+      // Si la cuenta que ya estaba elegida no cuelga de este MCC, se limpia.
+      if (a.accountId && !m.accountIds.has(a.accountId)) a.accountId = '';
+      render();
+    })
+    .catch((err) => { m.accountIdsStatus = 'error'; m.error = err.message || String(err); render(); });
+}
+
+function clearRoasMccFilter() {
+  const m = state.roas.api.mcc;
+  m.selectedId = ''; m.selectedName = ''; m.accountIds = null; m.accountIdsStatus = 'idle'; m.filter = '';
+  render();
+}
+
+function renderRoasMccFilterPanel() {
+  if (!currentUser.isAdmin) return '';
+  const m = state.roas.api.mcc;
+
+  if (m.selectedId) {
+    const countLabel = m.accountIdsStatus === 'loading' ? 'cargando…'
+      : m.accountIdsStatus === 'ready' ? `${m.accountIds.size} cuenta(s)`
+      : 'error';
+    return `
+      <div class="field">
+        <label>Filtrando por MCC</label>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="delta-badge neutral">${escapeHtml(m.selectedName)} — ${countLabel}</span>
+          <button class="btn-link" data-action="roas-mcc-clear">Quitar filtro</button>
+        </div>
+      </div>`;
+  }
+
+  if (m.status === 'idle') {
+    return `<div class="field"><button class="btn-outline sm" data-action="roas-mcc-load">Filtrar por MCC (ej. una cadena de hoteles)</button></div>`;
+  }
+  if (m.status === 'loading') {
+    return `<div class="field"><p class="footnote">Cargando agrupaciones del MCC…</p></div>`;
+  }
+  if (m.status === 'error') {
+    return `<div class="error-panel">${escapeHtml(m.error)}</div>`;
+  }
+
+  const filter = (m.filter || '').trim().toLowerCase();
+  let matches = [];
+  if (filter.length >= 2) {
+    matches = m.groups.filter((g) => g.id.includes(filter) || (g.name || '').toLowerCase().includes(filter)).slice(0, 25);
+  }
+  const matchesHtml = matches.length
+    ? `<div class="table-scroll" style="max-height:200px;margin-top:8px">
+        <table><tbody>
+          ${matches.map((g) => `
+            <tr>
+              <td>${escapeHtml(g.name)}</td>
+              <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(g.id)}</td>
+              <td><button class="btn-outline xs" data-roas-mcc-pick="${escapeHtml(g.id)}" data-roas-mcc-pick-name="${escapeHtml(g.name)}">Usar</button></td>
+            </tr>`).join('')}
+        </tbody></table>
+      </div>`
+    : (filter.length >= 2 ? `<p class="footnote" style="margin-top:8px">Sin resultados para "${escapeHtml(filter)}".</p>` : '');
+
+  return `
+    <div class="field">
+      <label>Filtrar por MCC</label>
+      <input type="text" id="roas-mcc-filter" placeholder="Busca por nombre o ID del MCC (${m.groups.length} agrupaciones)…" value="${escapeHtml(m.filter)}" style="width:320px" />
+      ${matchesHtml}
+    </div>`;
+}
+
 function renderRoasApiPanel() {
   const a = state.roas.api;
 
@@ -4162,15 +4265,18 @@ function renderRoasApiPanel() {
     return `<div class="error-panel"><strong>No se pudieron cargar las cuentas.</strong> ${escapeHtml(a.error)}</div>`;
   }
 
+  const mccFilterActive = a.mcc.selectedId && a.mcc.accountIds;
+  const visibleAccounts = mccFilterActive ? a.accounts.filter((acc) => a.mcc.accountIds.has(acc.id)) : a.accounts;
   const accountOptions = ['<option value="">Elige una cuenta…</option>']
-    .concat(a.accounts.map((acc) => `<option value="${escapeHtml(acc.id)}" ${a.accountId === acc.id ? 'selected' : ''}>${escapeHtml(acc.name)} (${escapeHtml(acc.id)})</option>`))
+    .concat(visibleAccounts.map((acc) => `<option value="${escapeHtml(acc.id)}" ${a.accountId === acc.id ? 'selected' : ''}>${escapeHtml(acc.name)} (${escapeHtml(acc.id)})</option>`))
     .join('');
 
   return `
     <div class="card control-panel align-end">
       ${simulatedNotice}
+      ${renderRoasMccFilterPanel()}
       <div class="field">
-        <label>Cuenta</label>
+        <label>Cuenta${mccFilterActive ? ` (${visibleAccounts.length} en "${escapeHtml(a.mcc.selectedName)}")` : ''}</label>
         <select id="roas-api-account" style="width:320px">${accountOptions}</select>
       </div>
       <div class="field">
@@ -6637,7 +6743,7 @@ function loadPacingMccGroups() {
   const m = state.pacing.mcc;
   m.status = 'loading'; m.error = null;
   render();
-  fetch('/api/google-ads/pacing/mcc-groups')
+  fetch('/api/google-ads/mcc-groups')
     .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
@@ -6770,6 +6876,51 @@ function pacingDeviationLabel(deviationPct) {
   return `${arrow} ${Math.abs(deviationPct * 100).toFixed(0)}%`;
 }
 
+// El esperado (y todo lo derivado de él) se calcula hasta AYER, no hasta
+// hoy — el gasto de hoy en Google Ads normalmente todavía no está
+// cerrado/completo, así que comparar un día a medias contra el
+// presupuesto de un día completo sesga el ritmo hacia "por debajo" sin
+// que sea real todavía. Centralizado acá para que la tabla y el orden
+// por columna usen exactamente los mismos números.
+function pacingComputed(r) {
+  const hasTarget = r.monthly_target !== null && r.monthly_target !== undefined && r.monthly_target > 0;
+  if (!hasTarget) return { hasTarget: false, expected: null, expectedPct: null, consumedPct: null, deviationPct: null };
+  const daysElapsed = Math.max((r.days_elapsed || 0) - 1, 0);
+  const expectedPct = daysElapsed / r.days_in_month;
+  const expected = r.monthly_target * expectedPct;
+  const consumedPct = r.spend_mtd / r.monthly_target;
+  const deviationPct = expected > 0 ? (r.spend_mtd - expected) / expected : 0;
+  return { hasTarget: true, expected, expectedPct, consumedPct, deviationPct };
+}
+
+const PACING_SORT_KEYS = {
+  account_name: (r) => (r.account_name || '').toLowerCase(),
+  monthly_target: (r) => (r.monthly_target ?? -Infinity),
+  spend_mtd: (r) => (r.spend_mtd ?? -Infinity),
+  consumed_pct: (r) => { const c = pacingComputed(r); return c.hasTarget ? c.consumedPct : -Infinity; },
+  expected: (r) => { const c = pacingComputed(r); return c.hasTarget ? c.expected : -Infinity; },
+  expected_pct: (r) => { const c = pacingComputed(r); return c.hasTarget ? c.expectedPct : -Infinity; },
+  deviation_pct: (r) => { const c = pacingComputed(r); return c.hasTarget ? c.deviationPct : -Infinity; },
+};
+function getPacingRowsSorted() {
+  const p = state.pacing;
+  const rows = [...(p.rows || [])];
+  const keyFn = PACING_SORT_KEYS[p.sortBy] || PACING_SORT_KEYS.account_name;
+  const dir = p.sortDir === 'desc' ? -1 : 1;
+  if (p.sortBy === 'account_name') {
+    rows.sort((a, b) => dir * keyFn(a).localeCompare(keyFn(b)));
+  } else {
+    rows.sort((a, b) => dir * (keyFn(a) - keyFn(b)));
+  }
+  return rows;
+}
+function pacingSortTh(label, key) {
+  const p = state.pacing;
+  const active = p.sortBy === key;
+  const arrow = active ? (p.sortDir === 'desc' ? ' ▼' : ' ▲') : '';
+  return `<th data-pacing-sort="${key}" style="cursor:pointer;user-select:none${active ? ';color:var(--color-text-heading)' : ''}">${escapeHtml(label)}${arrow}</th>`;
+}
+
 function pacingRowHtml(r) {
   if (r.error) {
     return `
@@ -6779,29 +6930,17 @@ function pacingRowHtml(r) {
         <td><button class="btn-link" data-pacing-remove="${escapeHtml(r.customer_id)}">Quitar</button></td>
       </tr>`;
   }
-  const hasTarget = r.monthly_target !== null && r.monthly_target !== undefined && r.monthly_target > 0;
-  // El esperado se calcula hasta AYER, no hasta hoy — el gasto de hoy en
-  // Google Ads normalmente todavía no está cerrado/completo, así que
-  // comparar un día a medias contra el presupuesto de un día completo
-  // sesga el ritmo hacia "por debajo" sin que sea real todavía.
-  const daysElapsed = Math.max((r.days_elapsed || 0) - 1, 0);
-  let expected = null, expectedPct = null, consumedPct = null, deviationPct = null;
-  if (hasTarget) {
-    expectedPct = daysElapsed / r.days_in_month;
-    expected = r.monthly_target * expectedPct;
-    consumedPct = r.spend_mtd / r.monthly_target;
-    deviationPct = expected > 0 ? (r.spend_mtd - expected) / expected : 0;
-  }
+  const c = pacingComputed(r);
   return `
     <tr>
       <td>${escapeHtml(r.account_name)}<div class="footnote">${escapeHtml(r.customer_id)}</div></td>
-      <td>${hasTarget ? fmtMoney(r.monthly_target) : 'N/D'}</td>
+      <td>${c.hasTarget ? fmtMoney(r.monthly_target) : 'N/D'}</td>
       <td>${fmtMoney(r.spend_mtd)}</td>
-      <td>${hasTarget ? fmtPct0(consumedPct) : 'N/D'}</td>
-      <td>${hasTarget ? fmtMoney(expected) : 'N/D'}</td>
-      <td>${hasTarget ? fmtPct0(expectedPct) : 'N/D'}</td>
-      <td>${hasTarget ? pacingDeviationLabel(deviationPct) : 'N/D'}</td>
-      <td>${hasTarget ? pacingStatusBadge(deviationPct) : '<span class="delta-badge neutral">Sin objetivo en Billing</span>'}</td>
+      <td>${c.hasTarget ? fmtPct0(c.consumedPct) : 'N/D'}</td>
+      <td>${c.hasTarget ? fmtMoney(c.expected) : 'N/D'}</td>
+      <td>${c.hasTarget ? fmtPct0(c.expectedPct) : 'N/D'}</td>
+      <td>${c.hasTarget ? pacingDeviationLabel(c.deviationPct) : 'N/D'}</td>
+      <td>${c.hasTarget ? pacingStatusBadge(c.deviationPct) : '<span class="delta-badge neutral">Sin objetivo en Billing</span>'}</td>
       <td><button class="btn-link" data-pacing-remove="${escapeHtml(r.customer_id)}">Quitar</button></td>
     </tr>`;
 }
@@ -6814,7 +6953,7 @@ function renderPacingTable() {
   if (!p.watchlist || !p.watchlist.length) {
     return `<div class="ok-panel">Todavía no estás vigilando ninguna cuenta — agrégala arriba para empezar.</div>`;
   }
-  const rowsHtml = (p.rows || []).map((r) => pacingRowHtml(r)).join('');
+  const rowsHtml = getPacingRowsSorted().map((r) => pacingRowHtml(r)).join('');
   return `
     <div class="card table-panel">
       <div class="table-panel-head">
@@ -6824,13 +6963,13 @@ function renderPacingTable() {
       <div class="table-scroll">
         <table>
           <thead><tr>
-            <th>Cuenta</th>
-            <th>Objetivo mensual</th>
-            <th>Gastado (mes a la fecha)</th>
-            <th>% consumido</th>
-            <th>Esperado (hasta ayer)</th>
-            <th>% esperado</th>
-            <th>Desviación</th>
+            ${pacingSortTh('Cuenta', 'account_name')}
+            ${pacingSortTh('Objetivo mensual', 'monthly_target')}
+            ${pacingSortTh('Gastado (mes a la fecha)', 'spend_mtd')}
+            ${pacingSortTh('% consumido', 'consumed_pct')}
+            ${pacingSortTh('Esperado (hasta ayer)', 'expected')}
+            ${pacingSortTh('% esperado', 'expected_pct')}
+            ${pacingSortTh('Desviación', 'deviation_pct')}
             <th>Estado</th>
             <th></th>
           </tr></thead>
@@ -7182,6 +7321,11 @@ function bindEvents() {
   if (roasApiDateTo) roasApiDateTo.addEventListener('change', (e) => { state.roas.api.dateTo = e.target.value; });
   const roasApiOnlyActive = document.getElementById('roas-api-only-active');
   if (roasApiOnlyActive) roasApiOnlyActive.addEventListener('change', (e) => { state.roas.api.onlyActive = e.target.checked; });
+  const roasMccFilter = document.getElementById('roas-mcc-filter');
+  if (roasMccFilter) roasMccFilter.addEventListener('input', (e) => { state.roas.api.mcc.filter = e.target.value; render(); });
+  document.querySelectorAll('[data-roas-mcc-pick]').forEach((btn) => {
+    btn.addEventListener('click', () => applyRoasMccFilter(btn.dataset.roasMccPick, btn.dataset.roasMccPickName));
+  });
   const roasAdjustInput = document.getElementById('roas-adjust-input');
   if (roasAdjustInput) roasAdjustInput.addEventListener('input', (e) => { state.roas.adjust.newTargetRoas = e.target.value; });
   document.querySelectorAll('[data-action="roas-edit-start"]').forEach((btn) => {
@@ -7572,6 +7716,15 @@ function bindEvents() {
   document.querySelectorAll('[data-pacing-remove]').forEach((btn) => {
     btn.addEventListener('click', () => removePacingWatchlistAccount(btn.dataset.pacingRemove));
   });
+  document.querySelectorAll('[data-pacing-sort]').forEach((th) => {
+    th.addEventListener('click', () => {
+      const key = th.dataset.pacingSort;
+      const p = state.pacing;
+      if (p.sortBy === key) p.sortDir = p.sortDir === 'desc' ? 'asc' : 'desc';
+      else { p.sortBy = key; p.sortDir = 'desc'; }
+      render();
+    });
+  });
   const pacingMccFilter = document.getElementById('pacing-mcc-filter');
   if (pacingMccFilter) pacingMccFilter.addEventListener('input', (e) => {
     state.pacing.mcc.filter = e.target.value;
@@ -7677,6 +7830,8 @@ function handleAction(action) {
     case 'opp-api-fetch': fetchOpportunityGoogleAdsCampaigns(); break;
 
     case 'roas-api-load-accounts': loadRoasGoogleAdsAccounts(); break;
+    case 'roas-mcc-load': loadRoasMccGroups(); break;
+    case 'roas-mcc-clear': clearRoasMccFilter(); break;
     case 'roas-api-fetch': fetchRoasByCampaign(); break;
     case 'roas-edit-cancel': {
       state.roas.adjust = { campaignId: null, newTargetRoas: '', status: 'idle', preview: null, result: null, error: null };
