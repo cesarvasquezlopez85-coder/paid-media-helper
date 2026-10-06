@@ -8016,7 +8016,7 @@ function renderPacingCampaignsModal() {
 
   return `
     <div class="modal-overlay pacing-campaigns-overlay">
-      <div class="modal-box card" data-modal-stop-propagation style="max-width:860px">
+      <div class="modal-box card" data-modal-stop-propagation style="max-width:1240px">
         <button class="modal-close" data-action="pacing-campaigns-close" aria-label="Cerrar">${icon('x', 18)}</button>
         <h3 class="dense-chart-title" style="margin:0 0 16px;padding-right:28px">${escapeHtml(cm.accountName)}</h3>
         ${body}
