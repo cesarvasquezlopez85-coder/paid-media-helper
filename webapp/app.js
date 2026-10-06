@@ -19,6 +19,13 @@ const state = {
       accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
       dateFrom: '', dateTo: '', onlyActive: false,
       simulated: false, error: null,
+      // Filtrar el selector de cuenta por sub-MCC (ej. una marca de hotel
+      // con decenas de cuentas) en vez de buscar en el listado plano —
+      // mismo patrón que ROAS. Solo admins.
+      mcc: {
+        status: 'idle', groups: [], filter: '',
+        selectedId: '', selectedName: '', accountIdsStatus: 'idle', accountIds: null, error: null,
+      },
     },
     // Prueba interna: lectura priorizada de los hallazgos vía Claude AI —
     // solo visible para administradores mientras se valida el flujo.
@@ -762,6 +769,100 @@ function renderRendPage() {
 // (developer token pendiente de aprobación de Google), /api/google-ads/*
 // sirve cuentas y campañas simuladas, marcadas como tal, para poder probar
 // todo el flujo (cuenta → rango de fechas → tabla) desde ya.
+function loadRendMccGroups() {
+  const m = state.rend.api.mcc;
+  m.status = 'loading'; m.error = null;
+  render();
+  fetch('/api/google-ads/mcc-groups')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      m.groups = data.groups || [];
+      m.status = 'ready';
+      render();
+    })
+    .catch((err) => { m.status = 'error'; m.error = err.message || String(err); render(); });
+}
+
+function applyRendMccFilter(groupId, groupName) {
+  const a = state.rend.api;
+  const m = a.mcc;
+  m.selectedId = groupId; m.selectedName = groupName;
+  m.accountIdsStatus = 'loading'; m.error = null;
+  render();
+  fetch(`/api/google-ads/mcc-group-accounts?group_customer_id=${encodeURIComponent(groupId)}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      m.accountIds = new Set((data.accounts || []).map((acc) => acc.id));
+      m.accountIdsStatus = 'ready';
+      // Si la cuenta que ya estaba elegida no cuelga de este MCC, se limpia.
+      if (a.accountId && !m.accountIds.has(a.accountId)) a.accountId = '';
+      render();
+    })
+    .catch((err) => { m.accountIdsStatus = 'error'; m.error = err.message || String(err); render(); });
+}
+
+function clearRendMccFilter() {
+  const m = state.rend.api.mcc;
+  m.selectedId = ''; m.selectedName = ''; m.accountIds = null; m.accountIdsStatus = 'idle'; m.filter = '';
+  render();
+}
+
+function renderRendMccFilterPanel() {
+  if (!currentUser.isAdmin) return '';
+  const m = state.rend.api.mcc;
+
+  if (m.selectedId) {
+    const countLabel = m.accountIdsStatus === 'loading' ? 'cargando…'
+      : m.accountIdsStatus === 'ready' ? `${m.accountIds.size} cuenta(s)`
+      : 'error';
+    return `
+      <div class="field">
+        <label>Filtrando por MCC</label>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="delta-badge neutral">${escapeHtml(m.selectedName)} — ${countLabel}</span>
+          <button class="btn-link" data-action="rend-mcc-clear">Quitar filtro</button>
+        </div>
+      </div>`;
+  }
+
+  if (m.status === 'idle') {
+    return `<div class="field"><button class="btn-outline sm" data-action="rend-mcc-load">Filtrar por MCC (ej. una cadena de hoteles)</button></div>`;
+  }
+  if (m.status === 'loading') {
+    return `<div class="field"><p class="footnote">Cargando agrupaciones del MCC…</p></div>`;
+  }
+  if (m.status === 'error') {
+    return `<div class="error-panel">${escapeHtml(m.error)}</div>`;
+  }
+
+  const filter = (m.filter || '').trim().toLowerCase();
+  let matches = [];
+  if (filter.length >= 2) {
+    matches = m.groups.filter((g) => g.id.includes(filter) || (g.name || '').toLowerCase().includes(filter)).slice(0, 25);
+  }
+  const matchesHtml = matches.length
+    ? `<div class="table-scroll" style="max-height:200px;margin-top:8px">
+        <table><tbody>
+          ${matches.map((g) => `
+            <tr>
+              <td>${escapeHtml(g.name)}</td>
+              <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(g.id)}</td>
+              <td><button class="btn-outline xs" data-rend-mcc-pick="${escapeHtml(g.id)}" data-rend-mcc-pick-name="${escapeHtml(g.name)}">Usar</button></td>
+            </tr>`).join('')}
+        </tbody></table>
+      </div>`
+    : (filter.length >= 2 ? `<p class="footnote" style="margin-top:8px">Sin resultados para "${escapeHtml(filter)}".</p>` : '');
+
+  return `
+    <div class="field">
+      <label>Filtrar por MCC</label>
+      <input type="text" id="rend-mcc-filter" placeholder="Busca por nombre o ID del MCC (${m.groups.length} agrupaciones)…" value="${escapeHtml(m.filter)}" style="width:320px" />
+      ${matchesHtml}
+    </div>`;
+}
+
 function renderRendApiPanel() {
   const a = state.rend.api;
 
@@ -795,14 +896,17 @@ function renderRendApiPanel() {
       </div>`;
   }
 
+  const mccFilterActive = a.mcc.selectedId && a.mcc.accountIds;
+  const visibleAccounts = mccFilterActive ? a.accounts.filter((acc) => a.mcc.accountIds.has(acc.id)) : a.accounts;
   const accountOptions = ['<option value="">Elige una cuenta…</option>']
-    .concat(a.accounts.map((acc) => `<option value="${escapeHtml(acc.id)}" ${a.accountId === acc.id ? 'selected' : ''}>${escapeHtml(acc.name)} (${escapeHtml(acc.id)})</option>`))
+    .concat(visibleAccounts.map((acc) => `<option value="${escapeHtml(acc.id)}" ${a.accountId === acc.id ? 'selected' : ''}>${escapeHtml(acc.name)} (${escapeHtml(acc.id)})</option>`))
     .join('');
 
   return `
     ${simulatedNotice}
+    ${renderRendMccFilterPanel()}
     <div class="field">
-      <label>Cuenta</label>
+      <label>Cuenta${mccFilterActive ? ` (${visibleAccounts.length} en "${escapeHtml(a.mcc.selectedName)}")` : ''}</label>
       <select id="rend-api-account" style="width:320px">${accountOptions}</select>
     </div>
     <div class="field">
@@ -6876,6 +6980,16 @@ function pacingDeviationLabel(deviationPct) {
   return `${arrow} ${Math.abs(deviationPct * 100).toFixed(0)}%`;
 }
 
+// Mismo criterio que pacingStatusBadge (±PACING_TOLERANCE del ritmo
+// esperado), pero como color de texto en vez de badge — para poder
+// pintar el número de "% consumido" directo, sin repetir la columna
+// "Estado" al lado.
+function pacingSemaforoColor(deviationPct) {
+  if (deviationPct > PACING_TOLERANCE) return 'var(--danger)';
+  if (deviationPct < -PACING_TOLERANCE) return 'var(--gold-700)';
+  return 'var(--ok-text)';
+}
+
 // El esperado (y todo lo derivado de él) se calcula hasta AYER, no hasta
 // hoy — el gasto de hoy en Google Ads normalmente todavía no está
 // cerrado/completo, así que comparar un día a medias contra el
@@ -6936,7 +7050,7 @@ function pacingRowHtml(r) {
       <td>${escapeHtml(r.account_name)}<div class="footnote">${escapeHtml(r.customer_id)}</div></td>
       <td>${c.hasTarget ? fmtMoney(r.monthly_target) : 'N/D'}</td>
       <td>${fmtMoney(r.spend_mtd)}</td>
-      <td>${c.hasTarget ? fmtPct0(c.consumedPct) : 'N/D'}</td>
+      <td>${c.hasTarget ? `<strong style="color:${pacingSemaforoColor(c.deviationPct)}">${fmtPct0(c.consumedPct)}</strong>` : 'N/D'}</td>
       <td>${c.hasTarget ? fmtMoney(c.expected) : 'N/D'}</td>
       <td>${c.hasTarget ? fmtPct0(c.expectedPct) : 'N/D'}</td>
       <td>${c.hasTarget ? pacingDeviationLabel(c.deviationPct) : 'N/D'}</td>
@@ -7213,6 +7327,11 @@ function bindEvents() {
   if (rendApiDateTo) rendApiDateTo.addEventListener('change', (e) => { state.rend.api.dateTo = e.target.value; });
   const rendApiOnlyActive = document.getElementById('rend-api-only-active');
   if (rendApiOnlyActive) rendApiOnlyActive.addEventListener('change', (e) => { state.rend.api.onlyActive = e.target.checked; });
+  const rendMccFilter = document.getElementById('rend-mcc-filter');
+  if (rendMccFilter) rendMccFilter.addEventListener('input', (e) => { state.rend.api.mcc.filter = e.target.value; render(); });
+  document.querySelectorAll('[data-rend-mcc-pick]').forEach((btn) => {
+    btn.addEventListener('click', () => applyRendMccFilter(btn.dataset.rendMccPick, btn.dataset.rendMccPickName));
+  });
 
   document.querySelectorAll('[data-rend-tab]').forEach((btn) => {
     btn.addEventListener('click', () => { state.rend.chartTab = btn.dataset.rendTab; render(); });
@@ -7788,6 +7907,8 @@ function handleAction(action) {
       break;
     }
     case 'rend-api-load-accounts': loadGoogleAdsAccounts(); break;
+    case 'rend-mcc-load': loadRendMccGroups(); break;
+    case 'rend-mcc-clear': clearRendMccFilter(); break;
     case 'rend-api-fetch': fetchGoogleAdsCampaigns(); break;
     case 'rend-ai-analizar': runAiAnalysis(); break;
     case 'pwchange-submit': submitPasswordChange(); break;
