@@ -2,7 +2,7 @@
 
 ## Qué es
 
-Una herramienta interna para que cualquier persona del equipo suba archivos de una cuenta de Google Ads (o se conecte directo a la API) y reciba sin intervención manual: (1) gráficas de rendimiento y recomendaciones de optimización — con lectura priorizada opcional generada por Claude AI, prueba interna solo para administradores —, (2) comparación de rendimiento entre dos periodos con recomendaciones por tendencia, (3) una lista de candidatos a palabra clave negativa, (4) análisis de reservas reales para cuentas de hotel (con modo de comparación entre dos periodos), (5) una estimación de ingresos adicionales perdidos por campañas limitadas por presupuesto, (6) una proyección de ventas futuras combinando tendencia y temporada alta/baja, (7) el ROAS logrado vs. el ROAS objetivo de cada campaña, ajustable directo desde la plataforma, y (8) las recomendaciones nativas de optimización de Google Ads, con opción de aplicarlas o descartarlas sin salir de la plataforma. Pensada para cubrir 100+ cuentas de forma self-serve.
+Una herramienta interna para que cualquier persona del equipo suba archivos de una cuenta de Google Ads (o se conecte directo a la API) y reciba sin intervención manual: (1) gráficas de rendimiento y recomendaciones de optimización — con lectura priorizada opcional generada por Claude AI, prueba interna solo para administradores —, (2) comparación de rendimiento entre dos periodos con recomendaciones por tendencia, (3) una lista de candidatos a palabra clave negativa, (4) análisis de reservas reales para cuentas de hotel (con modo de comparación entre dos periodos), (5) una estimación de ingresos adicionales perdidos por campañas limitadas por presupuesto, (6) una proyección de ventas futuras combinando tendencia y temporada alta/baja, (7) el ROAS logrado vs. el ROAS objetivo de cada campaña, ajustable directo desde la plataforma, (8) las recomendaciones nativas de optimización de Google Ads, con opción de aplicarlas o descartarlas sin salir de la plataforma, (9) estado y resultados reales de AI Max for Search, con cruce contra los negativos ya escritos en la cuenta, (10) exclusión de categorías de contenido no apto y de apps a nivel de toda la cuenta, (11) un Planificador de palabras clave (ideas, histórico de búsquedas, y pronóstico) y (12) **Ritmo de consumo**: un tablero que vigila el gasto del mes en curso de las cuentas que cada usuario elija contra el objetivo mensual configurado en Billing, con semáforo de ritmo, y una ventana por cuenta para ver sus campañas activas y ajustar su presupuesto diario directo desde ahí. Pensada para cubrir 100+ cuentas de forma self-serve.
 
 Hay una función más ya construida — generador de copys de anuncio desde una URL — pero **está oculta del menú a pedido de cesar**: tras probarla con cuentas reales, el resultado no lo convenció lo suficiente para quedar en v1. Queda pendiente para v2 (ver "Función 3" más abajo y `roadmap.md`).
 
@@ -17,9 +17,11 @@ El sidebar de la app ya lo muestra así. El salto de V1 a V2 marca el paso de "s
 - **Conectada de verdad desde el 2026-07-28** (no solo en modo simulado): la primera prueba contra una cuenta real de la agencia encontró y corrigió varios bugs reales (versión de API retirada, un parámetro no soportado, un nombre de campo equivocado, un filtro que dejaba fuera la mayoría de las cuentas del MCC) — ver el detalle completo en la sección de Función 1 más abajo y en `roadmap.md`.
 - Mientras las credenciales de Google no estén configuradas (o para cualquier cuenta de prueba), todo sigue funcionando en **modo simulado** — mismos botones, mismo flujo, datos de ejemplo en vez de reales.
 
-## Estado: V2 — nueve funciones construidas, ocho activas en el menú (Función 3, copys, en pausa para v2)
+## Estado: V2 — trece funciones construidas, doce activas en el menú (Función 3, copys, en pausa para v2)
 
 **Menú reordenado (2026-07-29):** las cuatro funciones conectadas a Google Ads quedan agrupadas arriba — Rendimiento, Comparar periodos, Oportunidad de ingresos, Negativización — y las dos que no dependen de Google Ads (Bookings, Proyección de ventas) quedan abajo.
+
+**Menú actual (al 2026-10-06), de arriba a abajo:** Rendimiento, ROAS, Recomendaciones, IA Max, Negativización, Exclusiones de contenido, Planificador de keywords, Ritmo de consumo, Oportunidad de ingresos, Comparar periodos, Bookings, Proyección de ventas — las nueve primeras se conectan a Google Ads (ocho leen/escriben sobre una cuenta elegida, Ritmo de consumo vigila varias a la vez); las tres últimas no dependen de la API.
 
 ### Función 1 — Análisis de rendimiento
 
@@ -216,6 +218,54 @@ cesar preguntó por "Ads Advisor" (la IA nueva de Google dentro de la interfaz d
 - **Probado contra la cuenta real de Spiwak Chipichape, con autorización explícita de cesar:** se descartó una recomendación real y se confirmó que Google dejó de sugerirla. Aplicar una recomendación real **no se probó** — a diferencia de descartar, es una escritura de verdad sobre la configuración de la campaña, así que queda pendiente de una autorización puntual aparte.
 - **Filtro por campaña (mismo día):** a pedido de cesar, para no ver siempre todas las recomendaciones de la cuenta juntas.
 
+### Función 10 — IA Max / AI Max for Search (nueva, 2026-08-18)
+
+A diferencia de "Ask Advisor" (Función 9, sin API pública), AI Max for Search sí tiene soporte real en la API desde v25 (`Campaign.ai_max_setting`) — verificado contra los `.proto` reales antes de construir. Sección nueva con tres pestañas:
+
+- **Estado:** campañas Search con AI Max activo/inactivo, con prender/apagar (vista previa `validateOnly` antes de aplicar, mismo patrón que ROAS).
+- **Qué sirvió:** reporte de solo lectura de las búsquedas reales que AI Max sirvió.
+- **Cruce con negativos:** cruza lo servido contra los negativos ya escritos de verdad en la cuenta (`campaign_criterion`), para avisar si AI Max está sirviendo búsquedas que el equipo ya decidió evitar.
+
+**Bug real corregido contra una cuenta real (Estelar Yopal):** la vista elegida al construir "Qué sirvió" (`ai_max_search_term_ad_combination_view`) no traía datos aunque el estado sí se leía bien. El reporte oficial de AI Max usa `search_term_view` filtrado por el segmento `segments.search_term_match_source` (AI_MAX_KEYWORDLESS/AI_MAX_BROAD_MATCH) — mismo recurso que ya usa Negativización, con métricas reales (rango fijo de 30 días). Ese fix encontró un caso concreto real: AI Max amplió por su cuenta la campaña de marca "Yopal" hacia "hotel dorado plaza cartagena" — un hotel de otra ciudad — justo el tipo de expansión que la pestaña de cruce está pensada para detectar.
+
+**Bug real reportado por cesar (Estelar Milla de Oro mostrando datos de Estelar La Fontana):** el selector de cuenta es compartido por las 3 pestañas, pero cada una se trae por separado con su propio botón — cambiar de cuenta sin volver a pedir "Qué sirvió" dejaba esa pestaña (y Cruce, que depende de ella) mostrando los datos de la cuenta anterior. Corregido: cambiar de cuenta limpia el estado de las 3 pestañas de inmediato.
+
+Probado en modo simulado (navegador, las 3 pestañas) y las 3 consultas de lectura contra cuentas reales (Hotel Neptuno, Spiwak Chipichape, Estelar Yopal), sin errores de campo. El toggle real (escritura) solo se probó en `validateOnly` y en modo simulado — pendiente de autorización puntual contra una cuenta real.
+
+### Función 11 — Exclusiones de contenido (nueva, 2026-09-23)
+
+A pedido explícito de cesar: excluye categorías de contenido no apto (`content_label`, 26 categorías) y categorías de apps (`mobile_app_category`) de **toda la cuenta de una vez** (`CustomerNegativeCriterion`) — la única palanca que existe para Performance Max, que no tiene exclusión por campaña; por eso pesa más para PMax/Demand Gen/Display/Video y casi no toca Search. Ver, agregar y quitar, siempre con vista previa (`validateOnly`) antes de escribir de verdad — mismo patrón que Negativización/ROAS/IA Max.
+
+**Selección múltiple de categorías de apps (mismo día):** cambió de selección única a checkboxes con "Seleccionar las N mostradas" (respeta el filtro de búsqueda) — antes había que repetir vista previa/confirmar una por una; mismo patrón por lotes que ya tenía la exclusión de categorías de contenido.
+
+### Función 12 — Planificador de palabras clave / Keyword Planner (nueva, 2026-09-29)
+
+Sección nueva con las 3 piezas reales de Keyword Planner que sí tienen API pública (`KeywordPlanIdeaService`): **Descubre keywords**, **Histórico**, y **Pronóstico** — con búsqueda de geo-segmentación por nombre y catálogo de idiomas. Investigado antes de construir: Performance Planner (la curva de presupuesto vs. conversiones de campañas ya activas) no tiene API pública — el pronóstico por keyword es lo más cercano que sí existe. Todo de solo lectura, no escribe nada en la cuenta.
+
+Incluye gráficas de Chart.js (top 10 por volumen en Descubre keywords; sparkline de tendencia mensual por fila en Histórico), descarga en CSV en las 3 pestañas, orden por columna en la tabla de Histórico, y una ventana flotante que se abre al hacer click en una keyword del Histórico con su detalle completo (volumen, competencia, índice, pujas, y la tendencia mensual ampliada).
+
+**Bug real corregido:** el pronóstico fallaba con un error genérico de Google Ads ("The input has an invalid value.", sin decir qué campo) cuando el código de moneda llegaba en minúsculas — Google Ads exige el código en mayúsculas (ISO 4217). Confirmado reproduciendo el error contra una cuenta real y aislando la causa probando con y sin el campo; corregido normalizando a mayúsculas en el servidor sin importar cómo lo escriba el usuario. De paso se mejoró el diagnóstico de errores de Google Ads en producción: ahora se loguean los parámetros exactos de cada solicitud de pronóstico que falla, y un error multilínea de Google ya no se parte en logs sueltos sin orden garantizado entre requests concurrentes (Railway separa cada línea de un `print()` en una entrada de log aparte) — se colapsa a una sola línea antes de loguear.
+
+Validado contra una cuenta real vía `railway run` (los 3 endpoints, incluyendo los 3 modos de puja del pronóstico) antes de subir.
+
+### Función 13 — Ritmo de consumo (nueva, 2026-10-06)
+
+cesar pidió una forma de controlar si el consumo diario de sus cuentas va por arriba o por abajo de lo que debería ir en el mes. Sección nueva, con un patrón distinto al resto de la plataforma: en vez de trabajar sobre una cuenta elegida, cada usuario arma su propia lista de cuentas a **vigilar** ("watchlist", independiente de a cuántas cuentas tenga acceso en total).
+
+**Objetivo mensual, desde Billing.** El objetivo sale del presupuesto de cuenta activo en Google Ads (`account_budget`). Hallazgo real al construirlo: el `status = APPROVED` **no** identifica un único presupuesto vigente — una cuenta con años de historial puede tener 100+ `account_budget` con ese status, uno por cada periodo ya cerrado (esta agencia arma uno por mes calendario). Hubo que filtrar también por fecha (`approved_start_date_time`/`approved_end_date_time` contra "hoy") para quedarse con el que cubre el mes en curso; cuentas sin uno configurado (pago automático sin límite) o con tipo `INFINITE` se muestran solo con el gasto del mes, marcadas "Sin objetivo en Billing" en vez de semáforo.
+
+**Ritmo, no solo el gasto crudo.** Por cada cuenta vigilada: objetivo mensual, gastado (mes a la fecha), % consumido, esperado y % esperado, y la desviación — con semáforo (verde "En ritmo" dentro de ±10%, rojo "Por arriba del ritmo", ámbar "Por abajo del ritmo"); el color del semáforo también se pinta directo sobre el número de "% consumido", para verlo de un vistazo sin cruzar columnas. **Esperado se calcula hasta AYER, no hasta hoy** — el gasto del día en curso en Google Ads normalmente todavía no está completo, así que compararlo contra el presupuesto de un día entero sesgaba el ritmo hacia "por debajo" sin que fuera real todavía. Todas las columnas numéricas (y Cuenta) tienen orden por columna, con botón "Quitar todas" para vaciar la lista de un jalón.
+
+**Agregar un MCC completo.** Para hoteles con 40+ cuentas, elegirlas una por una era muy lento — a pedido de cesar, se agregó un buscador (solo admins) que encuentra un sub-MCC por nombre o ID y agrega de un jalón todas sus cuentas a la watchlist, recorriendo recursivamente cualquier sub-MCC anidado adentro. **Bug real encontrado por cesar** (buscaba el MCC "GHL Hoteles MCC Nuevo", con 53 cuentas, y no aparecía): el buscador solo miraba sub-MCCs de nivel 1 bajo el MCC raíz — esa marca en particular vivía en nivel 2, anidada dentro de otro sub-MCC. Corregido para mostrar sub-MCCs de cualquier nivel (pasó de 223 a 293 agrupaciones disponibles).
+
+**Filtro por MCC en el resto de la plataforma (mismo día).** El mismo buscador de MCC se generalizó (`/api/google-ads/mcc-groups` y `/api/google-ads/mcc-group-accounts`, antes específicos de Ritmo de consumo) y se agregó como "Filtrar por MCC" al selector de cuenta de **las otras ocho secciones conectadas a Google Ads** (ROAS, Rendimiento, Recomendaciones, Negativización, Comparar periodos, Oportunidad de ingresos, IA Max, Exclusiones de contenido, Keyword Planner): buscas la marca y el selector de cuenta se angosta a solo las suyas, en vez de buscar en el listado plano de 1105+ cuentas. Solo admins, mismo criterio que el buscador de Administración.
+
+**Ver y ajustar campañas activas, directo desde la cuenta vigilada.** Al hacer click en el nombre de una cuenta se abre una ventana con sus campañas `ENABLED`: estrategia de puja, KPIs del mes en curso (impresiones, clics, CTR, costo, conversiones, costo/conv) y presupuesto diario — ajustable ahí mismo, con el mismo flujo de vista previa (`validateOnly`) antes de aplicar que ya usa ROAS. Si la estrategia tiene un ROAS objetivo configurado (`campaign.target_roas`/`campaign.maximize_conversion_value.target_roas`), el nombre de la estrategia es clicable y revela el valor (ej. "ROAS objetivo — 1500%").
+
+**Bug real de seguridad encontrado contra una cuenta real:** dos campañas (una de ellas sin gasto, claramente de prueba) apuntaban al **mismo** `campaign_budget.resource_name`, con `explicitly_shared = False` en ambas — Google permite reutilizar un presupuesto entre campañas sin pasar por el flujo de "presupuesto compartido" de la UI, y ese flag no lo refleja. Sin corregir esto, ajustar el presupuesto de una habría cambiado silenciosamente el gasto real de la otra. Corregido: además del flag de Google, se cuentan cuántas campañas activas usan cada `resource_name` y se marca "Compartido — solo lectura" también cuando aparece más de una vez, sin depender solo de lo que diga la API.
+
+Probado de punta a punta en modo simulado (agregar/quitar cuentas, ordenar, semáforo, abrir la ventana de campañas, vista previa → confirmar un ajuste de presupuesto reflejado en la tabla sin recargar) y, para las partes de solo lectura y vista previa, contra cuentas reales vía `railway run` y el navegador (incluido el hallazgo del presupuesto compartido). La escritura real de presupuesto (`validate_only: false`) no se ha probado contra una cuenta real todavía — mismo criterio que ROAS: se prueba primero con una campaña de bajo riesgo, con autorización puntual de cesar.
+
 ## Seguridad — endurecimiento (2026-07-30)
 
 Con la API de Google Ads ya conectada de verdad (lectura y escritura sobre 1105+ cuentas reales de clientes), cesar pidió una auditoría de seguridad completa: "no pueden haber fugas de información". Hasta ese momento el registro era abierto a cualquiera con el link, cualquier usuario autenticado podía leer/escribir en cualquiera de las 1105+ cuentas del MCC sin ninguna verificación, no había límite de intentos de login, y los errores de Google Ads se mostraban tal cual en el navegador. Se cerraron nueve hallazgos:
@@ -262,7 +312,7 @@ Cada usuario no-admin solo puede leer/escribir en las cuentas de Google Ads que 
 - "Estelar" como término núcleo (Función 2) es amplio — es una cadena con varias propiedades en Colombia, puede retener búsquedas de otro hotel Estelar.
 - La Función 3 no ejecuta JavaScript: páginas que cargan su contenido dinámicamente van a dar poco texto real y el resultado se apoya más en plantillas genéricas.
 - La Función 3 no valida las políticas de contenido de Google Ads (mayúsculas, superlativos, marcas de terceros) — solo longitud de caracteres.
-- Ninguna de las nueve funciones valida que el archivo/URL subido sea reciente ni de la cuenta correcta.
+- Ninguna de las funciones valida que el archivo/URL subido sea reciente ni de la cuenta correcta.
 - **Control de acceso y despliegue: ya no están pendientes** (ver "Seguridad — endurecimiento" y "Cómo corre la plataforma, y el login" arriba) — HTTPS resuelto por Railway, registro cerrado por código de invitación, y control de acceso por cuenta de Google Ads (2026-07-30).
 - No hay persistencia de historial entre cargas todavía para ninguna función (Fase 2) — la base de datos que ya existe solo guarda cuentas de usuario, no resultados de análisis. Las Funciones 4 (modo Comparar periodos) y 5 cubren parte de esta necesidad hoy, pero de forma manual (subiendo dos archivos cada vez).
 - Falta comprar y conectar un dominio propio — hoy la app vive en el dominio genérico de Railway (`paid-media-helper.up.railway.app`).
@@ -276,6 +326,9 @@ Cada usuario no-admin solo puede leer/escribir en las cuentas de Google Ads que 
 - El ROAS objetivo solo se puede ajustar en campañas con estrategia de puja propia (`TARGET_ROAS` o `MAXIMIZE_CONVERSION_VALUE`) y no compartida con otras campañas — el resto de estrategias, y las campañas con una estrategia de puja compartida (portfolio), quedan en solo lectura desde esta pantalla.
 - La Función 9 (Recomendaciones de Google) no tiene vista previa (`validateOnly`) del lado de la API de Google — cada aplicar/descartar es inmediato sobre la cuenta real, compensado solo con una confirmación explícita en el navegador. **Aplicar** una recomendación real todavía no se probó contra una cuenta de verdad (solo descartar).
 - El análisis con IA de Función 1 es una prueba interna, solo visible para administradores — no está abierta al resto del equipo todavía, y el bloqueo de "cambia tu contraseña" del reset de admin es a nivel de interfaz, no de cada endpoint del servidor (decisión consciente, ver "Seguridad — endurecimiento").
+- El toggle real de AI Max (Función 10) solo se probó en `validateOnly` y en modo simulado — todavía no se probó una escritura real contra una cuenta de verdad.
+- El ajuste real de presupuesto diario por campaña (Función 13, Ritmo de consumo) solo se probó en `validateOnly` (vista previa) contra una cuenta real y de punta a punta en modo simulado — todavía no se probó una escritura real contra una cuenta de verdad, mismo pendiente que tiene ROAS.
+- El filtro "Agregar un MCC completo" / "Filtrar por MCC" (Función 13 y las otras ocho secciones conectadas a Google Ads) es solo para administradores — un usuario no-admin sigue viendo únicamente las cuentas que ya tiene asignadas, sin este atajo.
 
 ## Próximos pasos
 
@@ -294,6 +347,9 @@ Cada usuario no-admin solo puede leer/escribir en las cuentas de Google Ads que 
 13. ~~Limpiar las cuentas de prueba temporales (`claude_audit_temp*`) que quedaron en producción durante las pruebas de seguridad~~ — hecho por cesar, 2026-07-30.
 14. Probar **aplicar** una recomendación real de la Función 9 contra una cuenta real (solo se probó descartar) — pendiente de autorización puntual de cesar, igual que se hizo con la primera escritura de negativos.
 15. Decidir si el análisis con IA de Función 1 (2026-08-17) se abre a todos los usuarios o se queda como prueba solo para administradores.
+16. Probar el toggle real de AI Max (Función 10) contra una cuenta real por primera vez (solo se probó `validateOnly` y modo simulado).
+17. Probar la escritura real de presupuesto diario por campaña (Función 13, Ritmo de consumo) contra una cuenta real por primera vez — empezando por una campaña de bajo riesgo, mismo criterio que ROAS y negativos.
+18. Seguir validando Ritmo de consumo (Función 13) con más cuentas vigiladas a la vez, y revisar con cesar si el margen de tolerancia del semáforo (±10%) es el que quiere mantener.
 
 ## Archivos del proyecto
 

@@ -1,10 +1,6 @@
 # Paid Media Helper — Plataforma de Google Ads
 
-Implementación del diseño (`OUTPUTS/plataforma-google-ads/Diseño de plataforma-handoff.zip`) como sitio estático, con la lógica de las tres funciones ya operativa:
-
-1. **Rendimiento** — sube un export de campañas (CSV/Excel), calcula CPA ponderado/simple y CTR segmentado por tipo de campaña (Search marca/genérica, Display, Performance Max), y genera recomendaciones priorizadas por gasto.
-2. **Negativización** — sube el export de "Términos de búsqueda", clasifica cada término en Mantener / Revisar / Candidato a negativo según términos núcleo y excepciones.
-3. **Generador de copys** — pega una URL (o pega el HTML si el sitio bloquea CORS) y genera 15 títulos y 10 descripciones para un anuncio de búsqueda responsivo.
+Implementación del diseño (`OUTPUTS/plataforma-google-ads/Diseño de plataforma-handoff.zip`) como sitio estático — ya no es solo el prototipo original de 3 funciones, ver `OUTPUTS/plataforma-google-ads/Resumen_Proyecto.md` para el detalle completo y actualizado de las 12 funciones activas (Rendimiento, ROAS, Recomendaciones, IA Max, Negativización, Exclusiones de contenido, Planificador de keywords, Ritmo de consumo, Oportunidad de ingresos, Comparar periodos, Bookings, Proyección de ventas — más el Generador de copys, construido pero oculto del menú). Vive en producción en [Railway](https://railway.app) (`https://paid-media-helper.up.railway.app`), con auto-deploy desde `main`.
 
 ## Cómo correrla
 
@@ -19,24 +15,25 @@ Luego abre `http://localhost:8642` — te va a pedir iniciar sesión o crear cue
 
 ## Archivos
 
-- `index.html` — estructura y carga de fuentes/íconos (Lucide) y la librería `xlsx` para leer Excel.
-- `login.html` — pantalla de inicio de sesión / creación de cuenta.
+- `index.html` — estructura y carga de fuentes/íconos (Lucide), `xlsx` para leer Excel, y Chart.js para las gráficas.
+- `login.html` / `login.js` — pantalla de inicio de sesión / creación de cuenta.
 - `styles.css` — tokens de diseño (color, tipografía, espaciado) portados del design system del handoff.
-- `engine.js` — lógica de negocio (puerto de `analysis.py`, `negative_keywords.py`, `copy_generator.py`), sin dependencias de UI.
-- `app.js` — estado de la app, renderizado y manejo de eventos.
-- `server.py` — servidor estático + login/registro/sesión + endpoint `/api/fetch` (ver notas abajo).
-- `data.db` — se crea sola al arrancar el servidor por primera vez. Guarda usuarios (contraseña con hash + salt, nunca en texto plano) y sesiones activas. No se sirve por HTTP; bórrala si quieres reiniciar los usuarios desde cero.
+- `engine.js` — lógica de negocio de las funciones que procesan un archivo (CSV/Excel) en el navegador, sin dependencias de UI.
+- `app.js` — estado de todas las funciones, renderizado y manejo de eventos (un solo archivo, grande — el patrón de cada función nueva se agrega siguiendo el de la anterior).
+- `server.py` — servidor + login/registro/sesión/Administración + todos los endpoints `/api/*` (ver notas abajo).
+- `google_ads_client.py` — cliente de la API de Google Ads (lectura y escritura) — solo `urllib`, sin la librería oficial, para no agregar dependencias pip al servidor.
+- `claude_client.py` — cliente de la API de Claude (análisis con IA en Rendimiento) — mismo criterio que `google_ads_client.py`.
+- `data.db` — se crea sola al arrancar el servidor por primera vez. Guarda usuarios, sesiones, a qué cuentas de Google Ads tiene acceso cada quien, y la watchlist de Ritmo de consumo. No se sirve por HTTP. En producción vive en un volumen persistente de Railway, separado del código.
 
 ## Login
 
-Registro abierto: cualquiera con el link de la app puede crear su cuenta desde `/login` — no hay invitación ni aprobación previa. La sesión dura 14 días (cookie httpOnly, no accesible desde JS) y se cierra con el botón "Cerrar sesión" del sidebar.
+**Registro cerrado** (desde 2026-07-30) — hace falta un código de invitación exacto (`PMH_REGISTRATION_CODE`) que solo un admin reparte; sin la variable configurada, el registro queda cerrado por default. Contraseñas con hash + salt (PBKDF2-SHA256, 200k iteraciones, nunca en texto plano), mínimo 10 caracteres, rate limiting en login/registro, y bloqueo de cuenta tras 5 intentos fallidos (15 min). La sesión dura 14 días (cookie httpOnly, `Secure` en producción) y se cierra con el botón "Cerrar sesión" del sidebar.
 
-**Esto es apropiado mientras la app corra local o en una red interna de confianza, como hoy.** Si en algún momento se expone en una red compartida o en internet, hace falta antes de eso:
-- Servir con HTTPS y marcar la cookie de sesión como `Secure`.
-- Cerrar el registro abierto (dar de alta cuentas a mano, o agregar aprobación).
-- Ojo: Rendimiento y Negativización procesan el archivo subido enteramente en el navegador (nunca tocan el servidor) — el login controla quién puede *cargar la app*, no hay una segunda barrera del lado del servidor para esas dos funciones una vez que alguien ya tiene la página abierta.
+Cada usuario no-admin solo puede leer/escribir en las cuentas de Google Ads que un admin le asigne explícitamente (pantalla de Administración) — sin ninguna asignación, no puede tocar ninguna cuenta real. Los admins pueden además generar una contraseña temporal para otro usuario que perdió acceso (no hay infraestructura de correo para un "olvidé mi contraseña" self-service).
 
-No hay todavía historial entre cargas (Fase 2.1 del roadmap sigue pendiente) — la base `data.db` por ahora solo guarda cuentas de usuario, no el resultado de los análisis.
+Ver `OUTPUTS/plataforma-google-ads/Resumen_Proyecto.md` → "Seguridad — endurecimiento" para el detalle completo de cada punto.
+
+No hay todavía historial entre cargas (Fase 2 del roadmap sigue pendiente) — la base `data.db` por ahora solo guarda usuarios, sesiones y a qué cuentas de Google Ads tiene acceso cada quien, no el resultado de los análisis.
 
 ## Otras notas
 
