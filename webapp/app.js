@@ -384,6 +384,11 @@ function fmtInt(n) {
   if (n === null || n === undefined || Number.isNaN(n)) return '0';
   return Math.round(n).toLocaleString('en-US');
 }
+// n como fracción 0-1 (puede pasar de 1, ej. 1.37 = 137% ya consumido).
+function fmtPct0(n) {
+  if (n === null || n === undefined || Number.isNaN(n)) return 'N/D';
+  return Math.round(n * 100) + '%';
+}
 // Fondo tipo mapa de calor para una celda de tabla — más intenso mientras
 // más alto el valor (0-1). scale amplifica valores típicamente bajos
 // (ej. % perdido) para que el color se note sin tener que llegar a 100%.
@@ -6658,14 +6663,21 @@ function pacingRowHtml(r) {
     return `
       <tr>
         <td>${escapeHtml(r.account_name)}<div class="footnote">${escapeHtml(r.customer_id)}</div></td>
-        <td colspan="4"><span class="delta-badge bad">${escapeHtml(r.error)}</span></td>
+        <td colspan="7"><span class="delta-badge bad">${escapeHtml(r.error)}</span></td>
         <td><button class="btn-link" data-pacing-remove="${escapeHtml(r.customer_id)}">Quitar</button></td>
       </tr>`;
   }
   const hasTarget = r.monthly_target !== null && r.monthly_target !== undefined && r.monthly_target > 0;
-  let expected = null, deviationPct = null;
+  // El esperado se calcula hasta AYER, no hasta hoy — el gasto de hoy en
+  // Google Ads normalmente todavía no está cerrado/completo, así que
+  // comparar un día a medias contra el presupuesto de un día completo
+  // sesga el ritmo hacia "por debajo" sin que sea real todavía.
+  const daysElapsed = Math.max((r.days_elapsed || 0) - 1, 0);
+  let expected = null, expectedPct = null, consumedPct = null, deviationPct = null;
   if (hasTarget) {
-    expected = r.monthly_target * (r.days_elapsed / r.days_in_month);
+    expectedPct = daysElapsed / r.days_in_month;
+    expected = r.monthly_target * expectedPct;
+    consumedPct = r.spend_mtd / r.monthly_target;
     deviationPct = expected > 0 ? (r.spend_mtd - expected) / expected : 0;
   }
   return `
@@ -6673,7 +6685,9 @@ function pacingRowHtml(r) {
       <td>${escapeHtml(r.account_name)}<div class="footnote">${escapeHtml(r.customer_id)}</div></td>
       <td>${hasTarget ? fmtMoney(r.monthly_target) : 'N/D'}</td>
       <td>${fmtMoney(r.spend_mtd)}</td>
+      <td>${hasTarget ? fmtPct0(consumedPct) : 'N/D'}</td>
       <td>${hasTarget ? fmtMoney(expected) : 'N/D'}</td>
+      <td>${hasTarget ? fmtPct0(expectedPct) : 'N/D'}</td>
       <td>${hasTarget ? pacingDeviationLabel(deviationPct) : 'N/D'}</td>
       <td>${hasTarget ? pacingStatusBadge(deviationPct) : '<span class="delta-badge neutral">Sin objetivo en Billing</span>'}</td>
       <td><button class="btn-link" data-pacing-remove="${escapeHtml(r.customer_id)}">Quitar</button></td>
@@ -6698,7 +6712,9 @@ function renderPacingTable() {
             <th>Cuenta</th>
             <th>Objetivo mensual</th>
             <th>Gastado (mes a la fecha)</th>
-            <th>Esperado a hoy</th>
+            <th>% consumido</th>
+            <th>Esperado (hasta ayer)</th>
+            <th>% esperado</th>
             <th>Desviación</th>
             <th>Estado</th>
             <th></th>
@@ -6706,7 +6722,7 @@ function renderPacingTable() {
           <tbody>${rowsHtml}</tbody>
         </table>
       </div>
-      <p class="footnote" style="margin-top:14px">El objetivo mensual sale del presupuesto de cuenta activo en Billing (Google Ads); cuentas sin uno configurado (pago automático sin límite) se muestran solo con el gasto del mes. "En ritmo" = dentro de ±${(PACING_TOLERANCE * 100).toFixed(0)}% de lo esperado a la fecha.</p>
+      <p class="footnote" style="margin-top:14px">El objetivo mensual sale del presupuesto de cuenta activo en Billing (Google Ads); cuentas sin uno configurado (pago automático sin límite) se muestran solo con el gasto del mes. "Esperado" y "% esperado" se calculan hasta AYER (no hoy) porque el gasto del día en curso en Google Ads normalmente todavía no está completo. "En ritmo" = dentro de ±${(PACING_TOLERANCE * 100).toFixed(0)}% de lo esperado.</p>
     </div>`;
 }
 
