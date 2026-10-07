@@ -7717,13 +7717,27 @@ function pacingSemaforoColor(deviationPct) {
 // por columna usen exactamente los mismos números.
 function pacingComputed(r) {
   const hasTarget = r.monthly_target !== null && r.monthly_target !== undefined && r.monthly_target > 0;
-  if (!hasTarget) return { hasTarget: false, expected: null, expectedPct: null, consumedPct: null, deviationPct: null };
+  if (!hasTarget) {
+    return {
+      hasTarget: false, expected: null, expectedPct: null, consumedPct: null, deviationPct: null,
+      recommendedDaily: null, budgetExceeded: false,
+    };
+  }
   const daysElapsed = Math.max((r.days_elapsed || 0) - 1, 0);
   const expectedPct = daysElapsed / r.days_in_month;
   const expected = r.monthly_target * expectedPct;
   const consumedPct = r.spend_mtd / r.monthly_target;
   const deviationPct = expected > 0 ? (r.spend_mtd - expected) / expected : 0;
-  return { hasTarget: true, expected, expectedPct, consumedPct, deviationPct };
+  // Cuánto invertir por día de HOY en adelante (incluido) para terminar el
+  // mes justo en el objetivo: lo que queda del objetivo ÷ los días que
+  // quedan, incluyendo hoy (días del mes - días transcurridos + 1). Si ya
+  // se gastó más del objetivo, no hay nada que "repartir" — queda en 0 y
+  // se marca budgetExceeded para que la interfaz avise en vez de mostrar
+  // un negativo sin sentido.
+  const daysRemaining = Math.max((r.days_in_month || 0) - (r.days_elapsed || 0) + 1, 1);
+  const remainingBudget = r.monthly_target - r.spend_mtd;
+  const recommendedDaily = Math.max(remainingBudget, 0) / daysRemaining;
+  return { hasTarget: true, expected, expectedPct, consumedPct, deviationPct, recommendedDaily, budgetExceeded: remainingBudget <= 0 };
 }
 
 const PACING_SORT_KEYS = {
@@ -7734,6 +7748,7 @@ const PACING_SORT_KEYS = {
   expected: (r) => { const c = pacingComputed(r); return c.hasTarget ? c.expected : -Infinity; },
   expected_pct: (r) => { const c = pacingComputed(r); return c.hasTarget ? c.expectedPct : -Infinity; },
   deviation_pct: (r) => { const c = pacingComputed(r); return c.hasTarget ? c.deviationPct : -Infinity; },
+  recommended_daily: (r) => { const c = pacingComputed(r); return c.hasTarget ? c.recommendedDaily : -Infinity; },
 };
 function getPacingRowsSorted() {
   const p = state.pacing;
@@ -7759,7 +7774,7 @@ function pacingRowHtml(r) {
     return `
       <tr>
         <td>${escapeHtml(r.account_name)}<div class="footnote">${escapeHtml(r.customer_id)}</div></td>
-        <td colspan="7"><span class="delta-badge bad">${escapeHtml(r.error)}</span></td>
+        <td colspan="8"><span class="delta-badge bad">${escapeHtml(r.error)}</span></td>
         <td><button class="btn-link" data-pacing-remove="${escapeHtml(r.customer_id)}">Quitar</button></td>
       </tr>`;
   }
@@ -7773,6 +7788,7 @@ function pacingRowHtml(r) {
       <td>${c.hasTarget ? fmtMoney(c.expected) : 'N/D'}</td>
       <td>${c.hasTarget ? fmtPct0(c.expectedPct) : 'N/D'}</td>
       <td>${c.hasTarget ? pacingDeviationLabel(c.deviationPct) : 'N/D'}</td>
+      <td>${c.hasTarget ? (c.budgetExceeded ? `${fmtMoney(0)} <span class="delta-badge bad">objetivo superado</span>` : fmtMoney(c.recommendedDaily)) : 'N/D'}</td>
       <td>${c.hasTarget ? pacingStatusBadge(c.deviationPct) : '<span class="delta-badge neutral">Sin objetivo en Billing</span>'}</td>
       <td><button class="btn-link" data-pacing-remove="${escapeHtml(r.customer_id)}">Quitar</button></td>
     </tr>`;
@@ -7803,13 +7819,14 @@ function renderPacingTable() {
             ${pacingSortTh('Esperado (hasta ayer)', 'expected')}
             ${pacingSortTh('% esperado', 'expected_pct')}
             ${pacingSortTh('Desviación', 'deviation_pct')}
+            ${pacingSortTh('Inversión diaria recomendada', 'recommended_daily')}
             <th>Estado</th>
             <th></th>
           </tr></thead>
           <tbody>${rowsHtml}</tbody>
         </table>
       </div>
-      <p class="footnote" style="margin-top:14px">El objetivo mensual sale del presupuesto de cuenta activo en Billing (Google Ads); cuentas sin uno configurado (pago automático sin límite) se muestran solo con el gasto del mes. "Esperado" y "% esperado" se calculan hasta AYER (no hoy) porque el gasto del día en curso en Google Ads normalmente todavía no está completo. "En ritmo" = dentro de ±${(PACING_TOLERANCE * 100).toFixed(0)}% de lo esperado.</p>
+      <p class="footnote" style="margin-top:14px">El objetivo mensual sale del presupuesto de cuenta activo en Billing (Google Ads); cuentas sin uno configurado (pago automático sin límite) se muestran solo con el gasto del mes. "Esperado" y "% esperado" se calculan hasta AYER (no hoy) porque el gasto del día en curso en Google Ads normalmente todavía no está completo. "En ritmo" = dentro de ±${(PACING_TOLERANCE * 100).toFixed(0)}% de lo esperado. "Inversión diaria recomendada" = lo que queda del objetivo mensual ÷ los días que quedan del mes (incluido hoy), para terminar el mes justo en el objetivo.</p>
     </div>`;
 }
 
