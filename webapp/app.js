@@ -7834,7 +7834,7 @@ function pacingRowHtml(r) {
       <td>${fmtMoney(r.spend_mtd)}${r.spend_total != null && Math.abs(r.spend_total - r.spend_mtd) > 0.005 && c.hasTarget ? `<div class="footnote">total del periodo ${fmtMoney(r.spend_total)}</div>` : ''}</td>
       <td>${c.hasTarget ? `<strong style="color:${pacingSemaforoColor(c.deviationPct)}">${fmtPct0(c.consumedPct)}</strong>${pacingProgressBar(c)}` : 'N/D'}</td>
       <td>${c.hasTarget ? fmtMoney(c.expected) : 'N/D'}</td>
-      <td>${c.hasTarget ? fmtPct0(c.expectedPct) : 'N/D'}</td>
+      <td>${c.hasTarget ? `<span class="pacing-expected-pill">${fmtPct0(c.expectedPct)}</span>` : 'N/D'}</td>
       <td>${c.hasTarget ? pacingDeviationLabel(c.deviationPct) : 'N/D'}</td>
       <td>${c.hasTarget ? (c.recommendedDaily == null ? '—' : c.budgetExceeded ? `${fmtMoney(0)} <span class="delta-badge bad">objetivo superado</span>` : fmtMoney(c.recommendedDaily)) : 'N/D'}</td>
       <td>${c.hasTarget ? pacingStatusBadge(c.deviationPct, c.isComplete) : '<span class="delta-badge neutral">Sin objetivo en Billing</span>'}</td>

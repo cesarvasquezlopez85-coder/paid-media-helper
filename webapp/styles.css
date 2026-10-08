@@ -391,6 +391,11 @@ main.content { flex: 1; overflow-y: auto; height: 100%; }
   background: var(--navy-800); border-radius: 1px;
 }
 
+.pacing-expected-pill {
+  display: inline-block; padding: 3px 10px; border-radius: 999px;
+  background: var(--navy-800); color: #fff; font-weight: 700; font-size: 13px;
+}
+
 .chart-card { padding: 22px 24px; margin-bottom: 20px; }
 .forecast-hover-col { cursor: crosshair; }
 .forecast-tooltip {
