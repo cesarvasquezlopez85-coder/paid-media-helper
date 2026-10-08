@@ -207,7 +207,7 @@ Sección nueva en el menú, **solo modo API** (sin toggle de archivo — el ROAS
 - El chequeo de "esta campaña sí admite ROAS objetivo" (solo `TARGET_ROAS` y `MAXIMIZE_CONVERSION_VALUE` lo tienen) se hace **en la plataforma, antes de construir la operación de escritura** — no se confía en que `validateOnly` de Google la rechace, por el hallazgo #3 de arriba.
 - El ajuste sigue el mismo patrón de "nunca un solo clic entre decidir y escribir" que Negativización: vista previa antes de que "Confirmar y aplicar" quede disponible, con una nota explícita en pantalla de que la vista previa acá es menos confiable y de que el cambio afecta cómo puja Google en la cuenta real ahora mismo.
 
-Verificado en modo simulado de punta a punta: 5 campañas (2 ajustables, 3 no por tipo de estrategia), ajuste de una campaña de 1500% a 1800% reflejado en la tabla sin recargar, "Cancelar" reseteando el flujo. Pendiente: primera prueba de escritura real (no solo `validateOnly`) contra una cuenta de verdad.
+Verificado en modo simulado de punta a punta: 5 campañas (2 ajustables, 3 no por tipo de estrategia), ajuste de una campaña de 1500% a 1800% reflejado en la tabla sin recargar, "Cancelar" reseteando el flujo. Escritura real probada por cesar contra cuentas reales (2026-10-08): el cambio de ROAS objetivo se aplica.
 
 ### Función 9 — Recomendaciones de Google (nueva, 2026-08-11)
 
@@ -215,7 +215,7 @@ cesar preguntó por "Ads Advisor" (la IA nueva de Google dentro de la interfaz d
 
 - **Primera versión, solo lectura:** trae el optimization score de la cuenta y la lista de recomendaciones activas (tipo, campaña, impacto estimado). Un bug encontrado antes de desplegar, contra una cuenta real: pedir campos anidados del impacto (ej. `recommendation.impact.base_metrics.cost_micros`) da error — mismo patrón ya visto con Search Impression Share (ver Función 6) — corregido pidiendo el objeto de impacto completo en vez de sus campos por separado.
 - **Aplicar/Descartar (mismo día).** A diferencia de negativos y ROAS, esta API de Google **no tiene vista previa** (`validateOnly`) — cada aplicar/descartar se ejecuta de inmediato sobre la cuenta real. Se le avisó a cesar antes de construir, y se compensó con una confirmación explícita del navegador antes de cada llamada, dejando claro en el texto que no hay vista previa.
-- **Probado contra la cuenta real de Spiwak Chipichape, con autorización explícita de cesar:** se descartó una recomendación real y se confirmó que Google dejó de sugerirla. Aplicar una recomendación real **no se probó** — a diferencia de descartar, es una escritura de verdad sobre la configuración de la campaña, así que queda pendiente de una autorización puntual aparte.
+- **Probado contra la cuenta real de Spiwak Chipichape, con autorización explícita de cesar:** se descartó una recomendación real y se confirmó que Google dejó de sugerirla. Aplicar una recomendación real también fue probado por cesar contra cuentas reales (2026-10-08) y funciona.
 - **Filtro por campaña (mismo día):** a pedido de cesar, para no ver siempre todas las recomendaciones de la cuenta juntas.
 
 ### Función 10 — IA Max / AI Max for Search (nueva, 2026-08-18)
@@ -230,7 +230,7 @@ A diferencia de "Ask Advisor" (Función 9, sin API pública), AI Max for Search 
 
 **Bug real reportado por cesar (Estelar Milla de Oro mostrando datos de Estelar La Fontana):** el selector de cuenta es compartido por las 3 pestañas, pero cada una se trae por separado con su propio botón — cambiar de cuenta sin volver a pedir "Qué sirvió" dejaba esa pestaña (y Cruce, que depende de ella) mostrando los datos de la cuenta anterior. Corregido: cambiar de cuenta limpia el estado de las 3 pestañas de inmediato.
 
-Probado en modo simulado (navegador, las 3 pestañas) y las 3 consultas de lectura contra cuentas reales (Hotel Neptuno, Spiwak Chipichape, Estelar Yopal), sin errores de campo. El toggle real (escritura) solo se probó en `validateOnly` y en modo simulado — pendiente de autorización puntual contra una cuenta real.
+Probado en modo simulado (navegador, las 3 pestañas) y las 3 consultas de lectura contra cuentas reales (Hotel Neptuno, Spiwak Chipichape, Estelar Yopal), sin errores de campo. El toggle real (escritura) fue probado por cesar contra cuentas reales (2026-10-08) y aplica el cambio.
 
 ### Función 11 — Exclusiones de contenido (nueva, 2026-09-23)
 
@@ -270,7 +270,7 @@ Verificado contra una cuenta real con presupuestos mensuales (SOMX - Emporio): u
 
 **Bug real de seguridad encontrado contra una cuenta real:** dos campañas (una de ellas sin gasto, claramente de prueba) apuntaban al **mismo** `campaign_budget.resource_name`, con `explicitly_shared = False` en ambas — Google permite reutilizar un presupuesto entre campañas sin pasar por el flujo de "presupuesto compartido" de la UI, y ese flag no lo refleja. Sin corregir esto, ajustar el presupuesto de una habría cambiado silenciosamente el gasto real de la otra. Corregido: además del flag de Google, se cuentan cuántas campañas activas usan cada `resource_name` y se marca "Compartido — solo lectura" también cuando aparece más de una vez, sin depender solo de lo que diga la API.
 
-Probado de punta a punta en modo simulado (agregar/quitar cuentas, ordenar, semáforo, abrir la ventana de campañas, vista previa → confirmar un ajuste de presupuesto reflejado en la tabla sin recargar) y, para las partes de solo lectura y vista previa, contra cuentas reales vía `railway run` y el navegador (incluido el hallazgo del presupuesto compartido). La escritura real de presupuesto (`validate_only: false`) no se ha probado contra una cuenta real todavía — mismo criterio que ROAS: se prueba primero con una campaña de bajo riesgo, con autorización puntual de cesar.
+Probado de punta a punta en modo simulado (agregar/quitar cuentas, ordenar, semáforo, abrir la ventana de campañas, vista previa → confirmar un ajuste de presupuesto reflejado en la tabla sin recargar) y, para las partes de solo lectura y vista previa, contra cuentas reales vía `railway run` y el navegador (incluido el hallazgo del presupuesto compartido). La escritura real de presupuesto (`validate_only: false`) fue probada por cesar contra cuentas reales (2026-10-08) y aplica el cambio.
 
 ## Seguridad — endurecimiento (2026-07-30)
 
@@ -328,12 +328,12 @@ Cada usuario no-admin solo puede leer/escribir en las cuentas de Google Ads que 
 - La conexión con la API de Google Ads (lectura) ya cubre las cuatro funciones que dependen de un export de campañas (Rendimiento, Negativización, Comparar periodos, Oportunidad de ingresos) — **ya no es una limitación**, completado 2026-07-29.
 - La **escritura** de negativos hacia Google Ads (Función 2) ya se probó contra una cuenta real, tanto para Search como para Performance Max (2026-07-29) — **ya no es una limitación** de "solo probado en modo simulado". Sigue pendiente probarla en más cuentas y con más volumen de términos a la vez.
 - Las categorías de búsqueda de Performance Max en Negativización (`campaign_search_term_insight`) no son el término literal exacto de búsqueda — son categorías que Google arma agrupando búsquedas parecidas, y no traen costo por categoría (el ahorro estimado de la pantalla no las incluye).
-- La escritura de ROAS objetivo (Función 8) solo se probó con `validateOnly` contra una cuenta real y en modo simulado — todavía no se probó una escritura real (`validateOnly: false`) contra una cuenta de verdad, a diferencia de los negativos.
+- La escritura de ROAS objetivo (Función 8) ya se probó contra cuentas reales (2026-10-08, probado por cesar) y aplica el cambio — ya no es una limitación. Recordar que `validateOnly` de Google no atrapa estrategias incompatibles, por eso el chequeo sigue haciéndose en la plataforma.
 - El ROAS objetivo solo se puede ajustar en campañas con estrategia de puja propia (`TARGET_ROAS` o `MAXIMIZE_CONVERSION_VALUE`) y no compartida con otras campañas — el resto de estrategias, y las campañas con una estrategia de puja compartida (portfolio), quedan en solo lectura desde esta pantalla.
-- La Función 9 (Recomendaciones de Google) no tiene vista previa (`validateOnly`) del lado de la API de Google — cada aplicar/descartar es inmediato sobre la cuenta real, compensado solo con una confirmación explícita en el navegador. **Aplicar** una recomendación real todavía no se probó contra una cuenta de verdad (solo descartar).
+- La Función 9 (Recomendaciones de Google) no tiene vista previa (`validateOnly`) del lado de la API de Google — cada aplicar/descartar es inmediato sobre la cuenta real, compensado solo con una confirmación explícita en el navegador. Tanto **aplicar** como descartar ya se probaron contra cuentas reales (2026-10-08).
 - El análisis con IA de Función 1 es una prueba interna, solo visible para administradores — no está abierta al resto del equipo todavía, y el bloqueo de "cambia tu contraseña" del reset de admin es a nivel de interfaz, no de cada endpoint del servidor (decisión consciente, ver "Seguridad — endurecimiento").
-- El toggle real de AI Max (Función 10) solo se probó en `validateOnly` y en modo simulado — todavía no se probó una escritura real contra una cuenta de verdad.
-- El ajuste real de presupuesto diario por campaña (Función 13, Ritmo de consumo) solo se probó en `validateOnly` (vista previa) contra una cuenta real y de punta a punta en modo simulado — todavía no se probó una escritura real contra una cuenta de verdad, mismo pendiente que tiene ROAS.
+- El toggle real de AI Max (Función 10) ya se probó contra cuentas reales (2026-10-08, probado por cesar) y aplica el cambio — ya no es una limitación.
+- El ajuste real de presupuesto diario por campaña (Función 13, Ritmo de consumo) ya se probó contra cuentas reales (2026-10-08, probado por cesar) y aplica el cambio — ya no es una limitación.
 - El filtro "Agregar un MCC completo" / "Filtrar por MCC" (Función 13 y las otras ocho secciones conectadas a Google Ads) es solo para administradores — un usuario no-admin sigue viendo únicamente las cuentas que ya tiene asignadas, sin este atajo.
 
 ## Próximos pasos
@@ -349,12 +349,12 @@ Cada usuario no-admin solo puede leer/escribir en las cuentas de Google Ads que 
 9. ~~Extender la conexión con la API de Google Ads a todas las funciones de campañas~~ — completado 2026-07-29 (Rendimiento, Negativización, Comparar periodos, Oportunidad de ingresos).
 10. ~~Decidir si el registro de usuarios sigue abierto o pasa a altas manuales~~ — completado 2026-07-30 (registro cerrado por código de invitación, ver "Seguridad — endurecimiento").
 11. Comprar y conectar un dominio propio para reemplazar el de Railway.
-12. Probar la escritura de ROAS objetivo (Función 8) contra una cuenta real por primera vez — empezando por una sola campaña de bajo riesgo, igual que se hizo con los negativos.
+12. ~~Probar la escritura de ROAS objetivo (Función 8) contra una cuenta real por primera vez~~ — completado (2026-10-08, probado por cesar).
 13. ~~Limpiar las cuentas de prueba temporales (`claude_audit_temp*`) que quedaron en producción durante las pruebas de seguridad~~ — hecho por cesar, 2026-07-30.
-14. Probar **aplicar** una recomendación real de la Función 9 contra una cuenta real (solo se probó descartar) — pendiente de autorización puntual de cesar, igual que se hizo con la primera escritura de negativos.
+14. ~~Probar **aplicar** una recomendación real de la Función 9 contra una cuenta real~~ — completado (2026-10-08, probado por cesar).
 15. Decidir si el análisis con IA de Función 1 (2026-08-17) se abre a todos los usuarios o se queda como prueba solo para administradores.
-16. Probar el toggle real de AI Max (Función 10) contra una cuenta real por primera vez (solo se probó `validateOnly` y modo simulado).
-17. Probar la escritura real de presupuesto diario por campaña (Función 13, Ritmo de consumo) contra una cuenta real por primera vez — empezando por una campaña de bajo riesgo, mismo criterio que ROAS y negativos.
+16. ~~Probar el toggle real de AI Max (Función 10) contra una cuenta real~~ — completado (2026-10-08, probado por cesar).
+17. ~~Probar la escritura real de presupuesto diario por campaña (Función 13, Ritmo de consumo) contra una cuenta real~~ — completado (2026-10-08, probado por cesar).
 18. Seguir validando Ritmo de consumo (Función 13) con más cuentas vigiladas a la vez, y revisar con cesar si el margen de tolerancia del semáforo (±10%) es el que quiere mantener.
 
 ## Archivos del proyecto
