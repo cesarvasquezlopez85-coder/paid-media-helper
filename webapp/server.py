@@ -39,6 +39,7 @@ from collections import defaultdict
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import bigquery_client
 import claude_client
 import google_ads_client
 
@@ -358,6 +359,10 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_pacing_account_campaigns(parse_qs(parsed.query))
+            return
+
+        if path == "/api/bigquery/explore":
+            self._handle_bigquery_explore(parse_qs(parsed.query))
             return
 
         if path == "/api/google-ads/mcc-groups":
@@ -1331,6 +1336,36 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(400, {"error": str(e)})
         except Exception as e:  # noqa: BLE001
             self._send_google_ads_error(e)
+
+    # Diagnóstico de BigQuery (solo administradores): sin parámetros prueba la
+    # conexión y lista datasets; con `dataset` lista sus tablas; con `dataset`
+    # y `table` devuelve el esquema. Sirve para descubrir dónde están las
+    # reservas antes de construir consultas. Solo lectura.
+    def _handle_bigquery_explore(self, query):
+        user = self._require_admin_json()
+        if not user:
+            return
+        if not bigquery_client.is_configured():
+            self._send_json(200, {
+                "configured": False,
+                "error": "BigQuery no está configurado: faltan BIGQUERY_PROJECT_ID y/o BIGQUERY_REFRESH_TOKEN.",
+            })
+            return
+        dataset = (query.get("dataset") or [""])[0].strip()
+        table = (query.get("table") or [""])[0].strip()
+        project = (query.get("project") or [""])[0].strip() or None
+        try:
+            if dataset and table:
+                result = bigquery_client.get_table_schema(dataset, table, project)
+            elif dataset:
+                result = {"tables": bigquery_client.list_tables(dataset, project)}
+            else:
+                result = bigquery_client.check_connection()
+            self._send_json(200, {"configured": True, **result})
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+        except Exception as e:  # noqa: BLE001
+            self._send_json(502, {"error": str(e)})
 
     # Sub-MCCs del MCC — usado tanto por Ritmo de consumo (agregar todas sus
     # cuentas a la vez) como por el selector de cuenta de ROAS (filtrar la
