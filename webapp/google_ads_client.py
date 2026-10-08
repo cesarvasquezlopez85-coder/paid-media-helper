@@ -342,7 +342,7 @@ def fetch_campaign_rows(customer_id, date_from, date_to, only_active=False):
     return rows
 
 
-def fetch_account_pacing(customer_id):
+def fetch_account_pacing(customer_id, month_from=None, month_to=None):
     """Ritmo de consumo del mes en curso para una cuenta: el objetivo
     mensual sale de Billing > Presupuestos de cuenta (account_budget).
 
@@ -362,6 +362,10 @@ def fetch_account_pacing(customer_id):
     y no depende de qué tan al día esté Google con el prorrateo de la
     facturación."""
     today = datetime.date.today()
+    cur = (today.year, today.month)
+    if month_from is not None and not (month_from == cur and month_to == cur):
+        return _fetch_pacing_range(customer_id, month_from, month_to, today)
+
     month_start = today.replace(day=1)
     days_in_month = calendar.monthrange(today.year, today.month)[1]
     end_of_today = f"{today.isoformat()} 23:59:59"
@@ -369,27 +373,128 @@ def fetch_account_pacing(customer_id):
     campaign_rows = fetch_campaign_rows(customer_id, month_start.isoformat(), today.isoformat())
     spend_mtd = sum((r.get("cost") or 0) for r in campaign_rows)
 
-    budget_query = f"""
-        SELECT account_budget.adjusted_spending_limit_micros,
-               account_budget.adjusted_spending_limit_type
-        FROM account_budget
-        WHERE account_budget.status = 'APPROVED'
-          AND account_budget.approved_start_date_time <= '{end_of_today}'
-          AND account_budget.approved_end_date_time > '{end_of_today}'
-    """
-    budget_rows = _search(customer_id, budget_query)
-    monthly_target = None
-    if budget_rows:
-        ab = budget_rows[0].get("accountBudget", {})
-        if ab.get("adjustedSpendingLimitType") != "INFINITE":
-            monthly_target = _micros_to_units(_int_or_none(ab.get("adjustedSpendingLimitMicros")))
+    monthly_target = _account_budget_target(_account_budget_rows(customer_id, end_of_today, None), end_of_today)
 
     return {
         "spend_mtd": spend_mtd,
         "monthly_target": monthly_target,
         "days_elapsed": today.day,
         "days_in_month": days_in_month,
+        "is_complete": False,
     }
+
+
+def _month_iter(first, last):
+    y, m = first
+    while (y, m) <= last:
+        yield (y, m)
+        m += 1
+        if m == 13:
+            y, m = y + 1, 1
+
+
+def _account_budget_rows(customer_id, ref_end, ref_start):
+    """account_budget APPROVED que se solapan con el periodo: empiezan antes
+    de ref_end y terminan después de ref_start (si ref_start es None, después
+    de ref_end — o sea, el vigente en ese instante). Un presupuesto sin fecha
+    de fin (INFINITE) también pasa el filtro de fin."""
+    end_floor = ref_start or ref_end
+    query = f"""
+        SELECT account_budget.adjusted_spending_limit_micros,
+               account_budget.adjusted_spending_limit_type,
+               account_budget.approved_start_date_time,
+               account_budget.approved_end_date_time
+        FROM account_budget
+        WHERE account_budget.status = 'APPROVED'
+          AND account_budget.approved_start_date_time <= '{ref_end}'
+          AND account_budget.approved_end_date_time > '{end_floor}'
+    """
+    return _search(customer_id, query)
+
+
+def _account_budget_target(budget_rows, ref):
+    """Objetivo (en unidades de cuenta) del presupuesto que cubre el instante
+    `ref` ("YYYY-MM-DD HH:MM:SS"), o None si no hay uno con límite definido."""
+    for r in budget_rows:
+        ab = r.get("accountBudget", {})
+        start = ab.get("approvedStartDateTime") or ""
+        end = ab.get("approvedEndDateTime")
+        if start > ref or (end is not None and end <= ref):
+            continue
+        if ab.get("adjustedSpendingLimitType") == "INFINITE":
+            continue
+        target = _micros_to_units(_int_or_none(ab.get("adjustedSpendingLimitMicros")))
+        if target:
+            return target
+    return None
+
+
+def aggregate_pacing_months(months, spend_by_month, target_by_month, today):
+    """Suma un periodo de varios meses. Solo los meses CON objetivo entran a
+    la comparación (objetivo y gasto), para que el % no se infle por meses de
+    pago automático sin límite; el gasto total del periodo se devuelve aparte.
+    El mes en curso, si está en el rango, cuenta su objetivo completo pero su
+    esperado se prorratea hasta ayer, igual que la tabla de un solo mes."""
+    cur = (today.year, today.month)
+    total_spend = sum(spend_by_month.get(f"{y}-{m:02d}", 0) for y, m in months)
+    target_total = expected_total = spend_cmp = 0
+    with_target = 0
+    for y, m in months:
+        target = target_by_month.get((y, m))
+        if not target:
+            continue
+        dim = calendar.monthrange(y, m)[1]
+        with_target += 1
+        target_total += target
+        spend_cmp += spend_by_month.get(f"{y}-{m:02d}", 0)
+        if (y, m) == cur:
+            expected_total += target * max(today.day - 1, 0) / dim
+        else:
+            expected_total += target
+    last_y, last_m = months[-1]
+    includes_current = months[-1] == cur
+    return {
+        "spend_mtd": spend_cmp if with_target else total_spend,
+        "spend_total": total_spend,
+        "monthly_target": target_total if with_target else None,
+        "expected_total": expected_total if with_target else None,
+        "months_total": len(months),
+        "months_with_target": with_target,
+        "days_elapsed": today.day if includes_current else calendar.monthrange(last_y, last_m)[1],
+        "days_in_month": calendar.monthrange(last_y, last_m)[1],
+        "is_complete": not includes_current,
+    }
+
+
+def _fetch_pacing_range(customer_id, month_from, month_to, today):
+    months = list(_month_iter(month_from, month_to))
+    range_start = datetime.date(month_from[0], month_from[1], 1)
+    last_day = datetime.date(month_to[0], month_to[1], calendar.monthrange(*month_to)[1])
+    range_end = min(last_day, today)
+
+    # Gasto mes por mes con los mismos criterios que fetch_campaign_rows
+    # (campañas no eliminadas), para que un mes dé lo mismo en la vista de
+    # un mes y en la de un rango.
+    cost_query = f"""
+        SELECT segments.month, metrics.cost_micros
+        FROM campaign
+        WHERE segments.date BETWEEN '{range_start.isoformat()}' AND '{range_end.isoformat()}'
+          AND campaign.status != 'REMOVED'
+    """
+    spend_by_month = {}
+    for r in _search(customer_id, cost_query):
+        key = (r.get("segments", {}).get("month") or "")[:7]
+        cost = _micros_to_units(_int_or_none(r.get("metrics", {}).get("costMicros"))) or 0
+        spend_by_month[key] = spend_by_month.get(key, 0) + cost
+
+    budget_rows = _account_budget_rows(
+        customer_id, f"{last_day.isoformat()} 23:59:59", f"{range_start.isoformat()} 00:00:00"
+    )
+    target_by_month = {}
+    for y, m in months:
+        ref = f"{y}-{m:02d}-{calendar.monthrange(y, m)[1]:02d} 23:59:59"
+        target_by_month[(y, m)] = _account_budget_target(budget_rows, ref)
+    return aggregate_pacing_months(months, spend_by_month, target_by_month, today)
 
 
 def fetch_account_campaigns_budget(customer_id):
@@ -1663,21 +1768,43 @@ _SIMULATED_PACING = {
 }
 
 
-def simulated_account_pacing(customer_id):
+def simulated_account_pacing(customer_id, month_from=None, month_to=None):
     today = datetime.date.today()
-    days_in_month = calendar.monthrange(today.year, today.month)[1]
+    cur = (today.year, today.month)
     preset = _SIMULATED_PACING.get(customer_id)
-    if not preset:
+    if month_from is None or (month_from == cur and month_to == cur):
+        days_in_month = calendar.monthrange(today.year, today.month)[1]
+        if not preset:
+            return {
+                "spend_mtd": 0, "monthly_target": None,
+                "days_elapsed": today.day, "days_in_month": days_in_month, "is_complete": False,
+            }
         return {
-            "spend_mtd": 0, "monthly_target": None,
-            "days_elapsed": today.day, "days_in_month": days_in_month,
+            "spend_mtd": round(preset["spend_mtd_per_day"] * today.day, 2),
+            "monthly_target": preset["monthly_target"],
+            "days_elapsed": today.day,
+            "days_in_month": days_in_month,
+            "is_complete": False,
         }
-    return {
-        "spend_mtd": round(preset["spend_mtd_per_day"] * today.day, 2),
-        "monthly_target": preset["monthly_target"],
-        "days_elapsed": today.day,
-        "days_in_month": days_in_month,
-    }
+    months = list(_month_iter(month_from, month_to))
+    spend_by_month, target_by_month = {}, {}
+    for y, m in months:
+        dim = calendar.monthrange(y, m)[1]
+        if not preset:
+            spend_by_month[f"{y}-{m:02d}"] = 0
+            continue
+        if (y, m) == cur:
+            spend = preset["spend_mtd_per_day"] * today.day
+        else:
+            # Variación determinística por mes, para que el selector muestre
+            # meses distintos (algunos por arriba del objetivo, otros por debajo).
+            spend = preset["spend_mtd_per_day"] * dim * (0.8 + 0.07 * ((y * 12 + m) % 5))
+        spend_by_month[f"{y}-{m:02d}"] = round(spend, 2)
+        # Un mes de cada 4 sin objetivo en la cuenta 2, para poder ver el
+        # caso "objetivo de X de Y meses".
+        no_target = customer_id == "2222222222" and (y * 12 + m) % 4 == 0
+        target_by_month[(y, m)] = None if no_target else preset["monthly_target"]
+    return aggregate_pacing_months(months, spend_by_month, target_by_month, today)
 
 
 def simulated_account_campaigns_budget(customer_id):

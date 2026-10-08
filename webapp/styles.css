@@ -381,6 +381,16 @@ main.content { flex: 1; overflow-y: auto; height: 100%; }
 }
 .modal-close:hover { background: var(--gray-100); color: var(--color-text-heading); }
 
+.pacing-bar {
+  position: relative; width: 110px; height: 8px; margin-top: 6px;
+  background: var(--gray-100); border-radius: 999px; overflow: visible;
+}
+.pacing-bar-fill { height: 100%; border-radius: 999px; }
+.pacing-bar-marker {
+  position: absolute; top: -3px; width: 2px; height: 14px; margin-left: -1px;
+  background: var(--navy-800); border-radius: 1px;
+}
+
 .chart-card { padding: 22px 24px; margin-bottom: 20px; }
 .forecast-hover-col { cursor: crosshair; }
 .forecast-tooltip {

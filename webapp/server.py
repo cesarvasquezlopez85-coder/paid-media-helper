@@ -23,6 +23,7 @@ Correr con:
     python3 server.py
 """
 
+import datetime
 import hashlib
 import http.cookies
 import json
@@ -344,7 +345,7 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/google-ads/pacing":
             if not self._require_auth_json():
                 return
-            self._handle_google_ads_pacing()
+            self._handle_google_ads_pacing(parse_qs(parsed.query))
             return
 
         if path == "/api/google-ads/pacing/watchlist":
@@ -1195,11 +1196,38 @@ class Handler(SimpleHTTPRequestHandler):
             conn.close()
         self._send_json(200, {"ok": True})
 
-    def _handle_google_ads_pacing(self):
+    def _handle_google_ads_pacing(self, query=None):
         user = self._get_current_user()
         if not user:
             self._send_json(401, {"error": "No autenticado."})
             return
+        # month_from / month_to (AAAA-MM) para ver un mes ya cerrado, o la
+        # suma de varios meses seguidos; sin ellos (o con el mes en curso en
+        # ambos) es el ritmo de hoy de siempre.
+        month_from = month_to = None
+        q = query or {}
+        raw_from = (q.get("month_from") or [""])[0].strip()
+        raw_to = (q.get("month_to") or [""])[0].strip()
+        if raw_from or raw_to:
+            parsed_months = []
+            for raw in (raw_from, raw_to):
+                m = re.match(r"^(\d{4})-(\d{2})$", raw)
+                if not m or not 1 <= int(m.group(2)) <= 12:
+                    self._send_json(400, {"error": "month_from y month_to deben tener formato AAAA-MM."})
+                    return
+                parsed_months.append((int(m.group(1)), int(m.group(2))))
+            month_from, month_to = parsed_months
+            today = datetime.date.today()
+            if month_to > (today.year, today.month):
+                self._send_json(400, {"error": "No se puede consultar un mes futuro."})
+                return
+            if month_from > month_to:
+                self._send_json(400, {"error": "month_from no puede ser posterior a month_to."})
+                return
+            span = (month_to[0] - month_from[0]) * 12 + month_to[1] - month_from[1] + 1
+            if span > 24:
+                self._send_json(400, {"error": "El rango máximo es de 24 meses."})
+                return
         conn = get_db()
         try:
             watched = conn.execute(
@@ -1216,7 +1244,7 @@ class Handler(SimpleHTTPRequestHandler):
             name = w["account_name"] or f"Cuenta {customer_id}"
             try:
                 if simulated:
-                    pacing = google_ads_client.simulated_account_pacing(customer_id)
+                    pacing = google_ads_client.simulated_account_pacing(customer_id, month_from, month_to)
                 elif not self._user_can_access_account(user, customer_id):
                     # Pudo haber perdido el acceso después de agregarla a vigilar.
                     rows.append({
@@ -1225,7 +1253,7 @@ class Handler(SimpleHTTPRequestHandler):
                     })
                     continue
                 else:
-                    pacing = google_ads_client.fetch_account_pacing(customer_id)
+                    pacing = google_ads_client.fetch_account_pacing(customer_id, month_from, month_to)
                 rows.append({"customer_id": customer_id, "account_name": name, "error": None, **pacing})
             except Exception as e:  # noqa: BLE001 — una cuenta con error no debe tumbar el resto del tablero
                 print(f"[pacing-error] customer_id={customer_id} {' '.join(str(e).split())}", flush=True)

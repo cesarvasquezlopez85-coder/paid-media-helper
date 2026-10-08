@@ -316,6 +316,10 @@ const state = {
     watchlistStatus: 'idle', watchlist: null, // [{customer_id, account_name}]
     rowsStatus: 'idle', rows: null, error: null, simulated: false,
     sortBy: 'account_name', sortDir: 'asc',
+    // Periodo consultado (AAAA-MM, desde/hasta); '' = mes en curso. Un periodo ya
+    // cerrado se compara contra el objetivo completo en vez de contra un ritmo
+    // esperado a la fecha; con varios meses se suman objetivos y gastos.
+    monthFrom: '', monthTo: '',
     // Agregar un sub-MCC completo de un jalón (solo admins) — ver
     // list_mcc_groups/list_mcc_group_accounts en google_ads_client.py.
     mcc: {
@@ -7444,6 +7448,19 @@ function revokeAdminAccess(userId, customerId) {
 // Página — Ritmo de consumo
 // ---------------------------------------------------------------------------
 
+function pacingPeriodNote(p) {
+  const single = p.monthFrom === p.monthTo;
+  const label = single ? escapeHtml(p.monthFrom) : `${escapeHtml(p.monthFrom)} a ${escapeHtml(p.monthTo)}`;
+  const includesCurrent = p.monthTo >= currentMonthValue();
+  if (single) return `Mes cerrado (${label}): gastado vs. el objetivo completo del mes — no hay ritmo esperado ni inversión diaria que recomendar.`;
+  return `Periodo ${label}: se suman los objetivos de Billing y el gasto de cada mes. Solo entran a la comparación los meses que tienen objetivo configurado${includesCurrent ? '; el mes en curso cuenta su objetivo completo pero su esperado se prorratea hasta ayer' : ''}. No hay inversión diaria que recomendar para un periodo de varios meses.`;
+}
+
+function currentMonthValue() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
 const PACING_TOLERANCE = 0.10; // ±10% del ritmo esperado se considera "en ritmo"
 
 function ensurePacingStatusLoaded() {
@@ -7497,7 +7514,7 @@ function loadPacingRows() {
   const p = state.pacing;
   p.rowsStatus = 'loading';
   render();
-  fetch('/api/google-ads/pacing')
+  fetch(`/api/google-ads/pacing${p.monthFrom ? `?month_from=${encodeURIComponent(p.monthFrom)}&month_to=${encodeURIComponent(p.monthTo)}` : ''}`)
     .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
@@ -7688,7 +7705,12 @@ function renderPacingAddPanel() {
     </div>`;
 }
 
-function pacingStatusBadge(deviationPct) {
+function pacingStatusBadge(deviationPct, isComplete) {
+  if (isComplete) {
+    if (deviationPct > PACING_TOLERANCE) return '<span class="delta-badge bad">Superó el objetivo</span>';
+    if (deviationPct < -PACING_TOLERANCE) return '<span class="delta-badge warn">Quedó por debajo</span>';
+    return '<span class="delta-badge good">Cumplió el objetivo</span>';
+  }
   if (deviationPct > PACING_TOLERANCE) return '<span class="delta-badge bad">Por arriba del ritmo</span>';
   if (deviationPct < -PACING_TOLERANCE) return '<span class="delta-badge warn">Por abajo del ritmo</span>';
   return '<span class="delta-badge good">En ritmo</span>';
@@ -7720,7 +7742,19 @@ function pacingComputed(r) {
   if (!hasTarget) {
     return {
       hasTarget: false, expected: null, expectedPct: null, consumedPct: null, deviationPct: null,
-      recommendedDaily: null, budgetExceeded: false,
+      recommendedDaily: null, budgetExceeded: false, isComplete: !!r.is_complete,
+    };
+  }
+  // Periodo de uno o varios meses (viene expected_total del servidor): el
+  // objetivo ya es la suma de los meses con objetivo, y el esperado es esa
+  // suma (con el mes en curso, si entra, prorrateado hasta ayer). No hay
+  // días por repartir entre meses, así que no hay inversión diaria.
+  if (r.expected_total != null) {
+    const consumedPct = r.spend_mtd / r.monthly_target;
+    const deviationPct = r.expected_total > 0 ? (r.spend_mtd - r.expected_total) / r.expected_total : 0;
+    return {
+      hasTarget: true, expected: r.expected_total, expectedPct: r.expected_total / r.monthly_target, consumedPct,
+      deviationPct, recommendedDaily: null, budgetExceeded: false, isComplete: !!r.is_complete,
     };
   }
   const daysElapsed = Math.max((r.days_elapsed || 0) - 1, 0);
@@ -7737,7 +7771,7 @@ function pacingComputed(r) {
   const daysRemaining = Math.max((r.days_in_month || 0) - (r.days_elapsed || 0) + 1, 1);
   const remainingBudget = r.monthly_target - r.spend_mtd;
   const recommendedDaily = Math.max(remainingBudget, 0) / daysRemaining;
-  return { hasTarget: true, expected, expectedPct, consumedPct, deviationPct, recommendedDaily, budgetExceeded: remainingBudget <= 0 };
+  return { hasTarget: true, expected, expectedPct, consumedPct, deviationPct, recommendedDaily, budgetExceeded: remainingBudget <= 0, isComplete: false };
 }
 
 const PACING_SORT_KEYS = {
@@ -7748,7 +7782,7 @@ const PACING_SORT_KEYS = {
   expected: (r) => { const c = pacingComputed(r); return c.hasTarget ? c.expected : -Infinity; },
   expected_pct: (r) => { const c = pacingComputed(r); return c.hasTarget ? c.expectedPct : -Infinity; },
   deviation_pct: (r) => { const c = pacingComputed(r); return c.hasTarget ? c.deviationPct : -Infinity; },
-  recommended_daily: (r) => { const c = pacingComputed(r); return c.hasTarget ? c.recommendedDaily : -Infinity; },
+  recommended_daily: (r) => { const c = pacingComputed(r); return c.hasTarget && c.recommendedDaily != null ? c.recommendedDaily : -Infinity; },
 };
 function getPacingRowsSorted() {
   const p = state.pacing;
@@ -7769,6 +7803,20 @@ function pacingSortTh(label, key) {
   return `<th data-pacing-sort="${key}" style="cursor:pointer;user-select:none${active ? ';color:var(--color-text-heading)' : ''}">${escapeHtml(label)}${arrow}</th>`;
 }
 
+// Barra de avance del objetivo: el relleno es lo consumido (tope visual en
+// 100%, el número de al lado dice si se pasó) con el color del semáforo, y la
+// línea vertical marca dónde debería ir según el ritmo esperado. En un mes
+// ya cerrado el esperado es 100%, así que la línea se omite.
+function pacingProgressBar(c) {
+  const fill = Math.min(Math.max(c.consumedPct, 0), 1) * 100;
+  const marker = Math.min(Math.max(c.expectedPct, 0), 1) * 100;
+  const color = pacingSemaforoColor(c.deviationPct);
+  return `<div class="pacing-bar" title="Consumido ${fmtPct0(c.consumedPct)} · esperado ${fmtPct0(c.expectedPct)}">
+    <div class="pacing-bar-fill" style="width:${fill.toFixed(1)}%;background:${color}"></div>
+    ${marker < 100 ? `<div class="pacing-bar-marker" style="left:${marker.toFixed(1)}%"></div>` : ''}
+  </div>`;
+}
+
 function pacingRowHtml(r) {
   if (r.error) {
     return `
@@ -7782,14 +7830,14 @@ function pacingRowHtml(r) {
   return `
     <tr>
       <td><button class="btn-link" data-pacing-campaigns-open="${escapeHtml(r.customer_id)}" data-pacing-campaigns-open-name="${escapeHtml(r.account_name)}">${escapeHtml(r.account_name)}</button><div class="footnote">${escapeHtml(r.customer_id)}</div></td>
-      <td>${c.hasTarget ? fmtMoney(r.monthly_target) : 'N/D'}</td>
-      <td>${fmtMoney(r.spend_mtd)}</td>
-      <td>${c.hasTarget ? `<strong style="color:${pacingSemaforoColor(c.deviationPct)}">${fmtPct0(c.consumedPct)}</strong>` : 'N/D'}</td>
+      <td>${c.hasTarget ? fmtMoney(r.monthly_target) : 'N/D'}${r.months_total > 1 && r.months_with_target < r.months_total ? `<div class="footnote">objetivo de ${r.months_with_target} de ${r.months_total} meses</div>` : ''}</td>
+      <td>${fmtMoney(r.spend_mtd)}${r.spend_total != null && Math.abs(r.spend_total - r.spend_mtd) > 0.005 && c.hasTarget ? `<div class="footnote">total del periodo ${fmtMoney(r.spend_total)}</div>` : ''}</td>
+      <td>${c.hasTarget ? `<strong style="color:${pacingSemaforoColor(c.deviationPct)}">${fmtPct0(c.consumedPct)}</strong>${pacingProgressBar(c)}` : 'N/D'}</td>
       <td>${c.hasTarget ? fmtMoney(c.expected) : 'N/D'}</td>
       <td>${c.hasTarget ? fmtPct0(c.expectedPct) : 'N/D'}</td>
       <td>${c.hasTarget ? pacingDeviationLabel(c.deviationPct) : 'N/D'}</td>
-      <td>${c.hasTarget ? (c.budgetExceeded ? `${fmtMoney(0)} <span class="delta-badge bad">objetivo superado</span>` : fmtMoney(c.recommendedDaily)) : 'N/D'}</td>
-      <td>${c.hasTarget ? pacingStatusBadge(c.deviationPct) : '<span class="delta-badge neutral">Sin objetivo en Billing</span>'}</td>
+      <td>${c.hasTarget ? (c.recommendedDaily == null ? '—' : c.budgetExceeded ? `${fmtMoney(0)} <span class="delta-badge bad">objetivo superado</span>` : fmtMoney(c.recommendedDaily)) : 'N/D'}</td>
+      <td>${c.hasTarget ? pacingStatusBadge(c.deviationPct, c.isComplete) : '<span class="delta-badge neutral">Sin objetivo en Billing</span>'}</td>
       <td><button class="btn-link" data-pacing-remove="${escapeHtml(r.customer_id)}">Quitar</button></td>
     </tr>`;
 }
@@ -7807,16 +7855,28 @@ function renderPacingTable() {
     <div class="card table-panel">
       <div class="table-panel-head">
         <h3>Cuentas vigiladas (${p.watchlist.length})</h3>
-        <button class="btn-outline sm" data-action="pacing-clear-watchlist">Quitar todas</button>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-muted)">
+            Desde
+            <input type="month" id="pacing-month-from" value="${escapeHtml(p.monthFrom || currentMonthValue())}" max="${currentMonthValue()}" />
+          </label>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-muted)">
+            Hasta
+            <input type="month" id="pacing-month-to" value="${escapeHtml(p.monthTo || currentMonthValue())}" max="${currentMonthValue()}" />
+          </label>
+          ${p.monthFrom ? '<button class="btn-link" data-action="pacing-month-current">Volver al mes en curso</button>' : ''}
+          <button class="btn-outline sm" data-action="pacing-clear-watchlist">Quitar todas</button>
+        </div>
       </div>
+      ${p.monthFrom ? `<p class="footnote" style="margin:0 0 10px">${pacingPeriodNote(p)}</p>` : ''}
       <div class="table-scroll">
         <table>
           <thead><tr>
             ${pacingSortTh('Cuenta', 'account_name')}
-            ${pacingSortTh('Objetivo mensual', 'monthly_target')}
-            ${pacingSortTh('Gastado (mes a la fecha)', 'spend_mtd')}
+            ${pacingSortTh(p.monthFrom && p.monthFrom !== p.monthTo ? 'Objetivo del periodo' : 'Objetivo mensual', 'monthly_target')}
+            ${pacingSortTh(p.monthFrom ? 'Gastado (periodo)' : 'Gastado (mes a la fecha)', 'spend_mtd')}
             ${pacingSortTh('% consumido', 'consumed_pct')}
-            ${pacingSortTh('Esperado (hasta ayer)', 'expected')}
+            ${pacingSortTh(p.monthFrom ? 'Esperado (periodo)' : 'Esperado (hasta ayer)', 'expected')}
             ${pacingSortTh('% esperado', 'expected_pct')}
             ${pacingSortTh('Desviación', 'deviation_pct')}
             ${pacingSortTh('Inversión diaria recomendada', 'recommended_daily')}
@@ -7826,7 +7886,7 @@ function renderPacingTable() {
           <tbody>${rowsHtml}</tbody>
         </table>
       </div>
-      <p class="footnote" style="margin-top:14px">El objetivo mensual sale del presupuesto de cuenta activo en Billing (Google Ads); cuentas sin uno configurado (pago automático sin límite) se muestran solo con el gasto del mes. "Esperado" y "% esperado" se calculan hasta AYER (no hoy) porque el gasto del día en curso en Google Ads normalmente todavía no está completo. "En ritmo" = dentro de ±${(PACING_TOLERANCE * 100).toFixed(0)}% de lo esperado. "Inversión diaria recomendada" = lo que queda del objetivo mensual ÷ los días que quedan del mes (incluido hoy), para terminar el mes justo en el objetivo.</p>
+      <p class="footnote" style="margin-top:14px">El objetivo mensual sale del presupuesto de cuenta activo en Billing (Google Ads); cuentas sin uno configurado (pago automático sin límite) se muestran solo con el gasto del mes. "Esperado" y "% esperado" se calculan hasta AYER (no hoy) porque el gasto del día en curso en Google Ads normalmente todavía no está completo. "En ritmo" = dentro de ±${(PACING_TOLERANCE * 100).toFixed(0)}% de lo esperado. La barra bajo "% consumido" muestra cuánto del objetivo se ha gastado; la línea vertical marca dónde debería ir según el ritmo esperado. "Inversión diaria recomendada" = lo que queda del objetivo mensual ÷ los días que quedan del mes (incluido hoy), para terminar el mes justo en el objetivo.</p>
     </div>`;
 }
 
@@ -8818,6 +8878,21 @@ function bindEvents() {
   document.querySelectorAll('[data-pacing-remove]').forEach((btn) => {
     btn.addEventListener('click', () => removePacingWatchlistAccount(btn.dataset.pacingRemove));
   });
+  const applyPacingMonths = () => {
+    const cur = currentMonthValue();
+    const fromEl = document.getElementById('pacing-month-from');
+    const toEl = document.getElementById('pacing-month-to');
+    let from = fromEl.value || cur;
+    let to = toEl.value || cur;
+    if (from > to) { if (document.activeElement === toEl) from = to; else to = from; }
+    state.pacing.monthFrom = (from === cur && to === cur) ? '' : from;
+    state.pacing.monthTo = (from === cur && to === cur) ? '' : to;
+    loadPacingRows();
+  };
+  ['pacing-month-from', 'pacing-month-to'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('change', applyPacingMonths);
+  });
   document.querySelectorAll('[data-pacing-sort]').forEach((th) => {
     th.addEventListener('click', () => {
       const key = th.dataset.pacingSort;
@@ -9039,6 +9114,7 @@ function handleAction(action) {
     case 'pacing-load-accounts': loadPacingAccounts(); break;
     case 'pacing-mcc-load': loadPacingMccGroups(); break;
     case 'pacing-clear-watchlist': clearPacingWatchlist(); break;
+    case 'pacing-month-current': state.pacing.monthFrom = ''; state.pacing.monthTo = ''; loadPacingRows(); break;
     case 'pacing-campaigns-close': closePacingCampaignsModal(); break;
     case 'pacing-budget-edit-preview': adjustPacingCampaignBudget(true); break;
     case 'pacing-budget-edit-confirm': adjustPacingCampaignBudget(false); break;
