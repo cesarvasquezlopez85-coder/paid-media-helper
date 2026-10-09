@@ -29,7 +29,7 @@ Luego abre `http://localhost:8642` — te va a pedir iniciar sesión o crear cue
 
 **Registro cerrado** (desde 2026-07-30) — hace falta un código de invitación exacto (`PMH_REGISTRATION_CODE`) que solo un admin reparte; sin la variable configurada, el registro queda cerrado por default. Contraseñas con hash + salt (PBKDF2-SHA256, 200k iteraciones, nunca en texto plano), mínimo 10 caracteres, rate limiting en login/registro, y bloqueo de cuenta tras 5 intentos fallidos (15 min). La sesión dura 14 días (cookie httpOnly, `Secure` en producción) y se cierra con el botón "Cerrar sesión" del sidebar.
 
-Cada usuario no-admin solo puede leer/escribir en las cuentas de Google Ads que un admin le asigne explícitamente (pantalla de Administración) — sin ninguna asignación, no puede tocar ninguna cuenta real. Los admins pueden además generar una contraseña temporal para otro usuario que perdió acceso (no hay infraestructura de correo para un "olvidé mi contraseña" self-service).
+Cada usuario no-admin solo puede leer/escribir en las cuentas de Google Ads que un admin le asigne explícitamente (pantalla de Administración) — sin ninguna asignación, no puede tocar ninguna cuenta real. Los admins pueden además generar una contraseña temporal para otro usuario que perdió acceso (no hay infraestructura de correo para un "olvidé mi contraseña" self-service). Un admin también puede ligar al usuario a un sub-MCC completo (tabla `user_mcc_access`): ve todas sus cuentas, incluidas las futuras (caché de 10 minutos, falla cerrado si Google no responde).
 
 Ver `OUTPUTS/plataforma-google-ads/Resumen_Proyecto.md` → "Seguridad — endurecimiento" para el detalle completo de cada punto.
 
