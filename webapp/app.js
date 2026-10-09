@@ -347,13 +347,20 @@ const state = {
   // lo exige en cada endpoint /api/admin/*, esto es solo la UI).
   admin: {
     usersStatus: 'idle', users: [], usersError: null,
-    accessStatus: 'idle', access: [], accessError: null,
+    accessStatus: 'idle', access: [], mccAccess: [], accessError: null,
     deleteStatus: 'idle', deleteError: null,
     revokeStatus: 'idle', revokeError: null,
     setAdminStatus: 'idle', setAdminError: null,
     grant: {
       userId: '', customerId: '', accountName: '',
       accountsStatus: 'idle', accounts: [], accountsError: null, accountFilter: '',
+      status: 'idle', error: null, // idle | granting | error
+    },
+    // Acceso por MCC: el usuario queda ligado a un sub-MCC completo (todas
+    // sus cuentas, también las futuras) en vez de una fila por cuenta.
+    mccGrant: {
+      userId: '', groupsStatus: 'idle', groups: [], groupsError: null, filter: '',
+      pickedId: '', pickedName: '', countStatus: 'idle', count: null, countError: null,
       status: 'idle', error: null, // idle | granting | error
     },
     // Contraseña temporal recién generada — se muestra UNA sola vez (nunca
@@ -7292,6 +7299,7 @@ function loadAdminAccess() {
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
       a.access = data.access || [];
+      a.mccAccess = data.mcc_access || [];
       a.accessStatus = 'ready';
       render();
     })
@@ -7418,6 +7426,94 @@ function grantAdminAccess() {
     })
     .catch((err) => {
       g.status = 'error'; g.error = err.message || String(err);
+      render();
+    });
+}
+
+function loadAdminMccGroups() {
+  const m = state.admin.mccGrant;
+  m.groupsStatus = 'loading'; m.groupsError = null;
+  render();
+  fetch('/api/google-ads/mcc-groups')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      m.groups = data.groups || [];
+      m.groupsStatus = 'ready';
+      render();
+    })
+    .catch((err) => {
+      m.groupsStatus = 'error'; m.groupsError = err.message || String(err);
+      render();
+    });
+}
+
+// Elegir un MCC también cuenta cuántas cuentas tiene hoy — es la "vista
+// previa" de lo que se va a otorgar antes de confirmar.
+function pickAdminMcc(id, name) {
+  const m = state.admin.mccGrant;
+  m.pickedId = id; m.pickedName = name;
+  m.countStatus = 'loading'; m.count = null; m.countError = null; m.error = null;
+  render();
+  fetch(`/api/google-ads/mcc-group-accounts?group_customer_id=${encodeURIComponent(id)}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      if (m.pickedId !== id) return; // eligió otro MCC mientras cargaba
+      m.count = (data.accounts || []).length;
+      m.countStatus = 'ready';
+      render();
+    })
+    .catch((err) => {
+      if (m.pickedId !== id) return;
+      m.countStatus = 'error'; m.countError = err.message || String(err);
+      render();
+    });
+}
+
+function grantAdminMcc() {
+  const m = state.admin.mccGrant;
+  if (!m.userId) { m.error = 'Elige a qué usuario le vas a dar acceso.'; render(); return; }
+  if (!m.pickedId) { m.error = 'Busca y elige el MCC.'; render(); return; }
+  if (!window.confirm(`¿Dar acceso a "${m.pickedName}" completo? El usuario podrá ver y modificar las ${m.count} cuentas que tiene hoy y las que se agreguen después a ese MCC.`)) return;
+  m.status = 'granting'; m.error = null;
+  render();
+  fetch('/api/admin/access/grant-mcc', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user_id: Number(m.userId), mcc_customer_id: m.pickedId, mcc_name: m.pickedName || null }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      m.status = 'idle';
+      m.pickedId = ''; m.pickedName = ''; m.count = null; m.countStatus = 'idle'; m.filter = '';
+      loadAdminAccess();
+    })
+    .catch((err) => {
+      m.status = 'error'; m.error = err.message || String(err);
+      render();
+    });
+}
+
+function revokeAdminMcc(userId, mccId) {
+  if (!window.confirm('¿Quitarle el acceso a este MCC? Pierde el acceso a todas sus cuentas (salvo las que tenga asignadas una por una).')) return;
+  const a = state.admin;
+  a.revokeStatus = 'loading'; a.revokeError = null;
+  render();
+  fetch('/api/admin/access/revoke-mcc', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ user_id: userId, mcc_customer_id: mccId }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.revokeStatus = 'idle';
+      loadAdminAccess();
+    })
+    .catch((err) => {
+      a.revokeStatus = 'error'; a.revokeError = err.message || String(err);
       render();
     });
 }
@@ -8270,6 +8366,69 @@ function renderAdminPage() {
       </div>`}
     </div>`;
 
+  // Panel de acceso por MCC ----------------------------------------------
+  const mg = a.mccGrant;
+  const mccUserOptions = nonAdminUsers.map((u) => `<option value="${u.id}" ${String(u.id) === String(mg.userId) ? 'selected' : ''}>${escapeHtml(u.username)}</option>`).join('');
+  let mccPicker = '';
+  if (mg.groupsStatus === 'idle') {
+    mccPicker = `<button class="btn-outline sm" data-action="admin-mcc-load-groups">Buscar un MCC (ej. una cadena de hoteles)</button>`;
+  } else if (mg.groupsStatus === 'loading') {
+    mccPicker = `<p class="footnote">Cargando MCCs…</p>`;
+  } else if (mg.groupsStatus === 'error') {
+    mccPicker = `<div class="error-panel">${escapeHtml(mg.groupsError)}</div>`;
+  } else if (!mg.groups.length) {
+    mccPicker = `<p class="footnote">No hay MCCs para elegir — la API de Google Ads no está configurada o la cuenta administradora no tiene sub-MCCs.</p>`;
+  } else {
+    const mccFilter = (mg.filter || '').trim().toLowerCase();
+    const mccMatches = mccFilter.length >= 2
+      ? mg.groups.filter((gr) => gr.id.includes(mccFilter) || (gr.name || '').toLowerCase().includes(mccFilter)).slice(0, 25)
+      : [];
+    const mccMatchesHtml = mccMatches.length
+      ? `<div class="table-scroll" style="max-height:220px;margin-top:8px"><table><tbody>
+          ${mccMatches.map((gr) => `
+            <tr>
+              <td>${escapeHtml(gr.name)}</td>
+              <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(gr.id)}</td>
+              <td><button class="btn-outline xs" data-admin-mcc-pick="${escapeHtml(gr.id)}" data-admin-mcc-pick-name="${escapeHtml(gr.name)}">Elegir</button></td>
+            </tr>`).join('')}
+        </tbody></table></div>`
+      : (mccFilter.length >= 2 ? `<p class="footnote" style="margin-top:8px">Sin resultados para "${escapeHtml(mccFilter)}".</p>` : '');
+    mccPicker = `
+      <input type="text" id="admin-mcc-filter" placeholder="Busca por nombre o ID de MCC (${mg.groups.length} MCCs)…" value="${escapeHtml(mg.filter)}" style="width:100%" />
+      ${mccMatchesHtml}`;
+  }
+  let mccPreview = '';
+  if (mg.pickedId) {
+    const countText = mg.countStatus === 'loading' ? 'Contando sus cuentas…'
+      : mg.countStatus === 'error' ? `No se pudo contar las cuentas: ${escapeHtml(mg.countError)}`
+      : `Tiene ${mg.count} cuenta${mg.count === 1 ? '' : 's'} hoy. El usuario verá también las que se agreguen después.`;
+    mccPreview = `<p class="footnote" style="font-weight:600;color:var(--color-text-heading)">MCC elegido: ${escapeHtml(mg.pickedName)} (${escapeHtml(mg.pickedId)}) — ${countText}</p>`;
+  }
+  const mccGrantForm = `
+    <div class="card control-panel" style="flex-direction:column;align-items:stretch;gap:16px">
+      <h3 class="section-title" style="margin:0">Otorgar acceso a un MCC completo</h3>
+      <p class="footnote" style="margin:0">El usuario queda ligado al MCC: ve y puede modificar todas sus cuentas, incluidas las que se abran después (la lista se actualiza cada ~10 minutos). Es solo para sub-MCCs, nunca para el MCC raíz.</p>
+      ${nonAdminUsers.length === 0 ? '<p class="footnote">No hay usuarios no-administradores registrados todavía.</p>' : `
+      <div class="field">
+        <label>Usuario</label>
+        <select id="admin-mcc-grant-user">
+          <option value="">Elige un usuario…</option>
+          ${mccUserOptions}
+        </select>
+      </div>
+      <div class="field">
+        <label>MCC</label>
+        ${mccPicker}
+      </div>
+      ${mccPreview}
+      ${mg.error ? `<div class="error-panel">${escapeHtml(mg.error)}</div>` : ''}
+      <div>
+        <button class="btn-accent" data-action="admin-mcc-grant-submit" ${(mg.status === 'granting' || mg.countStatus !== 'ready') ? 'disabled' : ''}>
+          ${mg.status === 'granting' ? 'Otorgando…' : 'Otorgar acceso al MCC'}
+        </button>
+      </div>`}
+    </div>`;
+
   // Panel de accesos otorgados -------------------------------------------
   let accessBody = '';
   if (a.accessStatus === 'loading') {
@@ -8285,7 +8444,25 @@ function renderAdminPage() {
         <td>${fmtDateTime(row.created_at)}</td>
         <td><button class="btn-outline xs" data-admin-revoke-user="${row.user_id}" data-admin-revoke-customer="${escapeHtml(row.customer_id)}">Revocar</button></td>
       </tr>`).join('');
-    accessBody = `
+    const mccRows = (a.mccAccess || []).map((row) => `
+      <tr>
+        <td>${escapeHtml(row.username)}</td>
+        <td>${escapeHtml(row.mcc_name || 'N/D')}</td>
+        <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(row.mcc_customer_id)}</td>
+        <td>${fmtDateTime(row.created_at)}</td>
+        <td><button class="btn-outline xs" data-admin-mcc-revoke-user="${row.user_id}" data-admin-mcc-revoke-id="${escapeHtml(row.mcc_customer_id)}">Revocar</button></td>
+      </tr>`).join('');
+    const mccAccessBody = `
+      <div class="card table-panel" style="margin-bottom:16px">
+        <div class="table-panel-head"><h3>Accesos por MCC (${(a.mccAccess || []).length})</h3></div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Usuario</th><th>MCC</th><th>customer_id</th><th>Otorgado</th><th></th></tr></thead>
+            <tbody>${mccRows.length ? mccRows : '<tr><td colspan="5" class="footnote">Todavía no ligaste a nadie a un MCC.</td></tr>'}</tbody>
+          </table>
+        </div>
+      </div>`;
+    accessBody = `${mccAccessBody}
       <div class="card table-panel">
         <div class="table-panel-head"><h3>Accesos otorgados (${a.access.length})</h3></div>
         <div class="table-scroll">
@@ -8297,7 +8474,7 @@ function renderAdminPage() {
       </div>`;
   }
 
-  return `${usersBody}${grantForm}${accessBody}`;
+  return `${usersBody}${mccGrantForm}${grantForm}${accessBody}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -8941,6 +9118,19 @@ function bindEvents() {
   const adminGrantAccountName = document.getElementById('admin-grant-account-name');
   if (adminGrantAccountName) adminGrantAccountName.addEventListener('input', (e) => { state.admin.grant.accountName = e.target.value; });
 
+  const adminMccGrantUser = document.getElementById('admin-mcc-grant-user');
+  if (adminMccGrantUser) adminMccGrantUser.addEventListener('change', (e) => { state.admin.mccGrant.userId = e.target.value; });
+  const adminMccFilter = document.getElementById('admin-mcc-filter');
+  if (adminMccFilter) adminMccFilter.addEventListener('input', (e) => {
+    state.admin.mccGrant.filter = e.target.value;
+    render();
+  });
+  document.querySelectorAll('[data-admin-mcc-pick]').forEach((btn) => {
+    btn.addEventListener('click', () => pickAdminMcc(btn.dataset.adminMccPick, btn.dataset.adminMccPickName));
+  });
+  document.querySelectorAll('[data-admin-mcc-revoke-user]').forEach((btn) => {
+    btn.addEventListener('click', () => revokeAdminMcc(Number(btn.dataset.adminMccRevokeUser), btn.dataset.adminMccRevokeId));
+  });
   document.querySelectorAll('[data-admin-pick-account]').forEach((btn) => {
     btn.addEventListener('click', () => pickAdminGrantAccount(btn.dataset.adminPickAccount, btn.dataset.adminPickName));
   });
@@ -9337,6 +9527,8 @@ function handleAction(action) {
 
     case 'admin-grant-load-accounts': loadAdminGrantAccounts(); break;
     case 'admin-grant-submit': grantAdminAccess(); break;
+    case 'admin-mcc-load-groups': loadAdminMccGroups(); break;
+    case 'admin-mcc-grant-submit': grantAdminMcc(); break;
   }
 }
 

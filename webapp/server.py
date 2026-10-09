@@ -148,6 +148,33 @@ REGISTER_RATE_LIMIT = (5, 300)
 # clientes sin límite. 30/min alcanza de sobra para uso normal (cada llamada
 # ya sube una lista completa de términos, no una por término).
 _write_limiter = RateLimiter()
+
+# Cuentas que cuelgan de cada sub-MCC (para el acceso por MCC). Recorrer un
+# MCC grande son varias consultas a Google Ads, así que se cachea unos
+# minutos: una cuenta nueva del hotel aparece sola en ese plazo, y una que
+# se saque del MCC deja de ser accesible en ese mismo plazo.
+MCC_MEMBERS_TTL_SECONDS = 600
+_mcc_members_cache = {}
+_mcc_members_lock = threading.Lock()
+
+
+def get_mcc_member_ids(mcc_customer_id):
+    """Set de customer_id de las cuentas hoja debajo de un sub-MCC, o None si
+    no se pudo consultar (fail-secure: quien llama debe tratarlo como "sin
+    acceso", y un fallo NO se cachea para reintentar en la próxima llamada)."""
+    now = time.time()
+    with _mcc_members_lock:
+        hit = _mcc_members_cache.get(mcc_customer_id)
+        if hit and hit[0] > now:
+            return hit[1]
+    try:
+        members = {a["id"] for a in google_ads_client.list_mcc_group_accounts(mcc_customer_id)}
+    except Exception as e:  # noqa: BLE001
+        print(f"[mcc-access] no se pudo resolver el MCC {mcc_customer_id}: {str(e)[:200]}", flush=True)
+        return None
+    with _mcc_members_lock:
+        _mcc_members_cache[mcc_customer_id] = (now + MCC_MEMBERS_TTL_SECONDS, members)
+    return members
 WRITE_RATE_LIMIT = (30, 60)
 
 # Análisis con IA (Claude): cada llamada cuesta dinero real en la API de
@@ -268,6 +295,24 @@ def init_db():
                 created_at REAL NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id),
                 UNIQUE(user_id, customer_id)
+            )
+            """
+        )
+        # Acceso por MCC: en vez de una fila por cuenta, el usuario queda
+        # ligado a un sub-MCC (una marca de hotel) y puede tocar TODAS las
+        # cuentas que cuelguen de él, incluidas las que se abran después —
+        # la pertenencia se resuelve contra Google Ads al momento de chequear
+        # (con caché corto), no se copia a user_account_access.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_mcc_access (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                mcc_customer_id TEXT NOT NULL,
+                mcc_name TEXT,
+                created_at REAL NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                UNIQUE(user_id, mcc_customer_id)
             )
             """
         )
@@ -572,6 +617,14 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_admin_json():
                 return
             self._handle_admin_access_revoke(payload)
+        elif path == "/api/admin/access/grant-mcc":
+            if not self._require_admin_json():
+                return
+            self._handle_admin_access_grant_mcc(payload)
+        elif path == "/api/admin/access/revoke-mcc":
+            if not self._require_admin_json():
+                return
+            self._handle_admin_access_revoke_mcc(payload)
         elif path == "/api/admin/users/reset-password":
             if not self._require_admin_json():
                 return
@@ -680,7 +733,24 @@ class Handler(SimpleHTTPRequestHandler):
             ).fetchone()
         finally:
             conn.close()
-        return row is not None
+        if row is not None:
+            return True
+        # Sin acceso directo: probar los MCC a los que el usuario está ligado.
+        for mcc_id in self._get_user_mcc_ids(user["id"]):
+            members = get_mcc_member_ids(mcc_id)
+            if members is not None and customer_id in members:
+                return True
+        return False
+
+    def _get_user_mcc_ids(self, user_id):
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT mcc_customer_id FROM user_mcc_access WHERE user_id = ?", (user_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+        return [r["mcc_customer_id"] for r in rows]
 
     def _get_user_account_ids(self, user_id):
         conn = get_db()
@@ -690,7 +760,12 @@ class Handler(SimpleHTTPRequestHandler):
             ).fetchall()
         finally:
             conn.close()
-        return {r["customer_id"] for r in rows}
+        ids = {r["customer_id"] for r in rows}
+        for mcc_id in self._get_user_mcc_ids(user_id):
+            members = get_mcc_member_ids(mcc_id)
+            if members:
+                ids |= members
+        return ids
 
     # Como _require_auth_json, pero además exige is_admin — para los
     # endpoints de administración (usuarios, permisos de cuenta). Devuelve
@@ -769,6 +844,8 @@ class Handler(SimpleHTTPRequestHandler):
                 self._send_json(404, {"error": "No existe esa cuenta."})
                 return
             conn.execute("DELETE FROM sessions WHERE user_id = ?", (row["id"],))
+            conn.execute("DELETE FROM user_account_access WHERE user_id = ?", (row["id"],))
+            conn.execute("DELETE FROM user_mcc_access WHERE user_id = ?", (row["id"],))
             conn.execute("DELETE FROM users WHERE id = ?", (row["id"],))
             conn.commit()
         finally:
@@ -826,6 +903,15 @@ class Handler(SimpleHTTPRequestHandler):
                     "FROM user_account_access JOIN users ON users.id = user_account_access.user_id "
                     "ORDER BY users.username, user_account_access.created_at"
                 ).fetchall()
+            mcc_sql = (
+                "SELECT user_mcc_access.user_id, users.username, user_mcc_access.mcc_customer_id, "
+                "user_mcc_access.mcc_name, user_mcc_access.created_at "
+                "FROM user_mcc_access JOIN users ON users.id = user_mcc_access.user_id "
+            )
+            if user_id:
+                mcc_rows = conn.execute(mcc_sql + "WHERE user_mcc_access.user_id = ? ORDER BY user_mcc_access.created_at", (user_id,)).fetchall()
+            else:
+                mcc_rows = conn.execute(mcc_sql + "ORDER BY users.username, user_mcc_access.created_at").fetchall()
         finally:
             conn.close()
         access = [
@@ -836,7 +922,15 @@ class Handler(SimpleHTTPRequestHandler):
             }
             for r in rows
         ]
-        self._send_json(200, {"access": access})
+        mcc_access = [
+            {
+                "user_id": r["user_id"], "username": r["username"],
+                "mcc_customer_id": r["mcc_customer_id"], "mcc_name": r["mcc_name"],
+                "created_at": r["created_at"],
+            }
+            for r in mcc_rows
+        ]
+        self._send_json(200, {"access": access, "mcc_access": mcc_access})
 
     # Le da a un usuario acceso a una cuenta de Google Ads puntual —
     # account_name es opcional, solo para que la lista de arriba sea legible
@@ -858,6 +952,60 @@ class Handler(SimpleHTTPRequestHandler):
                 "INSERT OR IGNORE INTO user_account_access (user_id, customer_id, account_name, created_at) "
                 "VALUES (?, ?, ?, ?)",
                 (user_id, customer_id, account_name, time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._send_json(200, {"ok": True})
+
+    # Liga a un usuario a un sub-MCC completo (una marca de hotel): ve y toca
+    # todas las cuentas que cuelguen de él, también las futuras. Solo se
+    # aceptan sub-MCCs (nunca el MCC raíz, que daría acceso a las 1100+
+    # cuentas) y, con la API configurada, el ID debe existir de verdad.
+    def _handle_admin_access_grant_mcc(self, payload):
+        user_id = payload.get("user_id")
+        mcc_id = str(payload.get("mcc_customer_id") or "").strip()
+        mcc_name = payload.get("mcc_name")
+        if not user_id or not mcc_id.isdigit():
+            self._send_json(400, {"error": "Faltan user_id o mcc_customer_id (debe ser numérico)."})
+            return
+        if google_ads_client.is_configured():
+            try:
+                groups = {g["id"]: g["name"] for g in google_ads_client.list_mcc_groups()}
+            except Exception as e:  # noqa: BLE001
+                self._send_google_ads_error(e)
+                return
+            if mcc_id not in groups:
+                self._send_json(400, {"error": "Ese ID no es un sub-MCC de la cuenta administradora."})
+                return
+            mcc_name = mcc_name or groups[mcc_id]
+        conn = get_db()
+        try:
+            target = conn.execute("SELECT id, is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
+            if not target:
+                self._send_json(404, {"error": "No existe ese usuario."})
+                return
+            conn.execute(
+                "INSERT OR IGNORE INTO user_mcc_access (user_id, mcc_customer_id, mcc_name, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (user_id, mcc_id, mcc_name, time.time()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._send_json(200, {"ok": True})
+
+    def _handle_admin_access_revoke_mcc(self, payload):
+        user_id = payload.get("user_id")
+        mcc_id = str(payload.get("mcc_customer_id") or "").strip()
+        if not user_id or not mcc_id:
+            self._send_json(400, {"error": "Faltan user_id o mcc_customer_id."})
+            return
+        conn = get_db()
+        try:
+            conn.execute(
+                "DELETE FROM user_mcc_access WHERE user_id = ? AND mcc_customer_id = ?",
+                (user_id, mcc_id),
             )
             conn.commit()
         finally:
