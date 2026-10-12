@@ -128,6 +128,21 @@ const state = {
   // Sección ROAS — solo existe conectada a Google Ads (el ROAS objetivo de
   // la estrategia de puja no viene en ningún CSV, y ajustarlo necesita
   // escribir a la cuenta real), así que no hay modo "Subir archivo" acá.
+  audit: {
+    status: 'idle', error: null, report: null, reportAccountName: '',
+    api: {
+      statusChecked: false, configured: false,
+      accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
+      days: 30, simulated: false, error: null,
+      mcc: { status: 'idle', groups: [], filter: '', selectedId: '', selectedName: '', accountIdsStatus: 'idle', accountIds: null, error: null },
+    },
+    // Cuestionario del hotel — ver auditoria_reglas_propuesta.md, sección 1.
+    ctx: {
+      hotel_name: '', brand_terms: '', brand_campaign_words: 'marca, brand, branded, brnd',
+      goal: 'roas', target: '',
+    },
+    ai: { status: 'idle', narrativa: null, error: null },
+  },
   roas: {
     status: 'idle', error: null, rows: null,
     api: {
@@ -407,6 +422,10 @@ const PAGE_META = {
   proyeccion: {
     title: 'Proyección de ventas',
     caption: 'Sube el histórico mensual de ingresos del hotel (mínimo 12 meses, idealmente 24+) y obtén una proyección a futuro que combina tendencia y temporada alta/baja.',
+  },
+  auditoria: {
+    title: 'Auditoría de cuenta',
+    caption: 'Revisa la configuración de una cuenta de hotel — conversiones, redes, estructura, palabras clave y activos — y descarga un informe con los hallazgos priorizados.',
   },
   roas: {
     title: 'ROAS',
@@ -703,6 +722,7 @@ function render() {
   else if (state.page === 'oportunidad') pageHtml = renderOpportunityPage();
   else if (state.page === 'proyeccion') pageHtml = renderForecastPage();
   else if (state.page === 'roas') pageHtml = renderRoasPage();
+  else if (state.page === 'auditoria') pageHtml = renderAuditPage();
   else if (state.page === 'recomendaciones') pageHtml = renderRecsPage();
   else if (state.page === 'iamax') pageHtml = renderIaMaxPage();
   else if (state.page === 'exclusiones') pageHtml = renderContentExclusionsPage();
@@ -7541,6 +7561,487 @@ function revokeAdminAccess(userId, customerId) {
 }
 
 // ---------------------------------------------------------------------------
+// Página — Auditoría de cuenta
+// ---------------------------------------------------------------------------
+// Solo lectura. El servidor trae los datos de la cuenta con ~12 consultas y
+// corre las reglas (account_audit.py); acá solo se pide, se muestra y se
+// arma el informe descargable (HTML autocontenido y Markdown).
+
+const AUDIT_SEVERITY_LABELS = { critico: 'Crítico', advertencia: 'Advertencia', info: 'Info' };
+const AUDIT_GOALS = { roas: 'ROAS objetivo (%)', cpa: 'CPA objetivo', volumen: 'Volumen de reservas' };
+
+function auditMoney(v, cur) {
+  if (v == null || Number.isNaN(v)) return 'N/D';
+  return `${cur ? cur + ' ' : ''}${Math.round(v).toLocaleString('en-US')}`;
+}
+
+function ensureAuditStatusLoaded() {
+  const a = state.audit.api;
+  if (a.statusChecked) return;
+  fetch('/api/google-ads/status')
+    .then((r) => r.json())
+    .then((data) => { a.statusChecked = true; a.configured = !!data.configured; render(); })
+    .catch(() => { a.statusChecked = true; a.configured = false; render(); });
+}
+
+function loadAuditAccounts() {
+  const a = state.audit.api;
+  a.accountsStatus = 'loading'; a.error = null;
+  render();
+  fetch('/api/google-ads/accounts')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.accounts = data.accounts || [];
+      a.simulated = !!data.simulated;
+      a.accountsStatus = 'ready';
+      render();
+    })
+    .catch((err) => { a.accountsStatus = 'error'; a.error = err.message || String(err); render(); });
+}
+
+function loadAuditMccGroups() {
+  const m = state.audit.api.mcc;
+  m.status = 'loading'; m.error = null;
+  render();
+  fetch('/api/google-ads/mcc-groups')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      m.groups = data.groups || [];
+      m.status = 'ready';
+      render();
+    })
+    .catch((err) => { m.status = 'error'; m.error = err.message || String(err); render(); });
+}
+
+function applyAuditMccFilter(groupId, groupName) {
+  const a = state.audit.api;
+  const m = a.mcc;
+  m.selectedId = groupId; m.selectedName = groupName;
+  m.accountIdsStatus = 'loading'; m.error = null;
+  render();
+  fetch(`/api/google-ads/mcc-group-accounts?group_customer_id=${encodeURIComponent(groupId)}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      m.accountIds = new Set((data.accounts || []).map((acc) => acc.id));
+      m.accountIdsStatus = 'ready';
+      if (a.accountId && !m.accountIds.has(a.accountId)) a.accountId = '';
+      render();
+    })
+    .catch((err) => { m.accountIdsStatus = 'error'; m.error = err.message || String(err); render(); });
+}
+
+function clearAuditMccFilter() {
+  const m = state.audit.api.mcc;
+  m.selectedId = ''; m.selectedName = ''; m.accountIds = null; m.accountIdsStatus = 'idle'; m.filter = '';
+  render();
+}
+
+function renderAuditMccFilterPanel() {
+  if (!currentUser.isAdmin) return '';
+  const m = state.audit.api.mcc;
+  if (m.selectedId) {
+    const countLabel = m.accountIdsStatus === 'loading' ? 'cargando…' : m.accountIdsStatus === 'ready' ? `${m.accountIds.size} cuenta(s)` : 'error';
+    return `
+      <div class="field">
+        <label>Filtrando por MCC</label>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="delta-badge neutral">${escapeHtml(m.selectedName)} — ${countLabel}</span>
+          <button class="btn-link" data-action="audit-mcc-clear">Quitar filtro</button>
+        </div>
+      </div>`;
+  }
+  if (m.status === 'idle') return `<div class="field"><button class="btn-outline sm" data-action="audit-mcc-load">Filtrar por MCC (ej. una cadena de hoteles)</button></div>`;
+  if (m.status === 'loading') return `<div class="field"><p class="footnote">Cargando agrupaciones del MCC…</p></div>`;
+  if (m.status === 'error') return `<div class="error-panel">${escapeHtml(m.error)}</div>`;
+  const filter = (m.filter || '').trim().toLowerCase();
+  const matches = filter.length >= 2 ? m.groups.filter((g) => g.id.includes(filter) || (g.name || '').toLowerCase().includes(filter)).slice(0, 25) : [];
+  const matchesHtml = matches.length
+    ? `<div class="table-scroll" style="max-height:200px;margin-top:8px"><table><tbody>
+        ${matches.map((g) => `<tr><td>${escapeHtml(g.name)}</td><td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(g.id)}</td>
+          <td><button class="btn-outline xs" data-audit-mcc-pick="${escapeHtml(g.id)}" data-audit-mcc-pick-name="${escapeHtml(g.name)}">Usar</button></td></tr>`).join('')}
+      </tbody></table></div>`
+    : (filter.length >= 2 ? `<p class="footnote" style="margin-top:8px">Sin resultados para "${escapeHtml(filter)}".</p>` : '');
+  return `<div class="field"><label>Filtrar por MCC</label>
+    <input type="text" id="audit-mcc-filter" placeholder="Busca por nombre o ID del MCC (${m.groups.length} agrupaciones)…" value="${escapeHtml(m.filter)}" style="width:320px" />
+    ${matchesHtml}</div>`;
+}
+
+function auditCustomerId() {
+  const a = state.audit.api;
+  return (a.accountIdManual || '').replace(/[^0-9]/g, '') || a.accountId;
+}
+
+function runAudit() {
+  const s = state.audit;
+  const a = s.api;
+  const customerId = auditCustomerId();
+  if (!customerId && !a.simulated) { a.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
+  a.error = null;
+  s.status = 'loading'; s.error = null; s.ai = { status: 'idle', narrativa: null, error: null };
+  render();
+  fetch('/api/google-ads/audit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ customer_id: customerId || '', days: Number(a.days), context: s.ctx }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.simulated = !!data.simulated;
+      s.report = data.report;
+      s.reportAccountName = (a.accounts.find((acc) => acc.id === customerId) || {}).name || data.report.meta.account_name || '';
+      s.status = 'ready';
+      render();
+    })
+    .catch((err) => { a.error = err.message || String(err); s.status = s.report ? 'ready' : 'idle'; render(); });
+}
+
+function runAuditAi() {
+  const s = state.audit;
+  const r = s.report;
+  s.ai = { status: 'loading', narrativa: null, error: null };
+  render();
+  fetch('/api/ai/analizar-auditoria', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      resumen: { puntaje: r.score, totales: r.summary },
+      findings: r.findings.map((f) => ({ id: f.id, area: f.area, severidad: f.severity, titulo: f.title, detalle: f.detail, accion: f.action, evidencia: f.evidence })),
+      no_verificables: r.not_verifiable,
+      contexto: r.meta.context,
+    }),
+  })
+    .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      s.ai = { status: 'ready', narrativa: data.narrativa, error: null };
+      render();
+    })
+    .catch((err) => { s.ai = { status: 'error', narrativa: null, error: err.message || String(err) }; render(); });
+}
+
+function auditReportTitle() {
+  const s = state.audit;
+  return (s.report.meta.context.hotel_name || s.reportAccountName || `Cuenta ${s.report.meta.customer_id || ''}`).trim();
+}
+
+function auditFileName(ext) {
+  const slug = auditReportTitle().toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'cuenta';
+  return `auditoria-${slug}-${state.audit.report.meta.generated_at.slice(0, 10)}.${ext}`;
+}
+
+function downloadTextFile(content, filename, mime) {
+  const blob = new Blob([content], { type: `${mime};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url; link.download = filename;
+  document.body.appendChild(link); link.click(); link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function buildAuditMarkdown() {
+  const s = state.audit;
+  const r = s.report;
+  const cur = r.summary.currency;
+  const m = r.meta;
+  const lines = [];
+  lines.push(`# Auditoría de cuenta — ${auditReportTitle()}`, '');
+  lines.push(`- Cuenta: ${m.customer_id || 'N/D'}${m.account_name ? ` (${m.account_name})` : ''}`);
+  lines.push(`- Periodo analizado: ${m.date_from} a ${m.date_to} (${r.summary.days} días)`);
+  lines.push(`- Generada: ${m.generated_at.replace('T', ' ')}`);
+  if (s.api.simulated) lines.push('- **Datos de ejemplo (modo simulado), no son de una cuenta real.**');
+  lines.push('', `## Puntaje de salud: ${r.score.total}/100 — ${r.score.label}`, '');
+  lines.push(`${r.score.critical} crítico(s), ${r.score.warnings} advertencia(s), ${r.score.info} informativo(s).`, '');
+  lines.push('| Área | Puntaje | Críticos | Advertencias |', '|---|---|---|---|');
+  Object.entries(r.score.by_area).forEach(([area, v]) => lines.push(`| ${area} | ${v.score} | ${v.critical} | ${v.warnings} |`));
+  lines.push('', '## Cifras del periodo', '');
+  lines.push(`- Gasto: ${auditMoney(r.summary.cost, cur)}`);
+  lines.push(`- Conversiones: ${Math.round(r.summary.conversions)}`);
+  lines.push(`- ROAS: ${r.summary.roas != null ? Math.round(r.summary.roas * 100) + '%' : 'N/D'}`);
+  lines.push(`- CPA: ${auditMoney(r.summary.cpa, cur)}`);
+  lines.push(`- Campañas activas: ${r.summary.campaigns_enabled} de ${r.summary.campaigns_total}`);
+  if (s.ai.status === 'ready' && s.ai.narrativa) lines.push('', '## Lectura priorizada', '', s.ai.narrativa);
+  ['critico', 'advertencia', 'info'].forEach((sev) => {
+    const items = r.findings.filter((f) => f.severity === sev);
+    if (!items.length) return;
+    lines.push('', `## ${AUDIT_SEVERITY_LABELS[sev]}${sev === 'info' ? '' : 's'} (${items.length})`.replace('Críticos', 'Críticos').replace('Advertencias', 'Advertencias'));
+    items.forEach((f) => {
+      lines.push('', `### ${f.id} · ${f.title}`, '', `**Área:** ${f.area}`, '', f.detail, '', `**Qué hacer:** ${f.action}`);
+      if (f.evidence.length) { lines.push('', ...f.evidence.map((e) => `- ${e}`)); }
+    });
+  });
+  if (r.not_verifiable.length) {
+    lines.push('', '## Revisiones que no se pudieron verificar', '');
+    r.not_verifiable.forEach((n) => lines.push(`- **${n.id} · ${n.title}:** ${n.reason}`));
+  }
+  const ctx = m.context;
+  lines.push('', '## Contexto indicado en el cuestionario', '');
+  lines.push(`- Meta: ${AUDIT_GOALS[ctx.goal] || 'N/D'}${ctx.target ? ` — ${ctx.target}` : ''}`);
+  lines.push('', '---', 'Informe generado con Paid Media Helper a partir de datos de Google Ads. Los umbrales son heurísticos y no reemplazan el criterio del estratega de cuenta.');
+  return lines.join('\n');
+}
+
+// Diseño del informe — mismo estilo del "Checkin Scan" de Checkin Ads: donut
+// de puntaje, barras por área, tarjetas de métricas, barra de distribución y
+// tarjetas de oportunidades con prioridad. Una sola fuente de estilos: se
+// inyecta en la pantalla y se incrusta tal cual en el HTML descargable.
+const AUDIT_REPORT_CSS = `
+.ar{font-family:'Plus Jakarta Sans','Inter',system-ui,-apple-system,sans-serif;color:#14213d;max-width:820px;margin:0 auto;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.ar *{box-sizing:border-box}
+.ar-eyebrow{color:#d9a400;font-weight:700;font-size:13px;letter-spacing:.08em;text-transform:uppercase}
+.ar-title{font-size:38px;font-weight:800;line-height:1.1;margin:6px 0 4px;color:#14213d}
+.ar-sub{color:#6b7280;font-size:14px;margin-bottom:22px}
+.ar-card{background:#fff;border:1px solid #e3e6ec;border-radius:18px;padding:26px 28px}
+.ar-score{display:flex;gap:30px;align-items:center;flex-wrap:wrap}
+.ar-donut{position:relative;width:180px;height:180px;flex:none}
+.ar-donut-c{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.ar-donut-n{font-size:56px;font-weight:800;line-height:1}
+.ar-donut-d{font-size:14px;color:#9aa1ad;margin-top:2px}
+.ar-verdict{flex:1;min-width:240px}
+.ar-verdict-k{display:flex;align-items:center;gap:8px;color:#d9a400;font-weight:700;font-size:13px;letter-spacing:.08em;text-transform:uppercase}
+.ar-verdict-i{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;border:2px solid currentColor;font-size:11px;line-height:1}
+.ar-verdict-t{font-size:20px;font-weight:700;line-height:1.35;margin-top:8px}
+.ar-verdict-s{font-size:14px;color:#8a919d;margin-top:8px}
+.ar-bars{margin-top:26px;display:grid;gap:14px}
+.ar-bar-row{display:flex;justify-content:space-between;font-size:14px;color:#8a919d}
+.ar-bar-row strong{color:#14213d}
+.ar-track{height:6px;border-radius:99px;background:#eef0f4;margin-top:6px;overflow:hidden}
+.ar-fill{height:100%;border-radius:99px;background:#14213d}
+.ar-h2{font-size:22px;font-weight:800;margin:34px 0 14px;color:#14213d;break-after:avoid;page-break-after:avoid}
+.ar-block{break-inside:avoid;page-break-inside:avoid}
+.ar-h2 small{font-size:14px;font-weight:500;color:#8a919d;margin-left:8px}
+.ar-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.ar-metric{background:#fff;border:1px solid #e3e6ec;border-radius:16px;padding:20px 22px}
+.ar-metric-l{font-size:14px;color:#8a919d}
+.ar-metric-v{font-size:34px;font-weight:800;margin-top:6px;line-height:1.1}
+.ar-metric-v.warn{color:#b98d00}
+.ar-stack{display:flex;gap:3px;height:16px}
+.ar-seg{border-radius:99px;min-width:6px}
+.ar-legend{display:flex;gap:6px 20px;flex-wrap:wrap;margin-top:14px;font-size:14px;color:#8a919d}
+.ar-legend strong{color:#14213d;margin-left:4px}
+.ar-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
+.ar-opp{background:#fff;border:1px solid #e3e6ec;border-left:5px solid var(--c);border-radius:16px;padding:22px 24px;margin-bottom:14px;break-inside:avoid;page-break-inside:avoid}
+.ar-pill{display:inline-block;padding:5px 12px;border-radius:8px;font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}
+.ar-opp-id{font-size:12px;color:#9aa1ad;margin-left:10px}
+.ar-opp h3{font-size:20px;font-weight:800;margin:14px 0 6px;color:#14213d}
+.ar-opp-d{color:#8a919d;font-size:16px;line-height:1.5;margin:0}
+.ar-rec{background:#f4f5f8;border-radius:12px;padding:14px 16px;margin-top:14px;font-size:16px;line-height:1.5}
+.ar-ev{margin:10px 0 0 18px;padding:0;color:#6b7280;font-size:14px;line-height:1.5}
+.ar-ai{white-space:pre-wrap;font-size:16px;line-height:1.65}
+.ar-nv{margin:0 0 0 18px;padding:0;color:#6b7280;font-size:14px;line-height:1.6}
+.ar-note{background:#fdf3d9;border:1px solid #f2c419;border-radius:12px;padding:12px 16px;margin-bottom:18px;font-size:14px}
+.ar-foot{text-align:center;color:#9aa1ad;font-size:13px;margin:34px 0 8px}
+@media (max-width:640px){.ar-grid{grid-template-columns:1fr}.ar-title{font-size:30px}}
+@media print{.ar{max-width:none;padding:0 3px}}
+`;
+
+const AUDIT_PRIORITY = {
+  critico: { label: 'Prioridad alta', color: '#d23c3c', bg: '#fbe3e1', fg: '#a8231f' },
+  advertencia: { label: 'Prioridad media', color: '#f2c419', bg: '#f6e8bd', fg: '#a77a00' },
+  info: { label: 'Informativo', color: '#9fb0cf', bg: '#e8edf5', fg: '#31456b' },
+};
+const AUDIT_STACK_COLORS = ['#14213d', '#f2c419', '#5f7aa8', '#c5c9d3', '#2e9b5f', '#d23c3c'];
+
+function auditReportBodyHtml() {
+  const s = state.audit;
+  const r = s.report;
+  const e = escapeHtml;
+  const cur = r.summary.currency;
+  const m = r.meta;
+  const sc = r.score;
+  const ring = sc.label === 'Sana' ? '#2e9b5f' : sc.label === 'Mejorable' ? '#e0a800' : '#d23c3c';
+  const R = 82;
+  const C = 2 * Math.PI * R;
+  const dash = (C * sc.total) / 100;
+  const donut = `
+    <div class="ar-donut">
+      <svg viewBox="0 0 200 200" width="180" height="180" aria-hidden="true">
+        <circle cx="100" cy="100" r="${R}" fill="none" stroke="#e8eaf0" stroke-width="22"></circle>
+        <circle cx="100" cy="100" r="${R}" fill="none" stroke="${ring}" stroke-width="22" stroke-dasharray="${dash.toFixed(1)} ${(C - dash).toFixed(1)}" transform="rotate(-90 100 100)"></circle>
+      </svg>
+      <div class="ar-donut-c"><div class="ar-donut-n">${sc.total}</div><div class="ar-donut-d">/ 100</div></div>
+    </div>`;
+
+  let verdict;
+  if (sc.critical > 0) verdict = `Tu cuenta tiene ${sc.critical} problema${sc.critical === 1 ? '' : 's'} crítico${sc.critical === 1 ? '' : 's'} de configuración que conviene corregir primero.`;
+  else if (sc.warnings > 0) verdict = `Tu cuenta está bien configurada, con ${sc.warnings} punto${sc.warnings === 1 ? '' : 's'} por mejorar.`;
+  else verdict = 'Tu cuenta no tiene hallazgos con las reglas actuales.';
+
+  const bars = Object.entries(sc.by_area).map(([area, v]) => `
+    <div><div class="ar-bar-row"><span>${e(area)}</span><strong>${v.score} / 100</strong></div>
+    <div class="ar-track"><div class="ar-fill" style="width:${v.score}%"></div></div></div>`).join('');
+
+  const sm = r.summary;
+  const hasGoalFinding = r.findings.some((f) => f.id === 'G1');
+  const ctx = m.context;
+  const goalText = ctx.goal === 'roas' && ctx.target ? `ROAS ${e(String(ctx.target))}%` : ctx.goal === 'cpa' && ctx.target ? `CPA ${e(auditMoney(Number(ctx.target), cur))}` : 'Volumen de reservas';
+  const metric = (label, value, warn) => `<div class="ar-metric"><div class="ar-metric-l">${label}</div><div class="ar-metric-v${warn ? ' warn' : ''}">${value}</div></div>`;
+  const metrics = [
+    metric('Gasto del periodo', e(auditMoney(sm.cost, cur))),
+    metric('Conversiones', Math.round(sm.conversions)),
+    metric('ROAS logrado', sm.roas != null ? `${Math.round(sm.roas * 100)}%` : 'N/D', hasGoalFinding && ctx.goal === 'roas'),
+    metric('CPA', e(auditMoney(sm.cpa, cur)), hasGoalFinding && ctx.goal === 'cpa'),
+    metric('Campañas activas', `${sm.campaigns_enabled} de ${sm.campaigns_total}`),
+    metric('Meta indicada', goalText),
+  ].join('');
+
+  const spend = sm.spend_by_type || [];
+  const stack = spend.length ? `
+    <div class="ar-block"><h2 class="ar-h2">Distribución del gasto</h2>
+    <div class="ar-card">
+      <div class="ar-stack">${spend.map((t, i) => `<div class="ar-seg" style="flex:${Math.max(t.share, 0.01)};background:${AUDIT_STACK_COLORS[i % AUDIT_STACK_COLORS.length]}"></div>`).join('')}</div>
+      <div class="ar-legend">${spend.map((t, i) => `<span><span class="ar-dot" style="background:${AUDIT_STACK_COLORS[i % AUDIT_STACK_COLORS.length]}"></span>${e(t.label)}<strong>${Math.round(t.share * 100)}%</strong></span>`).join('')}</div>
+    </div></div>` : '';
+
+  const ai = s.ai.status === 'ready' && s.ai.narrativa
+    ? `<h2 class="ar-h2">Lectura priorizada</h2><div class="ar-card ar-ai">${e(s.ai.narrativa)}</div>` : '';
+
+  const opp = (f) => {
+    const p = AUDIT_PRIORITY[f.severity];
+    return `
+      <div class="ar-opp" style="--c:${p.color}">
+        <div><span class="ar-pill" style="background:${p.bg};color:${p.fg}">${p.label}</span><span class="ar-opp-id">${e(f.id)} · ${e(f.area)}</span></div>
+        <h3>${e(f.title)}</h3>
+        <p class="ar-opp-d">${e(f.detail)}</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> ${e(f.action)}</div>
+        ${f.evidence.length ? `<ul class="ar-ev">${f.evidence.map((x) => `<li>${e(x)}</li>`).join('')}</ul>` : ''}
+      </div>`;
+  };
+  const opps = r.findings.length
+    ? `<h2 class="ar-h2">Oportunidades<small>${sc.critical} críticas · ${sc.warnings} advertencias · ${sc.info} informativas</small></h2>${r.findings.map(opp).join('')}`
+    : `<h2 class="ar-h2">Oportunidades</h2><div class="ar-card">No se encontraron hallazgos con las reglas actuales.</div>`;
+
+  const nv = r.not_verifiable.length
+    ? `<h2 class="ar-h2">Revisiones que no se pudieron verificar</h2><div class="ar-card"><ul class="ar-nv">${r.not_verifiable.map((n) => `<li><strong>${e(n.id)} · ${e(n.title)}:</strong> ${e(n.reason)}</li>`).join('')}</ul></div>` : '';
+
+  return `
+    <div class="ar">
+      <div class="ar-eyebrow">Auditoría de cuenta</div>
+      <div class="ar-title">${e(auditReportTitle())}</div>
+      <div class="ar-sub">Cuenta ${e(m.customer_id || 'N/D')}${m.account_name ? ` (${e(m.account_name)})` : ''} · ${e(m.date_from)} a ${e(m.date_to)} (${sm.days} días) · Generada ${e(m.generated_at.slice(0, 10))}</div>
+      ${s.api.simulated ? '<div class="ar-note"><strong>Datos de ejemplo (modo simulado).</strong> No son de una cuenta real.</div>' : ''}
+      <div class="ar-card">
+        <div class="ar-score">
+          ${donut}
+          <div class="ar-verdict">
+            <div class="ar-verdict-k" style="color:${ring}"><span class="ar-verdict-i">!</span>Puntaje de salud · ${e(sc.label)}</div>
+            <div class="ar-verdict-t">${e(verdict)}</div>
+            <div class="ar-verdict-s">Cada crítico resta 10 puntos y cada advertencia 5.</div>
+          </div>
+        </div>
+        <div class="ar-bars">${bars}</div>
+      </div>
+      <div class="ar-block"><h2 class="ar-h2">Métricas principales</h2>
+      <div class="ar-grid">${metrics}</div></div>
+      ${stack}
+      ${ai}
+      ${opps}
+      ${nv}
+      <div class="ar-foot">Generado con Paid Media Helper a partir de datos de Google Ads. Los umbrales son heurísticos y no reemplazan el criterio del estratega de cuenta.</div>
+    </div>`;
+}
+
+function buildAuditHtml() {
+  return `<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auditoría de cuenta — ${escapeHtml(auditReportTitle())}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;700;800&display=swap" rel="stylesheet">
+<style>body{margin:0;padding:40px 20px;background:#f4f5f8}@media print{body{background:#fff;padding:0}@page{margin:14mm}}${AUDIT_REPORT_CSS}</style>
+</head><body>${auditReportBodyHtml()}</body></html>`;
+}
+
+function renderAuditForm() {
+  const s = state.audit;
+  const a = s.api;
+  const c = s.ctx;
+  if (!a.statusChecked) return `<div class="card control-panel"><p class="footnote">Consultando la conexión con Google Ads…</p></div>`;
+  const simulatedNotice = a.simulated ? `
+    <div class="ok-panel" style="margin:10px 0;width:100%">
+      <strong>Modo simulado.</strong> La API de Google Ads todavía no está configurada en el servidor — la auditoría usa una cuenta de hotel de ejemplo con problemas sembrados.
+    </div>` : '';
+
+  let accountBlock = '';
+  if (a.accountsStatus === 'idle') {
+    accountBlock = `<div class="field"><p class="footnote">${a.configured ? 'Conectado a la API de Google Ads.' : 'La API de Google Ads aún no está configurada — se usarán datos simulados para probar el flujo.'}</p>
+      <button class="btn-outline" data-action="audit-load-accounts">Ver cuentas disponibles</button></div>`;
+  } else if (a.accountsStatus === 'loading') {
+    accountBlock = `<div class="field"><p class="footnote">Cargando cuentas…</p></div>`;
+  } else if (a.accountsStatus === 'error') {
+    accountBlock = `<div class="error-panel"><strong>No se pudieron cargar las cuentas.</strong> ${escapeHtml(a.error)}</div>`;
+  } else {
+    const mccFilterActive = a.mcc.selectedId && a.mcc.accountIds;
+    const visible = mccFilterActive ? a.accounts.filter((acc) => a.mcc.accountIds.has(acc.id)) : a.accounts;
+    const options = ['<option value="">Elige una cuenta…</option>']
+      .concat(visible.map((acc) => `<option value="${escapeHtml(acc.id)}" ${a.accountId === acc.id ? 'selected' : ''}>${escapeHtml(acc.name)} (${escapeHtml(acc.id)})</option>`)).join('');
+    accountBlock = `
+      ${simulatedNotice}
+      ${renderAuditMccFilterPanel()}
+      <div class="field"><label>Cuenta${mccFilterActive ? ` (${visible.length} en "${escapeHtml(a.mcc.selectedName)}")` : ''}</label>
+        <select id="audit-account" style="width:320px">${options}</select></div>
+      <div class="field"><label>...o escribe el ID de la cuenta</label>
+        <input type="text" id="audit-account-manual" value="${escapeHtml(a.accountIdManual)}" placeholder="ej. 6862893390" style="width:160px" /></div>
+      <div class="field"><label>Periodo</label>
+        <select id="audit-days"><option value="30" ${a.days == 30 ? 'selected' : ''}>Últimos 30 días</option><option value="60" ${a.days == 60 ? 'selected' : ''}>Últimos 60 días</option><option value="90" ${a.days == 90 ? 'selected' : ''}>Últimos 90 días</option></select></div>`;
+  }
+
+  const sel = (field, opts) => `<select data-audit-ctx="${field}">${Object.entries(opts).map(([k, v]) => `<option value="${k}" ${c[field] === k ? 'selected' : ''}>${escapeHtml(v)}</option>`).join('')}</select>`;
+  const txt = (field, ph, w = 260) => `<input type="text" data-audit-ctx="${field}" value="${escapeHtml(c[field])}" placeholder="${escapeHtml(ph)}" style="width:${w}px" />`;
+
+  return `
+    <div class="card control-panel align-end" style="flex-wrap:wrap;gap:16px 24px">
+      ${accountBlock}
+    </div>
+    <div class="card control-panel align-end" style="flex-wrap:wrap;gap:16px 24px">
+      <h3 class="section-title" style="margin:0;width:100%">Cuestionario del hotel</h3>
+      <div class="field"><label>Nombre del hotel (para el informe)</label>${txt('hotel_name', 'ej. Hotel Estelar Cartagena')}</div>
+      <div class="field"><label>Términos de marca en las búsquedas</label>${txt('brand_terms', 'ej. estelar, hotel estelar', 220)}</div>
+      <div class="field"><label>Palabras que marcan una campaña de marca</label>${txt('brand_campaign_words', 'marca, brand, branded, brnd', 220)}</div>
+      <div class="field"><label>Meta principal</label>${sel('goal', AUDIT_GOALS)}</div>
+      ${c.goal !== 'volumen' ? `<div class="field"><label>${c.goal === 'roas' ? 'ROAS objetivo (ej. 450 = 450%)' : 'CPA objetivo'}</label>${txt('target', c.goal === 'roas' ? '450' : '25', 110)}</div>` : ''}
+      <button class="btn-accent" data-action="audit-run" ${s.status === 'loading' ? 'disabled' : ''}>${s.report ? 'Auditar de nuevo' : 'Auditar cuenta'}</button>
+      ${a.error ? `<div class="error-panel" style="width:100%"><strong>No se pudo auditar.</strong> ${escapeHtml(a.error)}</div>` : ''}
+    </div>`;
+}
+
+function renderAuditResults() {
+  const s = state.audit;
+  const aiBlock = !currentUser.isAdmin ? '' : `
+    <div class="card" style="margin:16px 0;max-width:820px;margin-left:auto;margin-right:auto">
+      <h3 class="section-title" style="margin:0 0 8px">Lectura priorizada con IA <span class="footnote" style="font-weight:400">· prueba interna, solo administradores. Si la generas, se incluye en el informe descargable.</span></h3>
+      ${s.ai.status === 'idle' ? `<button class="btn-outline" data-action="audit-ai">Analizar con IA</button>` : ''}
+      ${s.ai.status === 'loading' ? `<p class="footnote">Analizando la auditoría…</p>` : ''}
+      ${s.ai.status === 'error' ? `<div class="error-panel">${escapeHtml(s.ai.error)}</div><button class="btn-outline" data-action="audit-ai" style="margin-top:8px">Reintentar</button>` : ''}
+      ${s.ai.status === 'ready' ? `<p class="footnote" style="margin:0">Listo: aparece abajo, en el informe.</p>` : ''}
+    </div>`;
+  return `
+    <style>${AUDIT_REPORT_CSS}</style>
+    <div class="audit-toolbar">
+      <button class="btn-accent" data-action="audit-download-html">Descargar informe (HTML)</button>
+      <button class="btn-outline" data-action="audit-download-md">Descargar Markdown</button>
+      <span class="footnote">El HTML se abre en cualquier navegador y se guarda como PDF con Ctrl+P (Cmd+P en Mac).</span>
+    </div>
+    ${aiBlock}
+    ${auditReportBodyHtml()}`;
+}
+
+function renderAuditPage() {
+  const s = state.audit;
+  ensureAuditStatusLoaded();
+  let body = '';
+  if (s.status === 'loading') {
+    body = `<div class="card state-panel loading"><div class="spinner"></div><p>Auditando la cuenta (unas 12 consultas a Google Ads)…</p></div>`;
+  } else if (s.report) {
+    body = renderAuditResults();
+  } else {
+    body = `<div class="card state-panel idle">${icon('clipboard-check', 30)}<p>Elige una cuenta, llena el cuestionario del hotel y audita: la plataforma revisa conversiones, redes, estructura, palabras clave y activos, y entrega un informe descargable.</p></div>`;
+  }
+  return `${renderAuditForm()}${body}`;
+}
+
+// ---------------------------------------------------------------------------
 // Página — Ritmo de consumo
 // ---------------------------------------------------------------------------
 
@@ -9105,6 +9606,25 @@ function bindEvents() {
   document.querySelectorAll('[data-pacing-roas-toggle]').forEach((btn) => {
     btn.addEventListener('click', () => togglePacingRoasReveal(btn.dataset.pacingRoasToggle));
   });
+  // Auditoría de cuenta
+  const auditAccount = document.getElementById('audit-account');
+  if (auditAccount) auditAccount.addEventListener('change', (e) => { state.audit.api.accountId = e.target.value; });
+  const auditAccountManual = document.getElementById('audit-account-manual');
+  if (auditAccountManual) auditAccountManual.addEventListener('input', (e) => { state.audit.api.accountIdManual = e.target.value; });
+  const auditDays = document.getElementById('audit-days');
+  if (auditDays) auditDays.addEventListener('change', (e) => { state.audit.api.days = Number(e.target.value); });
+  const auditMccFilter = document.getElementById('audit-mcc-filter');
+  if (auditMccFilter) auditMccFilter.addEventListener('input', (e) => { state.audit.api.mcc.filter = e.target.value; render(); });
+  document.querySelectorAll('[data-audit-mcc-pick]').forEach((btn) => {
+    btn.addEventListener('click', () => applyAuditMccFilter(btn.dataset.auditMccPick, btn.dataset.auditMccPickName));
+  });
+  document.querySelectorAll('[data-audit-ctx]').forEach((el) => {
+    const field = el.dataset.auditCtx;
+    el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', (e) => {
+      state.audit.ctx[field] = e.target.value;
+      if (field === 'goal') render(); // cambia la etiqueta y si hay campo de meta
+    });
+  });
   // Administración
   const adminGrantUser = document.getElementById('admin-grant-user');
   if (adminGrantUser) adminGrantUser.addEventListener('change', (e) => { state.admin.grant.userId = e.target.value; });
@@ -9527,6 +10047,13 @@ function handleAction(action) {
 
     case 'admin-grant-load-accounts': loadAdminGrantAccounts(); break;
     case 'admin-grant-submit': grantAdminAccess(); break;
+    case 'audit-load-accounts': loadAuditAccounts(); break;
+    case 'audit-run': runAudit(); break;
+    case 'audit-ai': runAuditAi(); break;
+    case 'audit-mcc-load': loadAuditMccGroups(); break;
+    case 'audit-mcc-clear': clearAuditMccFilter(); break;
+    case 'audit-download-html': downloadTextFile(buildAuditHtml(), auditFileName('html'), 'text/html'); break;
+    case 'audit-download-md': downloadTextFile(buildAuditMarkdown(), auditFileName('md'), 'text/markdown'); break;
     case 'admin-mcc-load-groups': loadAdminMccGroups(); break;
     case 'admin-mcc-grant-submit': grantAdminMcc(); break;
   }

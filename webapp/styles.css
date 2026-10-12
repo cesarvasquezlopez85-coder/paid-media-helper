@@ -515,3 +515,7 @@ main.content { flex: 1; overflow-y: auto; height: 100%; }
   .dense-grid { grid-template-columns: 1fr; }
   .two-col { grid-template-columns: 1fr; }
 }
+
+
+/* Auditoría de cuenta — el diseño del informe vive en AUDIT_REPORT_CSS (app.js) para compartirlo con el HTML descargable */
+.audit-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 4px 0 16px; }

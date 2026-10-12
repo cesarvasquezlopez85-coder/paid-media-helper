@@ -2241,3 +2241,284 @@ def simulated_keyword_forecast(keywords, bidding_mode, start_date, end_date,
         "conversions": None, "average_cpc_micros": int(round(avg_cpc_units * MICROS)) if clicks else None,
         "average_cpa_micros": None,
     }
+
+
+# ---------------------------------------------------------------------------
+# Auditoría de cuenta (solo lectura) — alimenta account_audit.run_audit()
+# ---------------------------------------------------------------------------
+
+def fetch_audit_data(customer_id, date_from, date_to):
+    """Junta los datos que necesita la auditoría con ~12 consultas GAQL de
+    solo lectura. Solo la consulta de campañas es imprescindible (si falla,
+    se propaga); cada una de las demás se aísla: si Google rechaza un campo
+    (pasó con casi todas las integraciones nuevas), ese bloque queda en None y
+    en data["unavailable"] con el motivo, y la auditoría marca esas revisiones
+    como "no verificables" en vez de caerse o inventar un hallazgo."""
+    between = f"segments.date BETWEEN '{date_from}' AND '{date_to}'"
+    data = {"unavailable": {}}
+
+    campaigns = []
+    for r in _search(customer_id, f"""
+        SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type,
+               campaign.bidding_strategy_type,
+               campaign.network_settings.target_google_search,
+               campaign.network_settings.target_search_network,
+               campaign.network_settings.target_content_network,
+               campaign.geo_target_type_setting.positive_geo_target_type,
+               metrics.cost_micros, metrics.conversions, metrics.conversions_value,
+               metrics.impressions, metrics.clicks
+        FROM campaign
+        WHERE {between} AND campaign.status != 'REMOVED'
+    """):
+        c, m = r.get("campaign", {}), r.get("metrics", {})
+        ns = c.get("networkSettings", {})
+        campaigns.append({
+            "id": str(c.get("id")), "name": c.get("name") or "(sin nombre)", "status": c.get("status") or "UNKNOWN",
+            "channel_type": c.get("advertisingChannelType") or "UNKNOWN",
+            "bidding": c.get("biddingStrategyType") or "UNSPECIFIED",
+            "search_partners": bool(ns.get("targetSearchNetwork")),
+            "display_network": bool(ns.get("targetContentNetwork")),
+            "geo_target_type": c.get("geoTargetTypeSetting", {}).get("positiveGeoTargetType"),
+            "cost": _micros_to_units(_int_or_none(m.get("costMicros"))) or 0,
+            "conversions": _float_or_none(m.get("conversions")) or 0,
+            "conv_value": _float_or_none(m.get("conversionsValue")) or 0,
+            "impressions": _int_or_none(m.get("impressions")) or 0,
+            "clicks": _int_or_none(m.get("clicks")) or 0,
+        })
+    data["campaigns"] = campaigns
+
+    def block(name, fn):
+        try:
+            data[name] = fn()
+        except Exception as e:  # noqa: BLE001 — un campo rechazado no tumba la auditoría
+            data[name] = None
+            data["unavailable"][name] = " ".join(str(e).split())[:240]
+
+    def customer_info():
+        rows = _search(customer_id, """
+            SELECT customer.descriptive_name, customer.currency_code,
+                   customer.conversion_tracking_setting.enhanced_conversions_for_leads_enabled
+            FROM customer
+        """)
+        c = (rows[0] if rows else {}).get("customer", {})
+        data["currency"] = c.get("currencyCode") or ""
+        data["account_name"] = c.get("descriptiveName") or ""
+        flag = c.get("conversionTrackingSetting", {}).get("enhancedConversionsForLeadsEnabled")
+        data["enhanced_conversions"] = bool(flag) if flag is not None else None
+        return True
+    block("customer", customer_info)
+    data.setdefault("enhanced_conversions", None)
+    data.setdefault("currency", "")
+
+    def conversion_actions():
+        rows = _search(customer_id, """
+            SELECT conversion_action.id, conversion_action.name, conversion_action.status, conversion_action.type,
+                   conversion_action.category, conversion_action.primary_for_goal,
+                   conversion_action.click_through_lookback_window_days
+            FROM conversion_action WHERE conversion_action.status != 'REMOVED'
+        """)
+        out = []
+        for r in rows:
+            a = r.get("conversionAction", {})
+            out.append({
+                "id": str(a.get("id")), "name": a.get("name") or "(sin nombre)", "status": a.get("status"),
+                "type": a.get("type"), "category": a.get("category"),
+                "primary_for_goal": bool(a.get("primaryForGoal")),
+                "lookback_days": _int_or_none(a.get("clickThroughLookbackWindowDays")),
+            })
+        return out
+    block("conversion_actions", conversion_actions)
+
+    def conversion_action_metrics():
+        rows = _search(customer_id, f"""
+            SELECT segments.conversion_action_name, metrics.conversions, metrics.conversions_value
+            FROM customer WHERE {between}
+        """)
+        out = {}
+        for r in rows:
+            name = r.get("segments", {}).get("conversionActionName")
+            m = r.get("metrics", {})
+            if name:
+                cur = out.setdefault(name, {"conversions": 0.0, "value": 0.0})
+                cur["conversions"] += _float_or_none(m.get("conversions")) or 0
+                cur["value"] += _float_or_none(m.get("conversionsValue")) or 0
+        return out
+    block("conversion_action_metrics", conversion_action_metrics)
+
+    def search_terms():
+        rows = _search(customer_id, f"""
+            SELECT search_term_view.search_term, campaign.id, metrics.cost_micros, metrics.conversions, metrics.clicks
+            FROM search_term_view
+            WHERE {between} AND metrics.cost_micros > 0
+            ORDER BY metrics.cost_micros DESC LIMIT 1000
+        """)
+        return [{
+            "term": r.get("searchTermView", {}).get("searchTerm") or "",
+            "campaign_id": str(r.get("campaign", {}).get("id")),
+            "cost": _micros_to_units(_int_or_none(r.get("metrics", {}).get("costMicros"))) or 0,
+            "conversions": _float_or_none(r.get("metrics", {}).get("conversions")) or 0,
+        } for r in rows]
+    block("search_terms", search_terms)
+
+    def network_split():
+        rows = _search(customer_id, f"""
+            SELECT campaign.id, segments.ad_network_type, metrics.cost_micros, metrics.conversions
+            FROM campaign
+            WHERE {between} AND campaign.advertising_channel_type = 'SEARCH' AND metrics.cost_micros > 0
+        """)
+        return [{
+            "campaign_id": str(r.get("campaign", {}).get("id")),
+            "network": r.get("segments", {}).get("adNetworkType"),
+            "cost": _micros_to_units(_int_or_none(r.get("metrics", {}).get("costMicros"))) or 0,
+            "conversions": _float_or_none(r.get("metrics", {}).get("conversions")) or 0,
+        } for r in rows]
+    block("network_split", network_split)
+
+    def keywords():
+        rows = _search(customer_id, f"""
+            SELECT campaign.id, ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type,
+                   ad_group_criterion.quality_info.quality_score, metrics.cost_micros, metrics.conversions
+            FROM keyword_view
+            WHERE {between} AND ad_group_criterion.status = 'ENABLED'
+              AND campaign.status = 'ENABLED' AND ad_group.status = 'ENABLED' AND metrics.cost_micros > 0
+            ORDER BY metrics.cost_micros DESC LIMIT 2000
+        """)
+        out = []
+        for r in rows:
+            crit = r.get("adGroupCriterion", {})
+            out.append({
+                "campaign_id": str(r.get("campaign", {}).get("id")),
+                "text": crit.get("keyword", {}).get("text") or "",
+                "match_type": crit.get("keyword", {}).get("matchType"),
+                "quality_score": _int_or_none(crit.get("qualityInfo", {}).get("qualityScore")),
+                "cost": _micros_to_units(_int_or_none(r.get("metrics", {}).get("costMicros"))) or 0,
+                "conversions": _float_or_none(r.get("metrics", {}).get("conversions")) or 0,
+            })
+        return out
+    block("keywords", keywords)
+
+    def adgroup_keyword_counts():
+        rows = _search(customer_id, """
+            SELECT ad_group.id, ad_group.name
+            FROM ad_group_criterion
+            WHERE ad_group_criterion.type = 'KEYWORD' AND ad_group_criterion.negative = FALSE
+              AND ad_group_criterion.status = 'ENABLED' AND ad_group.status = 'ENABLED' AND campaign.status = 'ENABLED'
+        """)
+        counts = {}
+        for r in rows:
+            ag = r.get("adGroup", {})
+            key = str(ag.get("id"))
+            counts.setdefault(key, {"name": ag.get("name") or key, "keywords": 0})["keywords"] += 1
+        return list(counts.values())
+    block("adgroup_keyword_counts", adgroup_keyword_counts)
+
+    def negatives():
+        rows = _search(customer_id, """
+            SELECT campaign.id, campaign_criterion.keyword.text
+            FROM campaign_criterion
+            WHERE campaign_criterion.type = 'KEYWORD' AND campaign_criterion.negative = TRUE AND campaign.status != 'REMOVED'
+        """)
+        return [{"campaign_id": str(r.get("campaign", {}).get("id")),
+                 "text": r.get("campaignCriterion", {}).get("keyword", {}).get("text") or ""} for r in rows]
+    block("negatives", negatives)
+
+    def lost_is():
+        rows = _search(customer_id, f"""
+            SELECT campaign.id, metrics.search_budget_lost_impression_share
+            FROM campaign
+            WHERE {between} AND campaign.advertising_channel_type = 'SEARCH' AND campaign.status = 'ENABLED'
+        """)
+        return [{"campaign_id": str(r.get("campaign", {}).get("id")),
+                 "budget_lost": _float_or_none(r.get("metrics", {}).get("searchBudgetLostImpressionShare")) or 0} for r in rows]
+    block("lost_is", lost_is)
+
+    def campaign_languages():
+        rows = _search(customer_id, """
+            SELECT campaign.id, campaign_criterion.language.language_constant
+            FROM campaign_criterion
+            WHERE campaign_criterion.type = 'LANGUAGE' AND campaign.status = 'ENABLED'
+        """)
+        return [{"campaign_id": str(r.get("campaign", {}).get("id"))} for r in rows]
+    block("campaign_languages", campaign_languages)
+
+    def assets():
+        out = []
+        for r in _search(customer_id, """
+            SELECT campaign.id, campaign.status, campaign_asset.field_type FROM campaign_asset
+            WHERE campaign_asset.status = 'ENABLED' AND campaign.status = 'ENABLED'
+        """):
+            out.append({"field_type": r.get("campaignAsset", {}).get("fieldType")})
+        for r in _search(customer_id, "SELECT customer_asset.field_type FROM customer_asset WHERE customer_asset.status = 'ENABLED'"):
+            out.append({"field_type": r.get("customerAsset", {}).get("fieldType")})
+        return out
+    block("assets", assets)
+
+    def recommendation_subscriptions():
+        rows = _search(customer_id, "SELECT recommendation_subscription.type, recommendation_subscription.status FROM recommendation_subscription")
+        return [{"type": r.get("recommendationSubscription", {}).get("type"),
+                 "status": r.get("recommendationSubscription", {}).get("status")} for r in rows]
+    block("recommendation_subscriptions", recommendation_subscriptions)
+
+    return data
+
+
+def simulated_audit_data():
+    """Cuenta de hotel inventada con problemas sembrados para ver el flujo
+    completo sin la API: conversiones duplicadas, microconversiones
+    primarias, display en una campaña Search, sin campaña de marca, etc."""
+    camp = lambda i, n, ch, bid, cost, conv, val, imp, **kw: dict(
+        {"id": i, "name": n, "status": "ENABLED", "channel_type": ch, "bidding": bid, "search_partners": False,
+         "display_network": False, "geo_target_type": "PRESENCE_OR_INTEREST", "cost": cost, "conversions": conv,
+         "conv_value": val, "impressions": imp, "clicks": int(imp * 0.03)}, **kw)
+    campaigns = [
+        camp("1", "Hotel Demo - CO:es - Search Genérica", "SEARCH", "MAXIMIZE_CONVERSIONS", 9800, 61, 41200, 310000, search_partners=True, display_network=True),
+        camp("6", "Hotel Demo - CO:es - Search Marca", "SEARCH", "TARGET_ROAS", 1800, 40, 22400, 150000, geo_target_type="PRESENCE"),
+        camp("2", "Hotel Demo - CO:es - Search Todo Incluido", "SEARCH", "TARGET_SPEND", 4300, 18, 9400, 180000, search_partners=True),
+        camp("3", "Hotel Demo - PMAX Reservas", "PERFORMANCE_MAX", "MAXIMIZE_CONVERSION_VALUE", 7600, 52, 38900, 520000, geo_target_type=None),
+        camp("4", "Hotel Demo - Display Remarketing", "DISPLAY", "MAXIMIZE_CONVERSIONS", 1200, 6, 2100, 410000, geo_target_type="PRESENCE"),
+        camp("5", "Hotel Demo - Search Fin de Año", "SEARCH", "TARGET_CPA", 0, 0, 0, 0, geo_target_type="PRESENCE"),
+    ]
+    return {
+        "unavailable": {"recommendation_subscriptions": "Dato de ejemplo: recurso no consultado en modo simulado.", "customer": "Dato de ejemplo: campo no consultado en modo simulado."},
+        "currency": "USD", "account_name": "Hotel Demo (simulada)", "enhanced_conversions": None,
+        "campaigns": campaigns,
+        "conversion_actions": [
+            {"id": "11", "name": "Reserva confirmada (web)", "status": "ENABLED", "type": "WEBPAGE", "category": "PURCHASE", "primary_for_goal": True, "lookback_days": 30},
+            {"id": "12", "name": "GA4 purchase", "status": "ENABLED", "type": "GOOGLE_ANALYTICS_4_PURCHASE", "category": "PURCHASE", "primary_for_goal": True, "lookback_days": 30},
+            {"id": "13", "name": "Clic en WhatsApp", "status": "ENABLED", "type": "WEBPAGE", "category": "CONTACT", "primary_for_goal": True, "lookback_days": 30},
+            {"id": "14", "name": "Ver disponibilidad", "status": "ENABLED", "type": "WEBPAGE", "category": "ENGAGEMENT", "primary_for_goal": False, "lookback_days": 7},
+        ],
+        "conversion_action_metrics": {
+            "Reserva confirmada (web)": {"conversions": 85.0, "value": 91200.0},
+            "GA4 purchase": {"conversions": 40.0, "value": 0.0},
+            "Clic en WhatsApp": {"conversions": 12.0, "value": 0.0},
+        },
+        "search_terms": [
+            {"term": "hotel demo cartagena", "campaign_id": "1", "cost": 1450.0, "conversions": 9.0},
+            {"term": "hotel demo cartagena", "campaign_id": "6", "cost": 800.0, "conversions": 30.0},
+            {"term": "hoteles todo incluido cartagena", "campaign_id": "1", "cost": 1100.0, "conversions": 4.0},
+            {"term": "empleo hotel cartagena", "campaign_id": "1", "cost": 380.0, "conversions": 0.0},
+            {"term": "trabajo en hoteles", "campaign_id": "2", "cost": 290.0, "conversions": 0.0},
+            {"term": "hoteles gratis", "campaign_id": "1", "cost": 210.0, "conversions": 0.0},
+            {"term": "hotel barato cerca del mar", "campaign_id": "2", "cost": 640.0, "conversions": 0.0},
+            {"term": "hotel con piscina cartagena", "campaign_id": "1", "cost": 720.0, "conversions": 5.0},
+        ],
+        "network_split": [
+            {"campaign_id": "1", "network": "SEARCH", "cost": 7900.0, "conversions": 55.0},
+            {"campaign_id": "1", "network": "SEARCH_PARTNERS", "cost": 1900.0, "conversions": 6.0},
+            {"campaign_id": "2", "network": "SEARCH", "cost": 3400.0, "conversions": 14.0},
+            {"campaign_id": "2", "network": "SEARCH_PARTNERS", "cost": 900.0, "conversions": 1.0},
+        ],
+        "keywords": [
+            {"campaign_id": "2", "text": "hotel cartagena", "match_type": "BROAD", "quality_score": 4, "cost": 1500.0, "conversions": 5.0},
+            {"campaign_id": "2", "text": "hoteles todo incluido", "match_type": "BROAD", "quality_score": 6, "cost": 1100.0, "conversions": 7.0},
+            {"campaign_id": "1", "text": "hotel demo", "match_type": "EXACT", "quality_score": 9, "cost": 900.0, "conversions": 11.0},
+            {"campaign_id": "1", "text": "hotel centro historico", "match_type": "PHRASE", "quality_score": 3, "cost": 420.0, "conversions": 1.0},
+        ],
+        "adgroup_keyword_counts": [{"name": "Genéricas Cartagena", "keywords": 34}, {"name": "Marca", "keywords": 6}],
+        "negatives": [{"campaign_id": "1", "text": "piscina"}],
+        "lost_is": [{"campaign_id": "1", "budget_lost": 0.27}, {"campaign_id": "2", "budget_lost": 0.04}],
+        "campaign_languages": [{"campaign_id": "1"}, {"campaign_id": "2"}],
+        "assets": [{"field_type": "SITELINK"}, {"field_type": "SITELINK"}, {"field_type": "CALLOUT"}],
+        "recommendation_subscriptions": None,
+    }

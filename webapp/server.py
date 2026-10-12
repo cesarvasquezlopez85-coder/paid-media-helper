@@ -39,6 +39,7 @@ from collections import defaultdict
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import account_audit
 import bigquery_client
 import claude_client
 import google_ads_client
@@ -182,6 +183,10 @@ WRITE_RATE_LIMIT = (30, 60)
 # conservador que el de escritura normal. Por usuario, no por IP.
 _ai_limiter = RateLimiter()
 AI_RATE_LIMIT = (10, 3600)
+# Cada auditoría hace ~12 consultas a Google Ads, que comparten la cuota del
+# developer token de todo el equipo — por eso su propio tope por usuario.
+_audit_limiter = RateLimiter()
+AUDIT_RATE_LIMIT = (10, 3600)
 
 # /api/change-password verifica una contraseña actual, igual que el login —
 # por usuario ya autenticado (no por IP), para frenar fuerza bruta contra la
@@ -595,6 +600,15 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_google_ads_recommendation_dismiss(payload)
+        elif path == "/api/google-ads/audit":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_audit(payload)
+        elif path == "/api/ai/analizar-auditoria":
+            # Igual que el análisis de Rendimiento: prueba interna solo para admins.
+            if not self._require_admin_json():
+                return
+            self._handle_ai_analizar_auditoria(payload)
         elif path == "/api/ai/analizar-rendimiento":
             # Prueba interna — solo administradores mientras se valida el
             # costo/calidad del análisis, antes de abrirlo a todos los usuarios.
@@ -1862,6 +1876,79 @@ class Handler(SimpleHTTPRequestHandler):
     # y los hallazgos que ya calculó localmente (engine.js) y recibe de
     # vuelta una lectura priorizada en prosa. No toca Google Ads ni datos de
     # cuenta reales, así que no necesita _user_can_access_account.
+    # Auditoría de cuenta: solo lectura. Trae los datos con ~12 consultas,
+    # corre las reglas de account_audit.py y devuelve hallazgos + puntaje.
+    def _handle_google_ads_audit(self, payload):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not _audit_limiter.allow(f"user:{user['id']}", *AUDIT_RATE_LIMIT):
+            self._send_json(429, {"error": "Alcanzaste el límite de auditorías por esta hora. Intenta más tarde."})
+            return
+        customer_id = str(payload.get("customer_id") or "").strip()
+        try:
+            days = int(payload.get("days") or 30)
+        except (TypeError, ValueError):
+            days = 30
+        days = days if days in (30, 60, 90) else 30
+        raw_ctx = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        ctx = {k: str(raw_ctx.get(k) or "").strip()[:300] for k in
+               ("hotel_name", "brand_campaign_words", "brand_terms")}
+        ctx["goal"] = raw_ctx.get("goal") if raw_ctx.get("goal") in ("roas", "cpa", "volumen") else "volumen"
+        try:
+            ctx["target"] = float(raw_ctx.get("target") or 0)
+        except (TypeError, ValueError):
+            ctx["target"] = 0.0
+
+        date_to = datetime.date.today() - datetime.timedelta(days=1)
+        date_from = date_to - datetime.timedelta(days=days - 1)
+
+        if not google_ads_client.is_configured():
+            data, simulated = google_ads_client.simulated_audit_data(), True
+        else:
+            if not customer_id.isdigit():
+                self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+                return
+            if not self._user_can_access_account(user, customer_id):
+                self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+                return
+            try:
+                data, simulated = google_ads_client.fetch_audit_data(customer_id, date_from.isoformat(), date_to.isoformat()), False
+            except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+                self._send_google_ads_error(e)
+                return
+
+        report = account_audit.run_audit(data, ctx, days)
+        report["meta"] = {
+            "account_name": data.get("account_name") or "", "customer_id": customer_id,
+            "date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
+            "generated_at": datetime.datetime.now().isoformat(timespec="seconds"), "context": ctx,
+            "unavailable": data.get("unavailable") or {},
+        }
+        self._send_json(200, {"report": report, "simulated": simulated})
+
+    def _handle_ai_analizar_auditoria(self, payload):
+        user = self._get_current_user()
+        if not claude_client.is_configured():
+            self._send_json(503, {"error": "La integración con Claude no está configurada en el servidor (falta ANTHROPIC_API_KEY)."})
+            return
+        if not _ai_limiter.allow(f"user:{user['id']}", *AI_RATE_LIMIT):
+            self._send_json(429, {"error": "Alcanzaste el límite de análisis con IA por esta hora. Intenta más tarde."})
+            return
+        resumen, findings = payload.get("resumen"), payload.get("findings")
+        if not isinstance(resumen, dict) or not isinstance(findings, list):
+            self._send_json(400, {"error": "Faltan los datos de la auditoría (resumen/findings) para analizar."})
+            return
+        no_verificables = payload.get("no_verificables") if isinstance(payload.get("no_verificables"), list) else []
+        contexto = payload.get("contexto") if isinstance(payload.get("contexto"), dict) else {}
+        try:
+            narrativa = claude_client.analizar_auditoria(resumen, findings, no_verificables, contexto)
+            self._send_json(200, {"narrativa": narrativa})
+        except Exception as e:  # noqa: BLE001
+            print(f"[claude-error] {e}", flush=True)
+            self._send_json(502, {"error": "No se pudo generar el análisis con IA. Intenta de nuevo en unos minutos."})
+
     def _handle_ai_analizar_rendimiento(self, payload):
         user = self._get_current_user()
         if not claude_client.is_configured():
