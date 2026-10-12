@@ -239,13 +239,22 @@ def run_audit(data, ctx, days):
                 f"La conversión '{booking['name']}' usa {int(booking['lookback_days'])} días; la decisión de reservar suele tardar más.",
                 f"Considerar {T['min_lookback_days']} días o más."))
 
-    enhanced = data.get("enhanced_conversions")  # True / False / None (no verificable)
+    # Google no devuelve por API si las conversiones mejoradas están activadas
+    # (omite el campo cuando están apagadas), así que casi siempre llega None.
+    # En ese caso vale lo que declaró el equipo en el cuestionario: "si" / "no";
+    # "nose" o vacío = no verificable. Si la API sí responde, manda la API.
+    enhanced = data.get("enhanced_conversions")  # True / False / None
+    manual = {"si": True, "no": False}.get((ctx.get("enhanced_conversions") or "").strip().lower())
+    declared_by_user = enhanced is None and manual is not None
+    if enhanced is None:
+        enhanced = manual
     if enhanced is False:
         findings.append(_finding("A9", "Conversiones", "critico", "Conversiones mejoradas no activadas",
-            "Sin conversiones mejoradas se pierden reservas que Google no puede atribuir por los cambios de privacidad.",
-            "Activarlas en Google Ads > Objetivos > Configuración de conversiones."))
+            "Sin conversiones mejoradas se pierden reservas que Google no puede atribuir por los cambios de privacidad."
+            + (" (Dato indicado en el cuestionario: Google no lo entrega por API.)" if declared_by_user else ""),
+            "Activarlas en Google Ads > Objetivos > Conversiones > Configuración de conversiones."))
     elif enhanced is None:
-        nv("A9", "Conversiones mejoradas", "Google no devuelve por API si están activadas en esta cuenta" + (f" ({unavailable['customer']})" if unavailable.get("customer") else "") + ". Revisarlo en Google Ads > Objetivos > Conversiones > Configuración.")
+        nv("A9", "Conversiones mejoradas", "Google no devuelve por API si están activadas en esta cuenta" + (f" ({unavailable['customer']})" if unavailable.get("customer") else "") + ". Revisarlo en Google Ads > Objetivos > Conversiones > Configuración y responder la pregunta del cuestionario para que cuente en el puntaje.")
 
     # ---- B. Redes y segmentación -----------------------------------------
     search_enabled = [c for c in search_campaigns if c.get("status") == "ENABLED"]

@@ -139,7 +139,7 @@ const state = {
     // Cuestionario del hotel — ver auditoria_reglas_propuesta.md, sección 1.
     ctx: {
       hotel_name: '', brand_terms: '', brand_campaign_words: 'marca, brand, branded, brnd',
-      goal: 'roas', target: '',
+      goal: 'roas', target: '', enhanced_conversions: 'nose',
     },
     ai: { status: 'idle', narrativa: null, error: null },
   },
@@ -7568,6 +7568,7 @@ function revokeAdminAccess(userId, customerId) {
 // arma el informe descargable (HTML autocontenido y Markdown).
 
 const AUDIT_SEVERITY_LABELS = { critico: 'Crítico', advertencia: 'Advertencia', info: 'Info' };
+const AUDIT_ENHANCED = { nose: 'No sé (no verificar)', si: 'Sí, activadas', no: 'No, desactivadas' };
 const AUDIT_GOALS = { roas: 'ROAS objetivo (%)', cpa: 'CPA objetivo', volumen: 'Volumen de reservas' };
 
 function auditMoney(v, cur) {
@@ -7999,6 +8000,8 @@ function renderAuditForm() {
       <div class="field"><label>Nombre del hotel (para el informe)</label>${txt('hotel_name', 'ej. Hotel Estelar Cartagena')}</div>
       <div class="field"><label>Términos de marca en las búsquedas</label>${txt('brand_terms', 'ej. estelar, hotel estelar', 220)}</div>
       <div class="field"><label>Palabras que marcan una campaña de marca</label>${txt('brand_campaign_words', 'marca, brand, branded, brnd', 220)}</div>
+      <div class="field"><label>¿Conversiones mejoradas activadas?</label>${sel('enhanced_conversions', AUDIT_ENHANCED)}
+        <span class="field-hint">Google no lo entrega por API. Míralo en Objetivos &gt; Conversiones &gt; Configuración.</span></div>
       <div class="field"><label>Meta principal</label>${sel('goal', AUDIT_GOALS)}</div>
       ${c.goal !== 'volumen' ? `<div class="field"><label>${c.goal === 'roas' ? 'ROAS objetivo (ej. 450 = 450%)' : 'CPA objetivo'}</label>${txt('target', c.goal === 'roas' ? '450' : '25', 110)}</div>` : ''}
       <button class="btn-accent" data-action="audit-run" ${s.status === 'loading' ? 'disabled' : ''}>${s.report ? 'Auditar de nuevo' : 'Auditar cuenta'}</button>

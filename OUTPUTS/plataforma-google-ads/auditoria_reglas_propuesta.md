@@ -14,6 +14,7 @@ Solo quedan los campos que cambian el resultado de alguna regla (se quitaron tip
 2. Términos de marca en las búsquedas, es decir el nombre del hotel (regla C2).
 3. Palabras que marcan una campaña de marca en su nombre; por defecto `marca, brand, branded, brnd`, igual que en Rendimiento (reglas C1 y G2).
 4. Meta principal: ROAS objetivo, CPA objetivo o volumen de reservas, con su valor (reglas A7, A8, C5 y G1).
+5. ¿Conversiones mejoradas activadas? Sí, No o No sé (regla A9). Google no entrega ese dato por API, así que la persona que audita lo mira en Google Ads (Objetivos > Conversiones > Configuración) y lo declara: "No" resta 10 puntos; "No sé" deja A9 como no verificable, sin restar.
 
 ## 2. Reglas
 
@@ -123,7 +124,7 @@ Pesos del puntaje aplicados: Crítico resta 10, Advertencia resta 5, Info no res
 
 **Probado contra una cuenta real (solo lectura, Hotel Neptuno):** las 12 consultas funcionan. Lo que se aprendió:
 - La consulta de activos de campaña exigía `campaign.status` en el SELECT; ya corregida.
-- **A9 (conversiones mejoradas):** Google no devuelve por API si están activadas (omite el campo cuando está apagado), así que queda siempre como "no verificable" con la indicación de revisarlo a mano. No resta puntos.
+- **A9 (conversiones mejoradas):** Google no devuelve por API si están activadas (omite el campo cuando está apagado). Desde 2026-10-12 se pregunta en el cuestionario: con "No" resta 10 puntos (marcado como dato indicado por el equipo); con "No sé" queda como no verificable y no resta. Si la API algún día responde, manda la API.
 - **F1:** además de los tipos que se esperaban, la cuenta real tenía activadas `RAISE_TARGET_CPA` y `LOWER_TARGET_ROAS` (ajustan solos el CPA o ROAS objetivo); se agregaron a la lista de riesgosos. En el informe salen con nombre en español.
 - Las conversiones con estado `HIDDEN` (importaciones antiguas de Universal Analytics) no se evalúan, solo las `ENABLED`.
 - **Marca:** el nombre del hotel suele estar en todos los nombres de campaña, así que el cuestionario separa dos campos: las palabras que marcan una campaña de marca (por defecto `marca, brand, branded, brnd`) y los términos de marca de las búsquedas (nombre del hotel).
