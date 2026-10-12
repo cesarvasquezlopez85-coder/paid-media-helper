@@ -15,7 +15,7 @@ queda en "no_verificables" para no inventar un Crítico con un campo dudoso.
 import re
 
 SEVERITIES = ("critico", "advertencia", "info")
-SEVERITY_POINTS = {"critico": 10, "advertencia": 5, "info": 0}
+SEVERITY_POINTS = {"critico": 5, "advertencia": 2, "info": 0}
 
 THRESHOLDS = {
     "partner_spend_share": 0.10,       # B2: socios > 10% del gasto de Search
@@ -522,6 +522,7 @@ def run_audit(data, ctx, days):
         "findings": findings,
         "not_verifiable": not_verifiable,
         "score": {"total": total_score, "label": label, "by_area": by_area,
+                  "weights": {"critico": SEVERITY_POINTS["critico"], "advertencia": SEVERITY_POINTS["advertencia"]},
                   "critical": n_crit, "warnings": sum(f["severity"] == "advertencia" for f in findings),
                   "info": sum(f["severity"] == "info" for f in findings)},
         "summary": {

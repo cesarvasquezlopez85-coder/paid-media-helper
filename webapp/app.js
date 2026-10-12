@@ -7930,7 +7930,7 @@ function auditReportBodyHtml() {
           <div class="ar-verdict">
             <div class="ar-verdict-k" style="color:${ring}"><span class="ar-verdict-i">!</span>Puntaje de salud · ${e(sc.label)}</div>
             <div class="ar-verdict-t">${e(verdict)}</div>
-            <div class="ar-verdict-s">Cada crítico resta 10 puntos y cada advertencia 5.</div>
+            <div class="ar-verdict-s">Cada crítico resta ${sc.weights.critico} puntos y cada advertencia ${sc.weights.advertencia}.</div>
           </div>
         </div>
         <div class="ar-bars">${bars}</div>
