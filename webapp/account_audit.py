@@ -36,6 +36,8 @@ THRESHOLDS = {
     "pmax_min_headlines": 5,           # P6
     "pmax_min_descriptions": 4,        # P6
     "pmax_lost_is_budget": 0.15,       # P12
+    "pmax_brand_share": 0.15,          # P9: impresiones de categorías con la marca
+    "pmax_changes_14d": 3,             # P11: más de N cambios en 14 días
     "roas_goal_tolerance": 0.90,       # G1
     "cpa_goal_tolerance": 1.10,        # G1 (meta de CPA)
 }
@@ -575,6 +577,61 @@ def run_audit(data, ctx, days):
                 findings.append(_finding("P12", AREA_P, "advertencia", "Performance Max rentable que pierde impresiones por presupuesto",
                     "Hay demanda que estas campañas no alcanzan a captar porque el presupuesto diario se agota.",
                     "Subir el presupuesto o redistribuirlo desde campañas menos rentables.", flagged))
+
+        # P9 — marca dentro de PMax (informativa)
+        lists_ = data.get("pmax_brand_lists")
+        cats = data.get("pmax_categories")
+        if not brand_terms:
+            nv("P9", "Marca dentro de Performance Max", "Falta el nombre del hotel o los términos de marca en el cuestionario.")
+        elif lists_ is None or cats is None:
+            nv("P9", "Marca dentro de Performance Max", "No se pudieron leer las exclusiones de marca o las categorías de búsqueda: "
+               + (unavailable.get("pmax_brand_lists") or unavailable.get("pmax_categories") or "sin detalle"))
+        else:
+            excluded = {r_["campaign_id"] for r_ in lists_ if r_.get("negative")}
+            leaks = []
+            for c in pmax_camps:
+                if c["id"] in excluded:
+                    continue
+                rows_ = [x for x in cats if x["campaign_id"] == c["id"]]
+                total_i = sum(_num(x["impressions"]) for x in rows_)
+                brand_i = sum(_num(x["impressions"]) for x in rows_ if any(w in (x["term"] or "").lower() for w in brand_terms))
+                if total_i > 0 and brand_i / total_i > T["pmax_brand_share"]:
+                    leaks.append(f"{c['name']}: {brand_i / total_i:.0%} de las impresiones de categorías de búsqueda son de la marca")
+            if leaks:
+                findings.append(_finding("P9", AREA_P, "info", "Performance Max recibe búsquedas de la marca y no la tiene excluida",
+                    "Las búsquedas del nombre del hotel suelen captarse más barato con la campaña de marca de Search; PMax puede estar quedándose con parte de ellas. Solo informativo: los datos de PMax no traen costo por categoría.",
+                    "Evaluar agregar una exclusión de marca a la campaña PMax.", leaks))
+
+        # P10 — dónde se muestra PMax (informativa; la vista solo trae impresiones)
+        plc = data.get("pmax_placements")
+        if plc is None:
+            nv("P10", "Dónde se muestra Performance Max", "No se pudo leer el reporte de ubicaciones: " + unavailable.get("pmax_placements", "sin detalle"))
+        else:
+            tot = sum(plc.values())
+            if tot > 0:
+                names = {"WEBSITE": "sitios web (Display)", "MOBILE_APPLICATION": "apps móviles", "YOUTUBE_VIDEO": "YouTube",
+                         "GOOGLE_PRODUCTS": "productos de Google", "UNKNOWN": "otras"}
+                lines = [f"{names.get(k, k.lower())}: {v / tot:.0%} de las impresiones" for k, v in sorted(plc.items(), key=lambda kv: -kv[1]) if v / tot >= 0.01]
+                findings.append(_finding("P10", AREA_P, "info", "Dónde se muestra Performance Max",
+                    "Reparto de las impresiones por tipo de ubicación. Google no entrega costo ni conversiones por ubicación, así que no se puede saber cuál rinde mejor.",
+                    "Si una ubicación te parece ajena a un hotel, revisa las exclusiones de ubicaciones en Google Ads.", lines))
+
+        # P11 — cambios frecuentes de presupuesto o de puja
+        chg = data.get("pmax_changes")
+        if chg is None:
+            nv("P11", "Cambios frecuentes de presupuesto o de puja", "No se pudo leer el historial de cambios: " + unavailable.get("pmax_changes", "sin detalle"))
+        else:
+            bid_re = re.compile(r"target|bidding|maximize|roas|cpa", re.I)
+            frequent = []
+            for c in pmax_camps:
+                budget_n = sum(1 for e in chg if e.get("type") == "CAMPAIGN_BUDGET" and c.get("budget_resource") and e.get("resource") == c["budget_resource"])
+                bid_n = sum(1 for e in chg if e.get("type") == "CAMPAIGN" and (e.get("resource") or "").endswith("/campaigns/" + c["id"]) and bid_re.search(e.get("fields") or ""))
+                if budget_n + bid_n > T["pmax_changes_14d"]:
+                    frequent.append(f"{c['name']}: {budget_n + bid_n} cambios en 14 días (presupuesto {budget_n}, puja {bid_n})")
+            if frequent:
+                findings.append(_finding("P11", AREA_P, "advertencia", "Cambios frecuentes de presupuesto o de puja en Performance Max",
+                    f"Más de {T['pmax_changes_14d']} cambios en 14 días: cada cambio fuerte puede reiniciar parte del aprendizaje y hace difícil saber qué funcionó.",
+                    "Agrupar los cambios y esperar una o dos semanas entre ajustes grandes.", frequent))
 
     # ---- G. Rendimiento contra la meta -----------------------------------
     goal, target = ctx.get("goal"), _num(ctx.get("target"))

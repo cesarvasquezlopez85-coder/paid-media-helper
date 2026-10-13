@@ -2260,7 +2260,7 @@ def fetch_audit_data(customer_id, date_from, date_to):
     campaigns = []
     for r in _search(customer_id, f"""
         SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type,
-               campaign.bidding_strategy_type,
+               campaign.bidding_strategy_type, campaign.campaign_budget,
                campaign.network_settings.target_google_search,
                campaign.network_settings.target_search_network,
                campaign.network_settings.target_content_network,
@@ -2276,6 +2276,7 @@ def fetch_audit_data(customer_id, date_from, date_to):
             "id": str(c.get("id")), "name": c.get("name") or "(sin nombre)", "status": c.get("status") or "UNKNOWN",
             "channel_type": c.get("advertisingChannelType") or "UNKNOWN",
             "bidding": c.get("biddingStrategyType") or "UNSPECIFIED",
+            "budget_resource": c.get("campaignBudget"),
             "search_partners": bool(ns.get("targetSearchNetwork")),
             "display_network": bool(ns.get("targetContentNetwork")),
             "geo_target_type": c.get("geoTargetTypeSetting", {}).get("positiveGeoTargetType"),
@@ -2510,6 +2511,56 @@ def fetch_audit_data(customer_id, date_from, date_to):
                      "budget_lost": _float_or_none(r.get("metrics", {}).get("searchBudgetLostImpressionShare")) or 0} for r in rows]
         block("pmax_lost_is", pmax_lost_is)
 
+        # P9: exclusiones de marca de cada campaña (BRAND_LIST con negative=True) y
+        # categorías de búsqueda con sus impresiones (el costo no viene en ese recurso).
+        def pmax_brand_lists():
+            rows = _search(customer_id, """
+                SELECT campaign.id, campaign.status, campaign_criterion.negative
+                FROM campaign_criterion
+                WHERE campaign_criterion.type = 'BRAND_LIST' AND campaign.status = 'ENABLED'
+            """)
+            return [{"campaign_id": str(r.get("campaign", {}).get("id")),
+                     "negative": bool(r.get("campaignCriterion", {}).get("negative"))} for r in rows]
+        block("pmax_brand_lists", pmax_brand_lists)
+
+        def pmax_categories():
+            return [{"campaign_id": r["campaign_id"], "term": r["term"], "impressions": r["impr"]}
+                    for r in fetch_pmax_search_term_insights(customer_id, date_from, date_to)]
+        block("pmax_categories", pmax_categories)
+
+        # P10: reparto de impresiones por tipo de ubicación. Esta vista no admite
+        # costo, clics ni conversiones: solo impresiones.
+        def pmax_placements():
+            rows = _search(customer_id, f"""
+                SELECT performance_max_placement_view.placement_type, metrics.impressions
+                FROM performance_max_placement_view WHERE {between}
+            """)
+            out = {}
+            for r in rows:
+                t = r.get("performanceMaxPlacementView", {}).get("placementType") or "UNKNOWN"
+                out[t] = out.get(t, 0) + (_int_or_none(r.get("metrics", {}).get("impressions")) or 0)
+            return out
+        block("pmax_placements", pmax_placements)
+
+        # P11: cambios de presupuesto o puja de los últimos 14 días (el historial de Google
+        # guarda 30 como máximo). No se guarda quién hizo el cambio.
+        def pmax_changes():
+            d_to = datetime.date.fromisoformat(date_to)
+            d_from = max(datetime.date.fromisoformat(date_from), d_to - datetime.timedelta(days=13))
+            rows = _search(customer_id, f"""
+                SELECT change_event.change_date_time, change_event.change_resource_type,
+                       change_event.change_resource_name, change_event.changed_fields
+                FROM change_event
+                WHERE change_event.change_date_time >= '{d_from.isoformat()} 00:00:00'
+                  AND change_event.change_date_time <= '{d_to.isoformat()} 23:59:59'
+                  AND change_event.change_resource_type IN ('CAMPAIGN_BUDGET', 'CAMPAIGN')
+                ORDER BY change_event.change_date_time DESC LIMIT 1000
+            """)
+            return [{"type": r.get("changeEvent", {}).get("changeResourceType"),
+                     "resource": r.get("changeEvent", {}).get("changeResourceName"),
+                     "fields": r.get("changeEvent", {}).get("changedFields") or ""} for r in rows]
+        block("pmax_changes", pmax_changes)
+
     return data
 
 
@@ -2526,7 +2577,7 @@ def simulated_audit_data():
         camp("6", "Hotel Demo - CO:es - Search Marca", "SEARCH", "TARGET_ROAS", 1800, 40, 22400, 150000, geo_target_type="PRESENCE"),
         camp("7", "Hotel Demo - PMAX Todo Incluido", "PERFORMANCE_MAX", "MAXIMIZE_CONVERSIONS", 900, 8, 0, 90000, geo_target_type=None),
         camp("2", "Hotel Demo - CO:es - Search Todo Incluido", "SEARCH", "TARGET_SPEND", 4300, 18, 9400, 180000, search_partners=True),
-        camp("3", "Hotel Demo - PMAX Reservas", "PERFORMANCE_MAX", "MAXIMIZE_CONVERSION_VALUE", 7600, 52, 38900, 520000, geo_target_type=None),
+        camp("3", "Hotel Demo - PMAX Reservas", "PERFORMANCE_MAX", "MAXIMIZE_CONVERSION_VALUE", 7600, 52, 38900, 520000, geo_target_type=None, budget_resource="customers/1/campaignBudgets/3"),
         camp("4", "Hotel Demo - Display Remarketing", "DISPLAY", "MAXIMIZE_CONVERSIONS", 1200, 6, 2100, 410000, geo_target_type="PRESENCE"),
         camp("5", "Hotel Demo - Search Fin de Año", "SEARCH", "TARGET_CPA", 0, 0, 0, 0, geo_target_type="PRESENCE"),
     ]
@@ -2592,4 +2643,15 @@ def simulated_audit_data():
         ),
         "pmax_signals": [{"asset_group_id": "g2"}],
         "pmax_lost_is": [{"campaign_id": "3", "budget_lost": 0.22}, {"campaign_id": "7", "budget_lost": 0.02}],
+        "pmax_brand_lists": [],
+        "pmax_categories": [
+            {"campaign_id": "3", "term": "hotel demo cartagena", "impressions": 4200},
+            {"campaign_id": "3", "term": "hoteles en cartagena", "impressions": 6100},
+            {"campaign_id": "3", "term": "hotel todo incluido", "impressions": 3000},
+        ],
+        "pmax_placements": {"WEBSITE": 52000, "MOBILE_APPLICATION": 31000, "YOUTUBE_VIDEO": 17000},
+        "pmax_changes": (
+            [{"type": "CAMPAIGN_BUDGET", "resource": "customers/1/campaignBudgets/3", "fields": "amountMicros"}] * 4
+            + [{"type": "CAMPAIGN", "resource": "customers/1/campaigns/3", "fields": "maximizeConversionValue.targetRoas"}] * 2
+        ),
     }

@@ -96,3 +96,15 @@ Construidas en `webapp/account_audit.py` (reglas) y `fetch_audit_data` en `webap
 
 **Pendiente:** P8, P9, P10 y P11 (los de "Verificar"), y revisar los umbrales de P2, P6 y P12 en 3 o 4 hoteles que conozcas bien.
 
+## 8. Segunda entrega (2026-10-13): P9, P10 y P11
+
+Construidas tras probar los campos contra cuentas reales con PMax (solo lectura). Suman 4 consultas más cuando hay PMax.
+
+- **P9 (Info):** marca dentro de PMax. Lee las exclusiones de marca de la campaña (criterios `BRAND_LIST` con `negative`) y las categorías de búsqueda con sus impresiones. Aparece si más del 15% de las impresiones de categorías son de la marca y la campaña no tiene exclusión de marca. Necesita los términos de marca del cuestionario; sin ellos queda como no verificable. No resta puntos.
+- **P10 (Info):** dónde se muestra PMax. Reparto de impresiones por tipo de ubicación (sitios web, apps móviles, YouTube, productos de Google). **La vista solo permite impresiones**: no trae costo, clics ni conversiones, así que no se puede comparar el CPA contra Search como se había pensado. No resta puntos.
+- **P11 (Advertencia):** más de 3 cambios en 14 días de presupuesto o de puja (objetivo de ROAS o CPA, estrategia) por campaña PMax. Usa el historial de cambios de Google, que guarda 30 días como máximo; no se guarda quién hizo cada cambio.
+
+**Siguen fuera:**
+- **P4 original** (recursos con rendimiento bajo): la etiqueta de rendimiento no existe en la API v25. Se puede leer el estado de cada recurso (`primary_status`: elegible, rechazado, limitado), pero en las cuentas probadas todos estaban elegibles, así que no se confirmó cómo se ve uno rechazado. Si se hace, sería otra regla: "recursos rechazados o con servicio limitado".
+- **P8 original** (expansión de URL sin exclusiones): el campo de expansión de URL no existe en la API v25. Lo más cercano es `campaign.asset_automation_settings` con el tipo `FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION` (activado o no), que controla los textos automáticos de las páginas de expansión, no la expansión misma. Si se hace, sería informativa y con ese nombre.
+
