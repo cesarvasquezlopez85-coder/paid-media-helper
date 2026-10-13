@@ -31,6 +31,11 @@ THRESHOLDS = {
     "low_quality_min_spend": 30,       # D5
     "min_lookback_days": 30,           # A10
     "min_sitelinks": 4,                # E3
+    "pmax_min_conv_30d": 30,           # P2
+    "pmax_min_images": 2,              # P6: por formato (horizontal, cuadrada, vertical)
+    "pmax_min_headlines": 5,           # P6
+    "pmax_min_descriptions": 4,        # P6
+    "pmax_lost_is_budget": 0.15,       # P12
     "roas_goal_tolerance": 0.90,       # G1
     "cpa_goal_tolerance": 1.10,        # G1 (meta de CPA)
 }
@@ -82,7 +87,7 @@ NEGATIVE_THEMES = {
 }
 
 DEFAULT_BRAND_CAMPAIGN_WORDS = ("marca", "brand", "branded", "brnd")
-AREAS = ["Conversiones", "Redes y segmentación", "Estructura y puja", "Palabras clave y términos", "Activos", "Automatización", "Rendimiento contra la meta"]
+AREAS = ["Conversiones", "Redes y segmentación", "Estructura y puja", "Palabras clave y términos", "Activos", "Automatización", "Performance Max", "Rendimiento contra la meta"]
 
 
 def _num(v):
@@ -330,7 +335,7 @@ def run_audit(data, ctx, days):
             "Para un hotel el objetivo es la reserva; maximizar clics trae tráfico sin importar si convierte.",
             "Pasarlas a una puja por conversiones o por valor de conversión.", maxclicks))
 
-    low_data = [c["name"] for c in enabled if c.get("bidding") in SMART_BIDDING and _num(c.get("conversions")) * 30.0 / max(days, 1) < T["smart_bidding_min_conv_30d"] and _num(c.get("cost")) > 0]
+    low_data = [c["name"] for c in enabled if c.get("channel_type") != "PERFORMANCE_MAX" and c.get("bidding") in SMART_BIDDING and _num(c.get("conversions")) * 30.0 / max(days, 1) < T["smart_bidding_min_conv_30d"] and _num(c.get("cost")) > 0]
     if low_data:
         findings.append(_finding("C4", "Estructura y puja", "info", "Puja inteligente con muy pocas conversiones",
             f"Estas campañas tienen menos de {T['smart_bidding_min_conv_30d']} conversiones al mes; la puja inteligente aprende poco con tan pocos datos.",
@@ -457,6 +462,120 @@ def run_audit(data, ctx, days):
                 "Algunas pueden subir presupuestos, cambiar pujas o agregar palabras amplias sin que nadie lo apruebe.",
                 "Desactivarlas en Google Ads > Recomendaciones > Aplicar automáticamente.", [AUTO_APPLY_LABELS.get(t, t) for t in risky]))
 
+    # ---- P. Performance Max ----------------------------------------------
+    # Solo si hay campañas PMax activas. Ver auditoria_pmax_reglas_propuesta.md.
+    pmax_camps = [c for c in enabled if c.get("channel_type") == "PERFORMANCE_MAX"]
+    pmax_present = bool(pmax_camps)
+    if pmax_present:
+        AREA_P = "Performance Max"
+        creative_sev = "info" if (ctx.get("hotel_feed") or "").strip().lower() == "si" else "advertencia"
+        feed_note = " Como indicaste que usas feed de Hotel Center, se muestra solo como informativo." if creative_sev == "info" else ""
+
+        # P1 / P1b — sin valor de conversión (no se repite si A7/A8 ya lo dijeron)
+        no_value = [c for c in pmax_camps if _num(c.get("conversions")) > 0 and _num(c.get("conv_value")) == 0]
+        if no_value:
+            names = [c["name"] for c in no_value]
+            prior = next((f for f in findings if f["id"] in ("A7", "A8")), None)
+            if prior is not None:
+                prior["evidence"] = (prior["evidence"] + ["PMax afectadas: " + ", ".join(names)])[:10]
+            else:
+                value_bid = [c["name"] for c in no_value if c.get("bidding") in VALUE_BIDDING]
+                if value_bid:
+                    findings.append(_finding("P1", AREA_P, "critico", "Performance Max puja por valor y la reserva no trae valor",
+                        "Sin valor de conversión, la puja por valor no tiene qué optimizar y el ROAS no se puede calcular.",
+                        "Pasar el valor de la reserva desde la etiqueta o configurar un valor por defecto.", value_bid))
+                else:
+                    findings.append(_finding("P1b", AREA_P, "advertencia", "Performance Max puja por conversiones y la reserva no trae valor",
+                        "No se puede medir el ROAS ni priorizar las reservas de mayor valor.",
+                        "Pasar el valor de la reserva desde la etiqueta.", names))
+
+        # P2 — pocas conversiones para aprender
+        low_conv = [f"{c['name']} ({_num(c.get('conversions')) * 30.0 / max(days, 1):.0f} conversiones al mes)"
+                    for c in pmax_camps if _num(c.get("cost")) > 0 and _num(c.get("conversions")) * 30.0 / max(days, 1) < T["pmax_min_conv_30d"]]
+        if low_conv:
+            findings.append(_finding("P2", AREA_P, "advertencia", "Performance Max con muy pocas conversiones para aprender",
+                f"Con menos de {T['pmax_min_conv_30d']} conversiones al mes la puja tiene pocos datos y rinde de forma irregular (umbral orientativo: Google no publica un mínimo estricto).",
+                "Agrupar campañas parecidas, ampliar el presupuesto o medir una conversión más temprana como secundaria.", low_conv))
+
+        groups = data.get("pmax_asset_groups")
+        assets = data.get("pmax_assets")
+        signals = data.get("pmax_signals")
+        gname = lambda g: f"{(by_id.get(g['campaign_id']) or {}).get('name', 'campaña')} · {g['name']}"
+
+        if groups is None:
+            nv("P3", "Calidad de los grupos de recursos", "No se pudieron leer los grupos de recursos: " + unavailable.get("pmax_asset_groups", "sin detalle"))
+        else:
+            weak = [f"{gname(g)} ({'Pobre' if g['ad_strength'] == 'POOR' else 'Promedio'})" for g in groups if g.get("ad_strength") in ("POOR", "AVERAGE")]
+            if weak:
+                findings.append(_finding("P3", AREA_P, creative_sev, "Grupos de recursos con calidad baja",
+                    "Google califica estos grupos de recursos como Pobre o Promedio: tienen menos combinaciones de anuncios para probar." + feed_note,
+                    "Agregar títulos, descripciones, imágenes y video hasta llegar a calidad Buena o Excelente.", weak))
+
+        if groups is None or assets is None:
+            nv("P5", "Video propio en los grupos de recursos", "No se pudieron leer los recursos: " + unavailable.get("pmax_assets", unavailable.get("pmax_asset_groups", "sin detalle")))
+            nv("P6", "Imágenes y textos en los grupos de recursos", "No se pudieron leer los recursos: " + unavailable.get("pmax_assets", unavailable.get("pmax_asset_groups", "sin detalle")))
+        else:
+            per = {}
+            for a in assets:
+                d = per.setdefault(a["asset_group_id"], {})
+                d[a["field_type"]] = d.get(a["field_type"], 0) + 1
+            no_video, missing = [], []
+            for g in groups:
+                d = per.get(g["id"], {})
+                if not d.get("YOUTUBE_VIDEO"):
+                    no_video.append(gname(g))
+                gaps = []
+                for ft, label in (("MARKETING_IMAGE", "imágenes horizontales"), ("SQUARE_MARKETING_IMAGE", "imágenes cuadradas"), ("PORTRAIT_MARKETING_IMAGE", "imágenes verticales")):
+                    if d.get(ft, 0) < T["pmax_min_images"]:
+                        gaps.append(f"{label} ({d.get(ft, 0)} de {T['pmax_min_images']})")
+                if d.get("HEADLINE", 0) < T["pmax_min_headlines"]:
+                    gaps.append(f"títulos ({d.get('HEADLINE', 0)} de {T['pmax_min_headlines']})")
+                if d.get("DESCRIPTION", 0) < T["pmax_min_descriptions"]:
+                    gaps.append(f"descripciones ({d.get('DESCRIPTION', 0)} de {T['pmax_min_descriptions']})")
+                if gaps:
+                    missing.append(f"{gname(g)}: faltan " + ", ".join(gaps))
+            if no_video:
+                findings.append(_finding("P5", AREA_P, creative_sev, "Grupos de recursos sin video propio",
+                    "Sin video, Google genera uno automático a partir de tus imágenes, que suele ser de menor calidad." + feed_note,
+                    "Subir al menos un video propio, horizontal y vertical si es posible.", no_video))
+            if missing:
+                findings.append(_finding("P6", AREA_P, creative_sev, "Faltan imágenes o textos en grupos de recursos",
+                    "Menos recursos significan menos combinaciones que Google puede probar." + feed_note,
+                    "Completar hasta los mínimos recomendados (editables en la auditoría).", missing))
+
+        if groups is None or signals is None:
+            nv("P7", "Señales de audiencia y temas de búsqueda", "No se pudieron leer las señales: " + unavailable.get("pmax_signals", unavailable.get("pmax_asset_groups", "sin detalle")))
+        else:
+            with_sig = {s_["asset_group_id"] for s_ in signals}
+            no_sig = [gname(g) for g in groups if g["id"] not in with_sig]
+            if no_sig:
+                findings.append(_finding("P7", AREA_P, "advertencia", "Grupos de recursos sin señales de audiencia ni temas de búsqueda",
+                    "Las señales no limitan la campaña, pero le dan a Google un punto de partida más cercano a quien reserva.",
+                    "Agregar audiencias propias (visitantes del sitio, lista de clientes) y temas de búsqueda del destino.", no_sig))
+
+        pm_lost = data.get("pmax_lost_is")
+        if pm_lost is None:
+            nv("P12", "Presupuesto limitando una PMax rentable", "No se pudo leer la pérdida de impresiones de PMax: " + unavailable.get("pmax_lost_is", "sin detalle"))
+        else:
+            flagged = []
+            for r_ in pm_lost:
+                c = by_id.get(r_["campaign_id"])
+                if not c or _num(r_.get("budget_lost")) <= T["pmax_lost_is_budget"] or _num(c.get("conversions")) <= 0:
+                    continue
+                roas = _num(c.get("conv_value")) / _num(c["cost"]) if _num(c.get("cost")) else 0
+                cpa = _num(c["cost"]) / _num(c["conversions"])
+                ok = True
+                if ctx.get("goal") == "roas" and _num(ctx.get("target")) > 0:
+                    ok = roas * 100 >= _num(ctx["target"])
+                elif ctx.get("goal") == "cpa" and _num(ctx.get("target")) > 0:
+                    ok = cpa <= _num(ctx["target"])
+                if ok:
+                    flagged.append(f"{c['name']} (pierde {_num(r_['budget_lost']):.0%} por presupuesto)")
+            if flagged:
+                findings.append(_finding("P12", AREA_P, "advertencia", "Performance Max rentable que pierde impresiones por presupuesto",
+                    "Hay demanda que estas campañas no alcanzan a captar porque el presupuesto diario se agota.",
+                    "Subir el presupuesto o redistribuirlo desde campañas menos rentables.", flagged))
+
     # ---- G. Rendimiento contra la meta -----------------------------------
     goal, target = ctx.get("goal"), _num(ctx.get("target"))
     if goal in ("roas", "cpa") and target > 0 and total_cost > 0:
@@ -493,6 +612,8 @@ def run_audit(data, ctx, days):
     total_score = max(0, 100 - penalty(findings))
     by_area = {}
     for area in AREAS:
+        if area == "Performance Max" and not pmax_present:
+            continue
         items = [f for f in findings if f["area"] == area]
         by_area[area] = {"score": max(0, 100 - penalty(items)), "critical": sum(f["severity"] == "critico" for f in items),
                          "warnings": sum(f["severity"] == "advertencia" for f in items)}

@@ -2459,6 +2459,57 @@ def fetch_audit_data(customer_id, date_from, date_to):
                  "status": r.get("recommendationSubscription", {}).get("status")} for r in rows]
     block("recommendation_subscriptions", recommendation_subscriptions)
 
+    # Performance Max: solo si hay campañas PMax activas (suma unas 4 consultas).
+    if any(c["channel_type"] == "PERFORMANCE_MAX" and c["status"] == "ENABLED" for c in campaigns):
+        def pmax_asset_groups():
+            rows = _search(customer_id, f"""
+                SELECT asset_group.id, asset_group.name, asset_group.status, asset_group.ad_strength,
+                       campaign.id, campaign.status, metrics.impressions
+                FROM asset_group
+                WHERE {between} AND asset_group.status = 'ENABLED' AND campaign.status = 'ENABLED'
+            """)
+            groups = {}
+            for r in rows:
+                ag = r.get("assetGroup", {})
+                gid = str(ag.get("id"))
+                g = groups.setdefault(gid, {"id": gid, "name": ag.get("name") or gid,
+                                            "campaign_id": str(r.get("campaign", {}).get("id")),
+                                            "ad_strength": ag.get("adStrength"), "impressions": 0})
+                g["impressions"] += _int_or_none(r.get("metrics", {}).get("impressions")) or 0
+            return list(groups.values())
+        block("pmax_asset_groups", pmax_asset_groups)
+
+        def pmax_assets():
+            rows = _search(customer_id, """
+                SELECT asset_group.id, asset_group.status, campaign.id, campaign.status,
+                       asset_group_asset.field_type, asset_group_asset.status
+                FROM asset_group_asset
+                WHERE asset_group_asset.status = 'ENABLED' AND asset_group.status = 'ENABLED' AND campaign.status = 'ENABLED'
+            """)
+            return [{"asset_group_id": str(r.get("assetGroup", {}).get("id")),
+                     "field_type": r.get("assetGroupAsset", {}).get("fieldType")} for r in rows]
+        block("pmax_assets", pmax_assets)
+
+        def pmax_signals():
+            rows = _search(customer_id, """
+                SELECT asset_group.id, asset_group.status, campaign.id, campaign.status,
+                       asset_group_signal.audience.audience, asset_group_signal.search_theme.text
+                FROM asset_group_signal
+                WHERE asset_group.status = 'ENABLED' AND campaign.status = 'ENABLED'
+            """)
+            return [{"asset_group_id": str(r.get("assetGroup", {}).get("id"))} for r in rows]
+        block("pmax_signals", pmax_signals)
+
+        def pmax_lost_is():
+            rows = _search(customer_id, f"""
+                SELECT campaign.id, metrics.search_budget_lost_impression_share
+                FROM campaign
+                WHERE {between} AND campaign.advertising_channel_type = 'PERFORMANCE_MAX' AND campaign.status = 'ENABLED'
+            """)
+            return [{"campaign_id": str(r.get("campaign", {}).get("id")),
+                     "budget_lost": _float_or_none(r.get("metrics", {}).get("searchBudgetLostImpressionShare")) or 0} for r in rows]
+        block("pmax_lost_is", pmax_lost_is)
+
     return data
 
 
@@ -2473,6 +2524,7 @@ def simulated_audit_data():
     campaigns = [
         camp("1", "Hotel Demo - CO:es - Search Genérica", "SEARCH", "MAXIMIZE_CONVERSIONS", 9800, 61, 41200, 310000, search_partners=True, display_network=True),
         camp("6", "Hotel Demo - CO:es - Search Marca", "SEARCH", "TARGET_ROAS", 1800, 40, 22400, 150000, geo_target_type="PRESENCE"),
+        camp("7", "Hotel Demo - PMAX Todo Incluido", "PERFORMANCE_MAX", "MAXIMIZE_CONVERSIONS", 900, 8, 0, 90000, geo_target_type=None),
         camp("2", "Hotel Demo - CO:es - Search Todo Incluido", "SEARCH", "TARGET_SPEND", 4300, 18, 9400, 180000, search_partners=True),
         camp("3", "Hotel Demo - PMAX Reservas", "PERFORMANCE_MAX", "MAXIMIZE_CONVERSION_VALUE", 7600, 52, 38900, 520000, geo_target_type=None),
         camp("4", "Hotel Demo - Display Remarketing", "DISPLAY", "MAXIMIZE_CONVERSIONS", 1200, 6, 2100, 410000, geo_target_type="PRESENCE"),
@@ -2521,4 +2573,23 @@ def simulated_audit_data():
         "campaign_languages": [{"campaign_id": "1"}, {"campaign_id": "2"}],
         "assets": [{"field_type": "SITELINK"}, {"field_type": "SITELINK"}, {"field_type": "CALLOUT"}],
         "recommendation_subscriptions": None,
+        "pmax_asset_groups": [
+            {"id": "g1", "name": "Habitaciones y vistas", "campaign_id": "3", "ad_strength": "POOR", "impressions": 310000},
+            {"id": "g2", "name": "Marca", "campaign_id": "3", "ad_strength": "EXCELLENT", "impressions": 190000},
+            {"id": "g3", "name": "Plan todo incluido", "campaign_id": "7", "ad_strength": "AVERAGE", "impressions": 90000},
+        ],
+        "pmax_assets": (
+            [{"asset_group_id": "g1", "field_type": "HEADLINE", "label": "LOW"}] * 3
+            + [{"asset_group_id": "g1", "field_type": "DESCRIPTION", "label": "GOOD"}] * 2
+            + [{"asset_group_id": "g1", "field_type": "MARKETING_IMAGE", "label": "LOW"}] * 1
+            + [{"asset_group_id": "g1", "field_type": "SQUARE_MARKETING_IMAGE", "label": "GOOD"}] * 2
+            + [{"asset_group_id": "g2", "field_type": "HEADLINE", "label": "GOOD"}] * 8
+            + [{"asset_group_id": "g2", "field_type": "DESCRIPTION", "label": "GOOD"}] * 4
+            + [{"asset_group_id": "g2", "field_type": ft, "label": "GOOD"} for ft in ("MARKETING_IMAGE", "MARKETING_IMAGE", "SQUARE_MARKETING_IMAGE", "SQUARE_MARKETING_IMAGE", "PORTRAIT_MARKETING_IMAGE", "PORTRAIT_MARKETING_IMAGE", "YOUTUBE_VIDEO")]
+            + [{"asset_group_id": "g3", "field_type": "HEADLINE", "label": "GOOD"}] * 5
+            + [{"asset_group_id": "g3", "field_type": "DESCRIPTION", "label": "GOOD"}] * 4
+            + [{"asset_group_id": "g3", "field_type": ft, "label": "GOOD"} for ft in ("MARKETING_IMAGE", "MARKETING_IMAGE", "SQUARE_MARKETING_IMAGE", "SQUARE_MARKETING_IMAGE", "PORTRAIT_MARKETING_IMAGE", "PORTRAIT_MARKETING_IMAGE")]
+        ),
+        "pmax_signals": [{"asset_group_id": "g2"}],
+        "pmax_lost_is": [{"campaign_id": "3", "budget_lost": 0.22}, {"campaign_id": "7", "budget_lost": 0.02}],
     }
