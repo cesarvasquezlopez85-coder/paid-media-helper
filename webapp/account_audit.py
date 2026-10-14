@@ -147,20 +147,6 @@ def _finding(fid, area, severity, title, detail, action, evidence=None, kind=Non
     return f
 
 
-def parse_negative_themes(raw):
-    """Temas de negativos del cuestionario: una línea por tema, 'Nombre: palabra, palabra'.
-    Vacío = los temas por defecto."""
-    themes = {}
-    for line in (raw or "").splitlines():
-        if ":" not in line:
-            continue
-        name, words = line.split(":", 1)
-        ws = [w.strip() for w in words.split(",") if w.strip()]
-        if name.strip() and ws:
-            themes[name.strip()] = r"\b(" + "|".join(re.escape(w) for w in ws) + r")\b"
-    return themes or dict(NEGATIVE_THEMES)
-
-
 def _money(v, cur):
     return f"{cur} {v:,.0f}" if cur else f"{v:,.0f}"
 
@@ -561,7 +547,7 @@ def run_audit(data, ctx, days):
             negatives = data.get("negatives")
             neg_text = " ".join((n.get("text") or "").lower() for n in (negatives or []))
             hits, theme_cost = [], 0.0
-            for theme, rx in parse_negative_themes(ctx.get("negative_themes")).items():
+            for theme, rx in NEGATIVE_THEMES.items():
                 pat = re.compile(rx, re.I)
                 matched = [t for t in terms if _num(t["conversions"]) == 0 and pat.search(t["term"] or "")]
                 cost = sum(_num(t["cost"]) for t in matched)
@@ -570,7 +556,7 @@ def run_audit(data, ctx, days):
                     theme_cost += cost
             if theme_cost / search_cost > T["negative_theme_share"]:
                 findings.append(_finding("D4", "Palabras clave y términos", "advertencia", "Faltan negativos de temas típicos que no son reservas",
-                    f"{theme_cost / search_cost:.0%} del gasto de Search ({_money(theme_cost, cur)}) fue a búsquedas de los temas de la lista ({', '.join(parse_negative_themes(ctx.get('negative_themes')))}), sin conversiones.",
+                    f"{theme_cost / search_cost:.0%} del gasto de Search ({_money(theme_cost, cur)}) fue a búsquedas de empleo, gratis o alquiler de largo plazo, sin conversiones.",
                     "Agregar esos temas como negativos (lista compartida de la cuenta).", hits))
 
     # D6 / D9 — palabras clave con clics sin conversión y con CTR bajo

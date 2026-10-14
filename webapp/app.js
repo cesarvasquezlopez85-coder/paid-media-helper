@@ -139,7 +139,7 @@ const state = {
     // Cuestionario del hotel — ver auditoria_reglas_propuesta.md, sección 1.
     ctx: {
       hotel_name: '', brand_terms: '', brand_campaign_words: 'marca, brand, branded, brnd',
-      goal: 'roas', target: '', enhanced_conversions: 'nose', hotel_feed: 'nose', negative_themes: '',
+      goal: 'roas', target: '', enhanced_conversions: 'nose', hotel_feed: 'nose',
     },
     ai: { status: 'idle', narrativa: null, error: null },
   },
@@ -8007,9 +8007,6 @@ function renderAuditForm() {
         <span class="field-hint">Google no lo entrega por API. Míralo en Objetivos &gt; Conversiones &gt; Configuración.</span></div>
       ${s.report && s.report.score.by_area['Performance Max'] ? `<div class="field"><label>¿Usas feed de Hotel Center con PMax?</label>${sel('hotel_feed', AUDIT_FEED)}
         <span class="field-hint">Con feed, las revisiones de imágenes, video y calidad de recursos (P3, P5, P6) pasan a informativas.</span></div>` : ''}
-      <div class="field" style="width:100%"><label>Temas de negativos a vigilar (opcional)</label>
-        <textarea data-audit-ctx="negative_themes" rows="3" style="width:100%;max-width:560px" placeholder="Una línea por tema, así: Empleo: empleo, trabajo, vacante&#10;Si lo dejas vacío se usan: Empleo, Gratis y Alquiler o vivienda de largo plazo.">${escapeHtml(c.negative_themes)}</textarea>
-        <span class="field-hint">Búsquedas que no son de huéspedes según el tipo de hotel (por ejemplo, 'pasadía' en un hotel que no lo vende). La regla D4 las busca entre los términos que gastaron sin convertir.</span></div>
       <div class="field"><label>Meta principal</label>${sel('goal', AUDIT_GOALS)}</div>
       ${c.goal !== 'volumen' ? `<div class="field"><label>${c.goal === 'roas' ? 'ROAS objetivo (ej. 450 = 450%)' : 'CPA objetivo'}</label>${txt('target', c.goal === 'roas' ? '450' : '25', 110)}</div>` : ''}
       <button class="btn-accent" data-action="audit-run" ${s.status === 'loading' ? 'disabled' : ''}>${s.report ? 'Auditar de nuevo' : 'Auditar cuenta'}</button>

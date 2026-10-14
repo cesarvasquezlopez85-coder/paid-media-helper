@@ -1895,7 +1895,6 @@ class Handler(SimpleHTTPRequestHandler):
         raw_ctx = payload.get("context") if isinstance(payload.get("context"), dict) else {}
         ctx = {k: str(raw_ctx.get(k) or "").strip()[:300] for k in
                ("hotel_name", "brand_campaign_words", "brand_terms", "enhanced_conversions", "hotel_feed")}
-        ctx["negative_themes"] = str(raw_ctx.get("negative_themes") or "").strip()[:800]
         ctx["goal"] = raw_ctx.get("goal") if raw_ctx.get("goal") in ("roas", "cpa", "volumen") else "volumen"
         try:
             ctx["target"] = float(raw_ctx.get("target") or 0)
