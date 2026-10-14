@@ -2442,6 +2442,130 @@ function getOpportunityFilteredRows() {
   return s.excludeBrand && !s.typeFilter.includes('search_brand') ? rows.filter((r) => r.campaign_type !== 'search_brand') : rows;
 }
 
+// Datos del resultado de Oportunidad de ingresos tal como se ven en pantalla (filtros aplicados y
+// tabla en el mismo orden): los comparten la descarga en CSV y el informe en HTML.
+function opportunityResultData() {
+  const s = state.opportunity;
+  const rows = getOpportunityFilteredRows();
+  const summary = engine.summarizeRevenueOpportunity(rows);
+  const keyFn = OPP_SORT_KEYS[s.sortBy] || OPP_SORT_KEYS.revenue_lost;
+  const opps = summary.opportunities.filter((o) => o.has_data).sort((a, b) => {
+    const va = keyFn(a), vb = keyFn(b);
+    const cmp = typeof va === 'string' ? va.localeCompare(vb) : (va - vb);
+    return s.sortDir === 'asc' ? cmp : -cmp;
+  });
+  const typeLabel = (t) => engine.CAMPAIGN_TYPE_LABELS[t] || t || 'N/D';
+  const filters = [
+    ['Origen', s.fileName || ''],
+    ['Hotel', s.hotelFilter === 'all' ? 'Todos' : s.hotelFilter],
+    ['Tipo de campaña', s.typeFilter.length ? s.typeFilter.map(typeLabel).join(' + ') : 'Todos'],
+    ['Campaña', s.campaignFilter === 'all' ? 'Todas las seleccionadas' : s.campaignFilter],
+    ['Campañas de marca', s.excludeBrand ? 'Excluidas' : 'Incluidas'],
+  ];
+  return { summary, opps, filters, typeLabel, funnel: engine.buildOpportunityFunnel(summary.opportunities) };
+}
+
+// CSV: resumen con los filtros arriba y, debajo, la tabla de campañas con una fila TOTAL.
+function downloadOpportunityResult() {
+  const { summary, opps, filters, typeLabel } = opportunityResultData();
+  const num = (v, d = 2) => (v == null || Number.isNaN(v) ? '' : Number(v).toFixed(d));
+  const pct = (v) => (v == null || Number.isNaN(v) ? '' : (v * 100).toFixed(1));
+  const sum = (f) => opps.reduce((acc, o) => acc + (Number.isNaN(f(o)) || f(o) == null ? 0 : f(o)), 0);
+  const data = [
+    ['Oportunidad de ingresos'],
+    ...filters,
+    [],
+    ['Ingresos que se habrían ganado', num(summary.revenue_lost)],
+    ['Inversión adicional necesaria', summary.extra_budget != null ? num(summary.extra_budget) : 'N/D'],
+    ['ROAS promedio (%)', summary.roas != null ? num(summary.roas * 100, 0) : 'N/D'],
+    ['Conversiones perdidas', num(summary.conversions_lost, 0)],
+    ['Gasto total', num(summary.total_cost)],
+    ['Valor de conversión total', num(summary.total_conv_value)],
+    [],
+    ['Campaña', 'Tipo', 'Estrategia', 'ROAS (%)', 'Impression share (%)', 'Perdido por ranking (%)', 'Perdido por presupuesto (%)', 'Ingresos perdidos', 'Gasto', 'Conversiones', 'Conversiones perdidas'],
+    ...opps.map((o) => [
+      o.campaign, typeLabel(o.campaign_type), o.bid_strategy || 'N/D',
+      o.campaign_roas != null ? num(o.campaign_roas * 100, 0) : '',
+      pct(o.impr_share), pct(o.lost_is_rank), pct(o.lost_is_budget),
+      num(o.revenue_lost), num(o.cost), num(o.conversions, 1), num(o.conversions_lost, 1),
+    ]),
+    ['TOTAL', '', '', '', '', '', '', num(sum((o) => o.revenue_lost)), num(sum((o) => o.cost)), num(sum((o) => o.conversions), 1), num(sum((o) => o.conversions_lost), 1)],
+  ];
+  engine.downloadCsv(`oportunidad_ingresos_${new Date().toISOString().slice(0, 10)}.csv`, data);
+}
+
+// Informe en HTML: un solo archivo, con el mismo estilo del informe de la auditoría
+// (AUDIT_REPORT_CSS) — se abre en cualquier navegador y se guarda como PDF con Ctrl+P.
+function opportunityReportBodyHtml() {
+  const { summary, opps, filters, typeLabel, funnel: f } = opportunityResultData();
+  const e = escapeHtml;
+  const pct0 = (v) => (v == null || Number.isNaN(v) ? 'N/D' : `${(v * 100).toFixed(0)}%`);
+  const metric = (label, value) => `<div class="ar-metric"><div class="ar-metric-l">${e(label)}</div><div class="ar-metric-v">${e(value)}</div></div>`;
+  const sumOf = (fn) => opps.reduce((acc, o) => acc + (fn(o) == null || Number.isNaN(fn(o)) ? 0 : fn(o)), 0);
+
+  const funnelRows = f.has_data ? [
+    ['Inversión', fmtMoney(f.investment), f.extraBudget != null ? fmtMoney(f.investmentUnconstrained) : 'N/D'],
+    ['Total de búsquedas', fmtInt(f.totalQueries), fmtInt(f.totalQueries)],
+    ['Perdido por presupuesto', pct0(f.lostIsBudgetPct), '0%'],
+    ['Búsquedas disponibles', fmtInt(f.availableQueries), fmtInt(f.totalQueries)],
+    ['Impression Share', pct0(f.imprSharePct), pct0(f.potentialImprSharePct)],
+    ['Impresiones', fmtInt(f.impressions), fmtInt(f.potentialImpressions)],
+    ['Clics', fmtInt(f.clicks), fmtInt(f.potentialClicks)],
+    ['Conversiones', fmtInt(f.conversions), fmtInt(f.potentialConversions)],
+    ['Valor de conversión', fmtMoney(f.convValue), fmtMoney(f.potentialConvValue)],
+  ] : [];
+  const funnelHtml = f.has_data ? `
+    <div class="ar-block"><h2 class="ar-h2">De dónde venimos y a dónde podríamos llegar</h2>
+    <div class="ar-card"><div class="ar-tw"><table class="ar-tbl"><thead><tr><th>Etapa</th><th>Escenario actual (con límite de presupuesto)</th><th>Escenario sin límite de presupuesto</th></tr></thead>
+    <tbody>${funnelRows.map((r) => `<tr>${r.map((c) => `<td>${e(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div></div>` : '';
+
+  const body = opps.map((o) => `<tr>
+    <td>${e(o.campaign)}</td><td>${e(typeLabel(o.campaign_type))}</td><td>${e((o.bid_strategy || 'N/D').replace(/_/g, ' '))}</td>
+    <td>${o.campaign_roas != null ? `${(o.campaign_roas * 100).toFixed(0)}%` : 'N/D'}</td>
+    <td>${pct0(o.impr_share)}</td><td>${pct0(o.lost_is_rank)}</td><td>${pct0(o.lost_is_budget)}</td>
+    <td>${e(fmtMoney(o.revenue_lost))}</td><td>${e(fmtMoney(o.cost))}</td><td>${e(fmtInt(o.conversions))}</td><td>${e(fmtInt(o.conversions_lost))}</td></tr>`).join('');
+  const total = `<tr><td><strong>Total</strong></td><td></td><td></td><td></td><td></td><td></td><td></td>
+    <td><strong>${e(fmtMoney(sumOf((o) => o.revenue_lost)))}</strong></td><td><strong>${e(fmtMoney(sumOf((o) => o.cost)))}</strong></td>
+    <td><strong>${e(fmtInt(sumOf((o) => o.conversions)))}</strong></td><td><strong>${e(fmtInt(sumOf((o) => o.conversions_lost)))}</strong></td></tr>`;
+
+  return `
+    <div class="ar">
+      <div class="ar-eyebrow">Oportunidad de ingresos</div>
+      <div class="ar-title">Cuánto se dejó de ganar por límite de presupuesto</div>
+      <div class="ar-sub">${filters.map(([k, v]) => `${e(k)}: <strong>${e(v)}</strong>`).join(' · ')} · Generado ${new Date().toISOString().slice(0, 10)}</div>
+      <div class="ar-card" style="text-align:center">
+        <div class="ar-eyebrow" style="color:#6b7280">Podrías haber incrementado tus ingresos en</div>
+        <div class="ar-title" style="color:#1d6b41;margin:6px 0 0">${e(fmtMoney(summary.revenue_lost))}</div>
+      </div>
+      <div class="ar-block"><div class="ar-grid">
+        ${metric('Si hubieras invertido', summary.extra_budget != null ? `${fmtMoney(summary.extra_budget)} adicional` : 'N/D')}
+        ${metric('Asumiendo un ROAS de', summary.roas != null ? `${(summary.roas * 100).toFixed(0)}%` : 'N/D')}
+        ${metric('Conversiones perdidas', fmtInt(summary.conversions_lost))}
+        ${metric('Gasto del periodo', fmtMoney(summary.total_cost))}
+        ${metric('Valor de conversión', fmtMoney(summary.total_conv_value))}
+      </div></div>
+      ${funnelHtml}
+      <div class="ar-block"><h2 class="ar-h2">Campañas con mayor oportunidad de presupuesto<small>IS = Impression Share · LR = perdido por ranking · LB = perdido por presupuesto</small></h2>
+      <div class="ar-card"><div class="ar-tw"><table class="ar-tbl"><thead><tr><th style="min-width:240px">Campaña</th><th>Tipo</th><th>Estrategia</th><th>ROAS</th><th>IS</th><th>LR</th><th>LB</th><th>Ingresos perdidos</th><th>Gasto</th><th>Conversiones</th><th>Conv. perdidas</th></tr></thead>
+      <tbody>${body}${total}</tbody></table></div></div></div>
+      <div class="ar-note">Es un análisis retrospectivo, no una predicción: para cada campaña asume el mismo Ad Auction Win Rate y la misma tasa de conversión que ya tiene, y calcula qué habría pasado sin el límite de presupuesto. La inversión adicional se calcula con el ROAS promedio de las campañas incluidas.</div>
+      <div class="ar-foot">Generado con Paid Media Helper a partir de datos de Google Ads. Las cifras son las que reporta Google Ads: no verifican reservas reales ni ingresos finales del hotel.</div>
+    </div>`;
+}
+
+function buildOpportunityHtml() {
+  return `<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Oportunidad de ingresos</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;700;800&display=swap" rel="stylesheet">
+<style>body{margin:0;padding:40px 20px;background:#f4f5f8}@media print{body{background:#fff;padding:0}@page{margin:14mm}}${AUDIT_REPORT_CSS}</style>
+</head><body>${opportunityReportBodyHtml()}</body></html>`;
+}
+
+function downloadOpportunityHtml() {
+  downloadTextFile(buildOpportunityHtml(), `oportunidad_ingresos_${new Date().toISOString().slice(0, 10)}.html`, 'text/html');
+}
+
 function renderOpportunityPage() {
   const s = state.opportunity;
 
@@ -2817,6 +2941,7 @@ function renderOpportunityReady() {
 
   const headline = `
     <div class="card" style="padding:28px 32px;text-align:center;margin-bottom:20px">
+      <div style="display:flex;justify-content:flex-end;margin-bottom:10px"><button class="btn-outline sm" data-action="opp-download-html">Descargar informe (HTML)</button><button class="btn-outline sm" data-action="opp-download" style="margin-left:8px">Descargar CSV</button></div>
       <div style="font-size:13px;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px">Podrías haber incrementado tus ingresos en</div>
       <div style="font-family:var(--font-display);font-size:40px;font-weight:700;color:var(--ok-text)">${fmtMoney(summary.revenue_lost)}</div>
       <div style="display:flex;gap:32px;justify-content:center;margin-top:18px;flex-wrap:wrap">
@@ -9857,6 +9982,8 @@ function handleAction(action) {
       break;
     }
     case 'opp-acct-none': state.opportunity.api.accountIds = []; render(); break;
+    case 'opp-download': downloadOpportunityResult(); break;
+    case 'opp-download-html': downloadOpportunityHtml(); break;
 
     case 'roas-api-load-accounts': loadRoasGoogleAdsAccounts(); break;
     case 'roas-mcc-load': loadRoasMccGroups(); break;
