@@ -1,6 +1,6 @@
 # Paid Media Helper — Plataforma de Google Ads
 
-Implementación del diseño (`OUTPUTS/plataforma-google-ads/Diseño de plataforma-handoff.zip`) como sitio estático — ya no es solo el prototipo original de 3 funciones, ver `OUTPUTS/plataforma-google-ads/Resumen_Proyecto.md` para el detalle completo y actualizado de las 12 funciones activas (Rendimiento, ROAS, Recomendaciones, IA Max, Negativización, Exclusiones de contenido, Planificador de keywords, Ritmo de consumo, Oportunidad de ingresos, Comparar periodos, Bookings, Proyección de ventas — más el Generador de copys, construido pero oculto del menú). Vive en producción en [Railway](https://railway.app) (`https://paid-media-helper.up.railway.app`), con auto-deploy desde `main`.
+Implementación del diseño (`OUTPUTS/plataforma-google-ads/Diseño de plataforma-handoff.zip`) como sitio estático — ya no es solo el prototipo original de 3 funciones, ver `OUTPUTS/plataforma-google-ads/Resumen_Proyecto.md` para el detalle completo y actualizado de las 13 funciones activas (Auditoría de cuenta, Rendimiento, ROAS, Recomendaciones, IA Max, Negativización, Exclusiones de contenido, Planificador de keywords, Ritmo de consumo, Oportunidad de ingresos, Comparar periodos, Bookings, Proyección de ventas — más el Generador de copys, construido pero oculto del menú). Vive en producción en [Railway](https://railway.app) (`https://paid-media-helper.up.railway.app`), con auto-deploy desde `main`.
 
 ## Cómo correrla
 
@@ -22,7 +22,9 @@ Luego abre `http://localhost:8642` — te va a pedir iniciar sesión o crear cue
 - `app.js` — estado de todas las funciones, renderizado y manejo de eventos (un solo archivo, grande — el patrón de cada función nueva se agrega siguiendo el de la anterior).
 - `server.py` — servidor + login/registro/sesión/Administración + todos los endpoints `/api/*` (ver notas abajo).
 - `google_ads_client.py` — cliente de la API de Google Ads (lectura y escritura) — solo `urllib`, sin la librería oficial, para no agregar dependencias pip al servidor.
-- `claude_client.py` — cliente de la API de Claude (análisis con IA en Rendimiento) — mismo criterio que `google_ads_client.py`.
+- `account_audit.py` — motor de reglas de la Auditoría de cuenta (52 reglas): Python puro, sin llamadas de red, recibe los datos que arma `fetch_audit_data()` de `google_ads_client.py` y devuelve hallazgos, puntaje y revisiones no verificables. Se prueba con `simulated_audit_data()`.
+- `bigquery_client.py` / `get_bigquery_refresh_token.py` — cliente de solo lectura de BigQuery (con tope de bytes por consulta) y el script que genera el refresh token. Sin las variables `BIGQUERY_PROJECT_ID` y `BIGQUERY_REFRESH_TOKEN` no hace nada.
+- `claude_client.py` — cliente de la API de Claude (análisis con IA en Rendimiento y lectura de la Auditoría de cuenta) — mismo criterio que `google_ads_client.py`.
 - `data.db` — se crea sola al arrancar el servidor por primera vez. Guarda usuarios, sesiones, a qué cuentas de Google Ads tiene acceso cada quien, y la watchlist de Ritmo de consumo. No se sirve por HTTP. En producción vive en un volumen persistente de Railway, separado del código.
 
 ## Login
