@@ -25,6 +25,17 @@ THRESHOLDS = {
     "geo_zero_conv_spend_share": 0.03, # B6: país con >= 3% del gasto y 0 conversiones
     "geo_zero_conv_min_clicks": 30,    # B6
     "geo_table_min_share": 0.01,       # B5: países que se listan (>= 1% del gasto)
+    "geo_goal_min_share": 0.03,        # B7: país con >= 3% del gasto para compararlo con la meta
+    "device_min_share": 0.05,          # B8: dispositivos con >= 5% del gasto
+    "rank_lost_is": 0.15,              # C9: pierde > 15% de impresiones por ranking (y más que por presupuesto)
+    "kw_zero_conv_min_clicks": 30,     # D6
+    "kw_zero_conv_spend_share": 0.01,  # D6: la palabra pesa >= 1% del gasto de Search
+    "low_ctr": 0.02,                   # D9: CTR por debajo de 2% (referencia editable)
+    "low_ctr_min_impressions": 1000,   # D9
+    "evolution_change": 0.20,          # G5: cambio de 20% o más frente al periodo anterior
+    "brand_conv_share": 0.40,          # G6: marca >= 40% de las conversiones
+    "pmax_group_zero_share": 0.10,     # P13: grupo con >= 10% del gasto de PMax y 0 conversiones
+    "pmax_group_concentration": 0.80,  # P13: un grupo con >= 80% de las conversiones de su campaña
     "new_campaign_days": 14,           # C6: campañas más nuevas que esto no cuentan como "sin impresiones"
     "brand_leak_share": 0.10,          # C2: marca en genéricas > 10% de su gasto
     "smart_bidding_min_conv_30d": 15,  # C4
@@ -366,6 +377,44 @@ def run_audit(data, ctx, days):
                         f"Estos países suman {_money(sum(_num(g_['cost']) for g_ in dead), cur)} ({sum(_num(g_['cost']) for g_ in dead) / geo_cost:.0%} del gasto) con al menos {T['geo_zero_conv_min_clicks']} clics y ninguna conversión reportada, mientras otros países sí convierten.",
                         "Revisar si ese país es un mercado objetivo; si no, excluirlo de la segmentación geográfica.", [geo_line(g_) for g_ in dead][:8]))
 
+    # B7 — países por debajo de la meta declarada (se apoya en el mismo dato de B5; solo informativa)
+    if geo and ctx.get("goal") in ("roas", "cpa") and _num(ctx.get("target")) > 0 and sum(_num(g_["cost"]) for g_ in geo) > 0:
+        g_total = sum(_num(g_["cost"]) for g_ in geo)
+        tgt = _num(ctx["target"])
+        behind = []
+        for g_ in geo:
+            if _num(g_["cost"]) / g_total < T["geo_goal_min_share"] or _num(g_["conversions"]) <= 0:
+                continue
+            if ctx["goal"] == "cpa":
+                cpa_ = _num(g_["cost"]) / _num(g_["conversions"])
+                if cpa_ > tgt * T["cpa_goal_tolerance"]:
+                    behind.append(f"{g_['country']}: CPA {_money(cpa_, cur)} contra una meta de {_money(tgt, cur)}")
+            elif _num(g_["value"]) > 0:
+                roas_ = _num(g_["value"]) / _num(g_["cost"])
+                if roas_ * 100 < tgt * T["roas_goal_tolerance"]:
+                    behind.append(f"{g_['country']}: ROAS {roas_ * 100:.0f}% contra una meta de {tgt:.0f}%")
+        if behind:
+            findings.append(_finding("B7", "Redes y segmentación", "info", "Países que rinden por debajo de tu meta",
+                "Estos países pesan al menos el " + f"{T['geo_goal_min_share']:.0%}" + " del gasto y están peor que la meta declarada. Solo informativo: el problema general de la meta lo marca G1.",
+                "Revisar si conviene bajar la puja o el presupuesto en esos países, o separarlos en una campaña propia.", behind))
+
+    # B8 — rendimiento por dispositivo (informativa)
+    dev = data.get("device_performance")
+    if dev is None:
+        nv("B8", "Rendimiento por dispositivo", "No se pudo leer el rendimiento por dispositivo: " + unavailable.get("device_performance", "sin detalle"))
+    else:
+        dev_cost = sum(_num(d_["cost"]) for d_ in dev)
+        names_ = {"MOBILE": "Móvil", "DESKTOP": "Ordenador", "TABLET": "Tablet", "CONNECTED_TV": "TV conectada", "OTHER": "Otros", "UNKNOWN": "Otros"}
+        shown_ = [d_ for d_ in dev if dev_cost > 0 and _num(d_["cost"]) / dev_cost >= T["device_min_share"]]
+        if len(shown_) >= 2:
+            def dev_line(d_):
+                cpa_ = f", CPA {_money(_num(d_['cost']) / _num(d_['conversions']), cur)}" if _num(d_["conversions"]) else ", sin conversiones"
+                roas_ = f", ROAS {_num(d_['value']) / _num(d_['cost']) * 100:.0f}%" if _num(d_["value"]) and _num(d_["cost"]) else ""
+                return f"{names_.get(d_['device'], d_['device'])}: {_num(d_['cost']) / dev_cost:.0%} del gasto, {_num(d_['conversions']):.1f} conversiones{cpa_}{roas_}"
+            findings.append(_finding("B8", "Redes y segmentación", "info", "Rendimiento por dispositivo",
+                "Cómo se reparten el gasto y las conversiones entre móvil, ordenador y tablet, según lo que reporta Google Ads. En hoteles es común que se navegue en móvil y se reserve en ordenador. Solo informativo.",
+                "Si un dispositivo gasta mucho y casi no convierte, revisar la página de reserva en ese dispositivo o ajustar la puja.", [dev_line(d_) for d_ in shown_]))
+
     # ---- C. Estructura y puja --------------------------------------------
     brand_campaigns = [c for c in enabled if _is_brand_name(c.get("name"), brand_words)]
     if enabled and not brand_campaigns:
@@ -438,6 +487,21 @@ def run_audit(data, ctx, days):
                 "Hay demanda que estas campañas no alcanzan a captar porque el presupuesto diario se agota. Es una oportunidad, no un error: no resta puntos." + (" Cumplen la meta declarada." if ctx.get("goal") in ("roas", "cpa") and _num(ctx.get("target")) > 0 else ""),
                 "Subir el presupuesto o redistribuirlo desde campañas menos rentables (ver la sección Oportunidad de ingresos).", flagged, kind="oportunidad"))
 
+    # C9 — pérdida de impresiones por ranking (puja o calidad), distinta de la de presupuesto (C5)
+    if lost is None:
+        nv("C9", "Pérdida de impresiones por ranking", "No se pudo leer la pérdida de impresiones: " + unavailable.get("lost_is", "sin detalle"))
+    else:
+        by_rank = []
+        for r_ in lost:
+            c = by_id.get(r_["campaign_id"])
+            rk, bd = _num(r_.get("rank_lost")), _num(r_.get("budget_lost"))
+            if c and rk > T["rank_lost_is"] and rk > bd:
+                by_rank.append(f"{c['name']} (pierde {rk:.0%} por ranking y {bd:.0%} por presupuesto)")
+        if by_rank:
+            findings.append(_finding("C9", "Estructura y puja", "info", "Campañas que pierden impresiones por ranking",
+                "Perder impresiones por ranking significa que la puja o la calidad del anuncio no alcanzan para ganar la subasta; subir el presupuesto no lo arregla. Solo informativo.",
+                "Revisar la puja objetivo, la relevancia de los anuncios y la calidad de la página de destino.", by_rank))
+
     # Las campañas recién creadas todavía pueden estar en revisión o aprendiendo: no cuentan.
     def _is_new(c):
         try:
@@ -508,6 +572,30 @@ def run_audit(data, ctx, days):
                 findings.append(_finding("D4", "Palabras clave y términos", "advertencia", "Faltan negativos de temas típicos que no son reservas",
                     f"{theme_cost / search_cost:.0%} del gasto de Search ({_money(theme_cost, cur)}) fue a búsquedas de los temas de la lista ({', '.join(parse_negative_themes(ctx.get('negative_themes')))}), sin conversiones.",
                     "Agregar esos temas como negativos (lista compartida de la cuenta).", hits))
+
+    # D6 / D9 — palabras clave con clics sin conversión y con CTR bajo
+    kws = data.get("keywords")
+    if kws is None:
+        nv("D6", "Palabras clave con clics y sin conversión", "No se pudieron leer las palabras clave: " + unavailable.get("keywords", "sin detalle"))
+        nv("D9", "CTR bajo con volumen", "No se pudieron leer las palabras clave: " + unavailable.get("keywords", "sin detalle"))
+    else:
+        if search_cost > 0:
+            dead_kw = [k for k in kws if _num(k.get("clicks")) >= T["kw_zero_conv_min_clicks"] and _num(k["conversions"]) == 0
+                       and _num(k["cost"]) >= search_cost * T["kw_zero_conv_spend_share"]]
+            if dead_kw:
+                # D3 ya castiga el gasto sin conversión por término: no se resta dos veces por lo mismo.
+                dup = any(f["id"] == "D3" for f in findings)
+                findings.append(_finding("D6", "Palabras clave y términos", "info" if dup else "advertencia", "Palabras clave con muchos clics y ninguna conversión",
+                    f"{len(dead_kw)} palabra(s) con al menos {T['kw_zero_conv_min_clicks']} clics y {T['kw_zero_conv_spend_share']:.0%} o más del gasto de Search no reportaron conversiones."
+                    + (" Ya se cuenta en D3 (términos sin conversión), por eso aquí no resta." if dup else ""),
+                    "Revisar si la palabra atrae búsquedas que no son de reserva; si es así, bajar la puja, cambiar la concordancia o pausarla.",
+                    [f"{k['text']} ({_num(k['clicks']):.0f} clics, {_money(_num(k['cost']), cur)})" for k in sorted(dead_kw, key=lambda x: -_num(x['cost']))[:6]]))
+        low_ctr = [k for k in kws if _num(k.get("impressions")) >= T["low_ctr_min_impressions"] and _num(k.get("clicks")) / _num(k["impressions"]) < T["low_ctr"]]
+        if low_ctr:
+            findings.append(_finding("D9", "Palabras clave y términos", "info", "Palabras clave con CTR bajo y volumen",
+                f"{len(low_ctr)} palabra(s) con al menos {T['low_ctr_min_impressions']:,} impresiones y un CTR menor al {T['low_ctr']:.0%} (referencia editable). Un CTR bajo suele indicar anuncios poco relevantes para esa búsqueda. Solo informativo.",
+                "Revisar que el anuncio responda a lo que se busca, o separar la palabra en un grupo con anuncios propios.",
+                [f"{k['text']} (CTR {_num(k['clicks']) / _num(k['impressions']):.1%}, {_num(k['impressions']):,.0f} impresiones)" for k in sorted(low_ctr, key=lambda x: -_num(x['impressions']))[:6]]))
 
     # ---- E. Activos -------------------------------------------------------
     assets = data.get("assets")
@@ -716,6 +804,48 @@ def run_audit(data, ctx, days):
                     f"Más de {T['pmax_changes_14d']} cambios en 14 días. El efecto sobre el aprendizaje depende del tipo y tamaño de cada cambio (aquí solo se mide la frecuencia, no la magnitud), pero tantos ajustes hacen difícil saber qué funcionó. No resta puntos.",
                     "Revisar si todos los cambios eran necesarios y esperar entre ajustes grandes.", frequent))
 
+        # P13 — reparto del rendimiento entre grupos de recursos (informativa)
+        if groups is None or not any(_num(g.get("cost")) for g in groups):
+            if groups is None:
+                nv("P13", "Reparto del rendimiento entre grupos de recursos", "No se pudieron leer los grupos de recursos: " + unavailable.get("pmax_asset_groups", "sin detalle"))
+        else:
+            pm_cost = sum(_num(g.get("cost")) for g in groups)
+            by_camp = {}
+            for g in groups:
+                by_camp.setdefault(g["campaign_id"], []).append(g)
+            lines_, notable = [], False
+            for cid_, gs in by_camp.items():
+                spending = [g for g in gs if _num(g.get("cost")) > 0]
+                if len(spending) < 2:
+                    continue
+                camp_conv = sum(_num(g.get("conversions")) for g in spending)
+                camp_cost = sum(_num(g["cost"]) for g in spending)
+                for g in sorted(spending, key=lambda x: -_num(x["cost"])):
+                    conv_share = f"{_num(g.get('conversions')) / camp_conv:.0%} de las conversiones" if camp_conv else "sin conversiones"
+                    lines_.append(f"{gname(g)}: gasto {_money(_num(g['cost']), cur)} ({_num(g['cost']) / camp_cost:.0%}), {_num(g.get('conversions')):.1f} conversiones ({conv_share})")
+                    if _num(g.get("conversions")) == 0 and _num(g["cost"]) / pm_cost >= T["pmax_group_zero_share"]:
+                        notable = True
+                    if camp_conv and _num(g.get("conversions")) / camp_conv >= T["pmax_group_concentration"]:
+                        notable = True
+            if lines_ and notable:
+                findings.append(_finding("P13", AREA_P, "info", "Reparto del rendimiento entre grupos de recursos",
+                    "Un grupo concentra casi todas las conversiones de su campaña, o hay un grupo con gasto relevante y sin conversiones. Google no explica por qué reparte así el presupuesto; solo informativo.",
+                    "Revisar los recursos y las señales de los grupos que no convierten, o aprender de lo que tiene el que sí.", lines_[:10]))
+
+        # P15 — PMax contra Search genérico (informativa; la atribución puede solaparse)
+        def _perf(cs):
+            cost_, conv_, val_ = (sum(_num(c.get(k)) for c in cs) for k in ("cost", "conversions", "conv_value"))
+            return cost_, conv_, val_
+        pm_c, sg_c = _perf([c for c in campaigns if _campaign_kind(c, brand_words) == "pmax"]), _perf([c for c in campaigns if _campaign_kind(c, brand_words) == "search_generica"])
+        if pm_c[0] > 0 and sg_c[0] > 0:
+            def _line(label, t):
+                cost_, conv_, val_ = t
+                return f"{label}: gasto {_money(cost_, cur)}, {conv_:.1f} conversiones" + (f", CPA {_money(cost_ / conv_, cur)}" if conv_ else "") + (f", ROAS {val_ / cost_ * 100:.0f}%" if val_ and cost_ else "")
+            findings.append(_finding("P15", AREA_P, "info", "Performance Max frente a Search genérico",
+                "Comparación de CPA y ROAS entre las dos. Las dos campañas pueden atribuirse la misma reserva (PMax también muestra en búsquedas), así que es una referencia y no una prueba de cuál rinde mejor. No resta puntos.",
+                "Usarlo como contexto para repartir presupuesto, mirando también la marca dentro de PMax (P9).",
+                [_line("Performance Max", pm_c), _line("Search genérico", sg_c)]))
+
     # ---- G. Rendimiento contra la meta -----------------------------------
     goal, target = ctx.get("goal"), _num(ctx.get("target"))
     if goal in ("roas", "cpa") and target > 0 and total_cost > 0:
@@ -744,6 +874,43 @@ def run_audit(data, ctx, days):
         findings.append(_finding("G2", "Rendimiento contra la meta", "info", "Referencia: campañas con CPA % por encima del óptimo de su tipo",
             "Mismos óptimos que usa la sección Rendimiento: Search marca 11%, Performance Max 20%, Demand Gen 30%, Display 30%, Search genérica 30%. Son referencias de la plataforma, no una meta de tu hotel: no resta puntos. La meta que cuenta es la que declaras arriba (G1).",
             "Revisar presupuesto y pujas de estas campañas.", over))
+
+    # G5 — evolución frente al periodo anterior de igual duración (informativa)
+    prev = data.get("previous_period")
+    if prev is None:
+        nv("G5", "Evolución frente al periodo anterior", "No se pudo leer el periodo anterior: " + unavailable.get("previous_period", "sin detalle"))
+    elif _num(prev.get("cost")) > 0 and total_cost > 0:
+        def _chg(now, before):
+            return (now - before) / before if before else None
+        p_conv, p_val, p_cost = _num(prev.get("conversions")), _num(prev.get("value")), _num(prev["cost"])
+        rows_ = [("Gasto", total_cost, p_cost, False), ("Conversiones", total_conv, p_conv, False)]
+        if total_conv and p_conv:
+            rows_.append(("CPA", total_cost / total_conv, p_cost / p_conv, True))
+        if total_value and p_val:
+            rows_.append(("ROAS", total_value / total_cost * 100, p_val / p_cost * 100, False))
+        ev_, notable = [], False
+        for label, now, before, money in rows_:
+            ch = _chg(now, before)
+            if ch is None:
+                continue
+            fmt = (lambda v: _money(v, cur)) if money or label == "Gasto" else ((lambda v: f"{v:.0f}%") if label == "ROAS" else (lambda v: f"{v:.0f}"))
+            ev_.append(f"{label}: {fmt(before)} → {fmt(now)} ({ch:+.0%})")
+            if label != "Gasto" and abs(ch) >= T["evolution_change"]:
+                notable = True
+        if notable:
+            findings.append(_finding("G5", "Rendimiento contra la meta", "info", "El rendimiento cambió frente al periodo anterior",
+                f"Comparación con los {days} días anteriores ({prev['date_from']} a {prev['date_to']}). Un cambio de {T['evolution_change']:.0%} o más en conversiones, CPA o ROAS merece una explicación (temporada, cambios en la cuenta, medición). Solo informativo.",
+                "Revisar si coincide con cambios en la cuenta, estacionalidad del destino o problemas de medición.", ev_))
+
+    # G6 — peso de la marca en las conversiones (informativa)
+    brand_c = [c for c in campaigns if _campaign_kind(c, brand_words) == "search_marca"]
+    brand_conv = sum(_num(c.get("conversions")) for c in brand_c)
+    if brand_c and total_conv > 0 and brand_conv / total_conv >= T["brand_conv_share"]:
+        brand_cost = sum(_num(c.get("cost")) for c in brand_c)
+        findings.append(_finding("G6", "Rendimiento contra la meta", "info", "Gran parte de las conversiones viene de campañas de marca",
+            f"Las campañas de marca aportan el {brand_conv / total_conv:.0%} de las conversiones con el {brand_cost / total_cost:.0%} del gasto. Son personas que ya conocían el hotel: el CPA general se ve mejor de lo que rinde la captación de huéspedes nuevos. Solo informativo.",
+            "Mirar el rendimiento de las campañas genéricas por separado para evaluar la captación.",
+            [f"{c['name']}: {_num(c.get('conversions')):.1f} conversiones" for c in sorted(brand_c, key=lambda x: -_num(x.get('conversions')))[:5]]))
 
     # ---- Puntaje ----------------------------------------------------------
     def penalty(items):

@@ -2380,7 +2380,7 @@ def fetch_audit_data(customer_id, date_from, date_to):
     def keywords():
         rows = _search(customer_id, f"""
             SELECT campaign.id, ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type,
-                   ad_group_criterion.quality_info.quality_score, metrics.cost_micros, metrics.conversions, metrics.impressions
+                   ad_group_criterion.quality_info.quality_score, metrics.cost_micros, metrics.conversions, metrics.impressions, metrics.clicks
             FROM keyword_view
             WHERE {between} AND ad_group_criterion.status = 'ENABLED'
               AND campaign.status = 'ENABLED' AND ad_group.status = 'ENABLED' AND metrics.cost_micros > 0
@@ -2397,6 +2397,7 @@ def fetch_audit_data(customer_id, date_from, date_to):
                 "cost": _micros_to_units(_int_or_none(r.get("metrics", {}).get("costMicros"))) or 0,
                 "conversions": _float_or_none(r.get("metrics", {}).get("conversions")) or 0,
                 "impressions": _int_or_none(r.get("metrics", {}).get("impressions")) or 0,
+                "clicks": _int_or_none(r.get("metrics", {}).get("clicks")) or 0,
             })
         return out
     block("keywords", keywords)
@@ -2428,12 +2429,13 @@ def fetch_audit_data(customer_id, date_from, date_to):
 
     def lost_is():
         rows = _search(customer_id, f"""
-            SELECT campaign.id, metrics.search_budget_lost_impression_share
+            SELECT campaign.id, metrics.search_budget_lost_impression_share, metrics.search_rank_lost_impression_share
             FROM campaign
             WHERE {between} AND campaign.advertising_channel_type = 'SEARCH' AND campaign.status = 'ENABLED'
         """)
         return [{"campaign_id": str(r.get("campaign", {}).get("id")),
-                 "budget_lost": _float_or_none(r.get("metrics", {}).get("searchBudgetLostImpressionShare")) or 0} for r in rows]
+                 "budget_lost": _float_or_none(r.get("metrics", {}).get("searchBudgetLostImpressionShare")) or 0,
+                 "rank_lost": _float_or_none(r.get("metrics", {}).get("searchRankLostImpressionShare")) or 0} for r in rows]
     block("lost_is", lost_is)
 
     def campaign_languages():
@@ -2491,6 +2493,43 @@ def fetch_audit_data(customer_id, date_from, date_to):
         return sorted(agg.values(), key=lambda a: -a["cost"])
     block("geo_performance", geo_performance)
 
+    # B8: rendimiento por dispositivo (móvil, ordenador, tablet...).
+    def device_performance():
+        rows = _search(customer_id, f"""
+            SELECT segments.device, metrics.cost_micros, metrics.clicks, metrics.conversions, metrics.conversions_value
+            FROM customer WHERE {between}
+        """)
+        out = {}
+        for r in rows:
+            dev = r.get("segments", {}).get("device") or "UNKNOWN"
+            m = r.get("metrics", {})
+            d_ = out.setdefault(dev, {"device": dev, "cost": 0.0, "clicks": 0, "conversions": 0.0, "value": 0.0})
+            d_["cost"] += _micros_to_units(_int_or_none(m.get("costMicros"))) or 0
+            d_["clicks"] += _int_or_none(m.get("clicks")) or 0
+            d_["conversions"] += _float_or_none(m.get("conversions")) or 0
+            d_["value"] += _float_or_none(m.get("conversionsValue")) or 0
+        return sorted(out.values(), key=lambda x: -x["cost"])
+    block("device_performance", device_performance)
+
+    # G5: mismo número de días justo antes del periodo, para comparar la evolución.
+    def previous_period():
+        d_from, d_to = datetime.date.fromisoformat(date_from), datetime.date.fromisoformat(date_to)
+        n = (d_to - d_from).days + 1
+        p_to = d_from - datetime.timedelta(days=1)
+        p_from = p_to - datetime.timedelta(days=n - 1)
+        rows = _search(customer_id, f"""
+            SELECT metrics.cost_micros, metrics.conversions, metrics.conversions_value
+            FROM customer WHERE segments.date BETWEEN '{p_from.isoformat()}' AND '{p_to.isoformat()}'
+        """)
+        tot = {"cost": 0.0, "conversions": 0.0, "value": 0.0, "date_from": p_from.isoformat(), "date_to": p_to.isoformat()}
+        for r in rows:
+            m = r.get("metrics", {})
+            tot["cost"] += _micros_to_units(_int_or_none(m.get("costMicros"))) or 0
+            tot["conversions"] += _float_or_none(m.get("conversions")) or 0
+            tot["value"] += _float_or_none(m.get("conversionsValue")) or 0
+        return tot
+    block("previous_period", previous_period)
+
     def recommendation_subscriptions():
         rows = _search(customer_id, "SELECT recommendation_subscription.type, recommendation_subscription.status FROM recommendation_subscription")
         return [{"type": r.get("recommendationSubscription", {}).get("type"),
@@ -2502,7 +2541,8 @@ def fetch_audit_data(customer_id, date_from, date_to):
         def pmax_asset_groups():
             rows = _search(customer_id, f"""
                 SELECT asset_group.id, asset_group.name, asset_group.status, asset_group.ad_strength,
-                       campaign.id, campaign.status, metrics.impressions
+                       campaign.id, campaign.status, metrics.impressions,
+                       metrics.cost_micros, metrics.conversions, metrics.conversions_value
                 FROM asset_group
                 WHERE {between} AND asset_group.status = 'ENABLED' AND campaign.status = 'ENABLED'
             """)
@@ -2512,8 +2552,13 @@ def fetch_audit_data(customer_id, date_from, date_to):
                 gid = str(ag.get("id"))
                 g = groups.setdefault(gid, {"id": gid, "name": ag.get("name") or gid,
                                             "campaign_id": str(r.get("campaign", {}).get("id")),
-                                            "ad_strength": ag.get("adStrength"), "impressions": 0})
-                g["impressions"] += _int_or_none(r.get("metrics", {}).get("impressions")) or 0
+                                            "ad_strength": ag.get("adStrength"), "impressions": 0,
+                                            "cost": 0.0, "conversions": 0.0, "conv_value": 0.0})
+                m_ = r.get("metrics", {})
+                g["impressions"] += _int_or_none(m_.get("impressions")) or 0
+                g["cost"] += _micros_to_units(_int_or_none(m_.get("costMicros"))) or 0
+                g["conversions"] += _float_or_none(m_.get("conversions")) or 0
+                g["conv_value"] += _float_or_none(m_.get("conversionsValue")) or 0
             return list(groups.values())
         block("pmax_asset_groups", pmax_asset_groups)
 
@@ -2651,10 +2696,11 @@ def simulated_audit_data():
             {"campaign_id": "2", "network": "SEARCH_PARTNERS", "cost": 900.0, "conversions": 1.0, "clicks": 600},
         ],
         "keywords": [
-            {"campaign_id": "2", "text": "hotel cartagena", "match_type": "BROAD", "quality_score": 4, "cost": 1500.0, "conversions": 5.0, "impressions": 52000},
-            {"campaign_id": "2", "text": "hoteles todo incluido", "match_type": "BROAD", "quality_score": 6, "cost": 1100.0, "conversions": 7.0},
-            {"campaign_id": "1", "text": "hotel demo", "match_type": "EXACT", "quality_score": 9, "cost": 900.0, "conversions": 11.0},
-            {"campaign_id": "1", "text": "hotel centro historico", "match_type": "PHRASE", "quality_score": 3, "cost": 420.0, "conversions": 1.0, "impressions": 9000},
+            {"campaign_id": "2", "text": "hotel cartagena", "match_type": "BROAD", "quality_score": 4, "cost": 1500.0, "conversions": 5.0, "impressions": 52000, "clicks": 1600},
+            {"campaign_id": "2", "text": "hoteles todo incluido", "match_type": "BROAD", "quality_score": 6, "cost": 1100.0, "conversions": 7.0, "impressions": 34000, "clicks": 700},
+            {"campaign_id": "1", "text": "hotel demo", "match_type": "EXACT", "quality_score": 9, "cost": 900.0, "conversions": 11.0, "impressions": 3000, "clicks": 640},
+            {"campaign_id": "1", "text": "hotel centro historico", "match_type": "PHRASE", "quality_score": 3, "cost": 420.0, "conversions": 1.0, "impressions": 9000, "clicks": 130},
+            {"campaign_id": "1", "text": "hoteles baratos", "match_type": "BROAD", "quality_score": 7, "cost": 380.0, "conversions": 0.0, "impressions": 8000, "clicks": 210},
         ],
         "geo_performance": [
             {"country_id": "2170", "country": "Colombia", "cost": 14800.0, "clicks": 6900, "conversions": 118.0, "value": 71200.0},
@@ -2664,14 +2710,20 @@ def simulated_audit_data():
         ],
         "adgroup_keyword_counts": [{"name": "Genéricas Cartagena", "keywords": 34}, {"name": "Marca", "keywords": 6}],
         "negatives": [{"campaign_id": "1", "text": "piscina"}],
-        "lost_is": [{"campaign_id": "1", "budget_lost": 0.27}, {"campaign_id": "2", "budget_lost": 0.04}],
+        "lost_is": [{"campaign_id": "1", "budget_lost": 0.27, "rank_lost": 0.08}, {"campaign_id": "2", "budget_lost": 0.04, "rank_lost": 0.31}],
+        "device_performance": [
+            {"device": "MOBILE", "cost": 10200.0, "clicks": 5400, "conversions": 71.0, "value": 40100.0},
+            {"device": "DESKTOP", "cost": 5200.0, "clicks": 1900, "conversions": 49.0, "value": 33800.0},
+            {"device": "TABLET", "cost": 950.0, "clicks": 260, "conversions": 2.0, "value": 1100.0},
+        ],
+        "previous_period": {"cost": 14100.0, "conversions": 138.0, "value": 88000.0, "date_from": "2026-08-14", "date_to": "2026-09-12"},
         "campaign_languages": [{"campaign_id": "1"}, {"campaign_id": "2"}],
         "assets": [{"field_type": "SITELINK"}, {"field_type": "SITELINK"}, {"field_type": "CALLOUT"}],
         "recommendation_subscriptions": None,
         "pmax_asset_groups": [
-            {"id": "g1", "name": "Habitaciones y vistas", "campaign_id": "3", "ad_strength": "POOR", "impressions": 310000},
-            {"id": "g2", "name": "Marca", "campaign_id": "3", "ad_strength": "EXCELLENT", "impressions": 190000},
-            {"id": "g3", "name": "Plan todo incluido", "campaign_id": "7", "ad_strength": "AVERAGE", "impressions": 90000},
+            {"id": "g1", "name": "Habitaciones y vistas", "campaign_id": "3", "ad_strength": "POOR", "impressions": 310000, "cost": 5200.0, "conversions": 4.0, "conv_value": 2800.0},
+            {"id": "g2", "name": "Marca", "campaign_id": "3", "ad_strength": "EXCELLENT", "impressions": 190000, "cost": 2400.0, "conversions": 48.0, "conv_value": 36100.0},
+            {"id": "g3", "name": "Plan todo incluido", "campaign_id": "7", "ad_strength": "AVERAGE", "impressions": 90000, "cost": 900.0, "conversions": 8.0, "conv_value": 0.0},
         ],
         "pmax_assets": (
             [{"asset_group_id": "g1", "field_type": "HEADLINE", "label": "LOW"}] * 3
