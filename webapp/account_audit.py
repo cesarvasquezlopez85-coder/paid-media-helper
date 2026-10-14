@@ -139,12 +139,32 @@ def _campaign_kind(c, brand_words):
     return None
 
 
-def _finding(fid, area, severity, title, detail, action, evidence=None, kind=None):
+def _finding(fid, area, severity, title, detail, action, evidence=None, kind=None, table=None):
     f = {"id": fid, "area": area, "severity": severity, "title": title, "detail": detail,
          "action": action, "evidence": (evidence or [])[:10]}
     if kind:
         f["kind"] = kind  # "oportunidad": se muestra aparte y no resta puntos
+    if table:
+        # Datos con columnas (países, dispositivos...): el informe los dibuja como tabla;
+        # "evidence" queda con las mismas filas en texto para la IA y el Markdown.
+        f["table"] = {"columns": table[0], "rows": [[str(c) for c in r] for r in table[1][:12]]}
     return f
+
+
+# Google devuelve los nombres de país en inglés; se muestran en español los más comunes en hotelería.
+COUNTRY_ES = {
+    "United States": "Estados Unidos", "Mexico": "México", "Spain": "España", "Peru": "Perú", "Brazil": "Brasil",
+    "Canada": "Canadá", "United Kingdom": "Reino Unido", "Germany": "Alemania", "France": "Francia", "Italy": "Italia",
+    "Panama": "Panamá", "Dominican Republic": "República Dominicana", "Netherlands": "Países Bajos", "Switzerland": "Suiza",
+    "Belgium": "Bélgica", "Ireland": "Irlanda", "Russia": "Rusia", "China": "China", "Japan": "Japón", "Cuba": "Cuba",
+    "Puerto Rico": "Puerto Rico", "Haiti": "Haití", "Jamaica": "Jamaica", "Trinidad and Tobago": "Trinidad y Tobago",
+    "Sweden": "Suecia", "Norway": "Noruega", "Denmark": "Dinamarca", "Poland": "Polonia", "Portugal": "Portugal",
+    "Israel": "Israel", "Turkey": "Turquía", "Australia": "Australia", "India": "India", "South Africa": "Sudáfrica",
+}
+
+
+def _country(name):
+    return COUNTRY_ES.get(name, name)
 
 
 def _money(v, cur):
@@ -346,43 +366,55 @@ def run_audit(data, ctx, days):
     else:
         geo_cost = sum(_num(g_["cost"]) for g_ in geo)
         if geo_cost > 0:
+            geo_cols = ["País", "Gasto", "% del gasto", "Clics", "Conversiones", "CPA", "Valor"]
+
+            def geo_row(g_):
+                return [_country(g_["country"]), _money(_num(g_["cost"]), cur), f"{_num(g_['cost']) / geo_cost:.0%}", f"{_num(g_['clicks']):,.0f}",
+                        f"{_num(g_['conversions']):,.1f}", _money(_num(g_["cost"]) / _num(g_["conversions"]), cur) if _num(g_["conversions"]) else "—",
+                        _money(_num(g_["value"]), cur) if _num(g_["value"]) else "—"]
+
             def geo_line(g_):
                 cpa_ = f", CPA {_money(_num(g_['cost']) / _num(g_['conversions']), cur)}" if _num(g_["conversions"]) else ""
                 val_ = f", valor {_money(_num(g_['value']), cur)}" if _num(g_["value"]) else ""
-                return f"{g_['country']}: gasto {_money(_num(g_['cost']), cur)} ({_num(g_['cost']) / geo_cost:.0%}), {_num(g_['clicks']):.0f} clics, {_num(g_['conversions']):.1f} conversiones{cpa_}{val_}"
+                return f"{_country(g_['country'])}: gasto {_money(_num(g_['cost']), cur)} ({_num(g_['cost']) / geo_cost:.0%}), {_num(g_['clicks']):.0f} clics, {_num(g_['conversions']):.1f} conversiones{cpa_}{val_}"
             shown = [g_ for g_ in geo if _num(g_["cost"]) / geo_cost >= T["geo_table_min_share"]]
             if len(shown) >= 2:
                 findings.append(_finding("B5", "Redes y segmentación", "info", "Rendimiento por país",
                     "Dónde se fue el gasto y qué convirtió en cada país, según lo que reporta Google Ads. Solo informativo: no resta puntos.",
-                    "Comparar los países entre sí y con tus mercados prioritarios.", [geo_line(g_) for g_ in shown][:8]))
+                    "Comparar los países entre sí y con tus mercados prioritarios.", [geo_line(g_) for g_ in shown][:8],
+                    table=(geo_cols, [geo_row(g_) for g_ in shown])))
             if total_conv > 0:
                 dead = [g_ for g_ in geo if _num(g_["conversions"]) == 0 and _num(g_["cost"]) / geo_cost >= T["geo_zero_conv_spend_share"]
                         and _num(g_["clicks"]) >= T["geo_zero_conv_min_clicks"]]
                 if dead:
                     findings.append(_finding("B6", "Redes y segmentación", "advertencia", "Países con gasto y sin conversiones",
                         f"Estos países suman {_money(sum(_num(g_['cost']) for g_ in dead), cur)} ({sum(_num(g_['cost']) for g_ in dead) / geo_cost:.0%} del gasto) con al menos {T['geo_zero_conv_min_clicks']} clics y ninguna conversión reportada, mientras otros países sí convierten.",
-                        "Revisar si ese país es un mercado objetivo; si no, excluirlo de la segmentación geográfica.", [geo_line(g_) for g_ in dead][:8]))
+                        "Revisar si ese país es un mercado objetivo; si no, excluirlo de la segmentación geográfica.", [geo_line(g_) for g_ in dead][:8],
+                        table=(geo_cols, [geo_row(g_) for g_ in dead])))
 
     # B7 — países por debajo de la meta declarada (se apoya en el mismo dato de B5; solo informativa)
     if geo and ctx.get("goal") in ("roas", "cpa") and _num(ctx.get("target")) > 0 and sum(_num(g_["cost"]) for g_ in geo) > 0:
         g_total = sum(_num(g_["cost"]) for g_ in geo)
         tgt = _num(ctx["target"])
-        behind = []
+        behind, behind_rows = [], []
         for g_ in geo:
             if _num(g_["cost"]) / g_total < T["geo_goal_min_share"] or _num(g_["conversions"]) <= 0:
                 continue
             if ctx["goal"] == "cpa":
                 cpa_ = _num(g_["cost"]) / _num(g_["conversions"])
                 if cpa_ > tgt * T["cpa_goal_tolerance"]:
-                    behind.append(f"{g_['country']}: CPA {_money(cpa_, cur)} contra una meta de {_money(tgt, cur)}")
+                    behind.append(f"{_country(g_['country'])}: CPA {_money(cpa_, cur)} contra una meta de {_money(tgt, cur)}")
+                    behind_rows.append([_country(g_["country"]), _money(cpa_, cur), _money(tgt, cur), f"{cpa_ / tgt - 1:+.0%}"])
             elif _num(g_["value"]) > 0:
                 roas_ = _num(g_["value"]) / _num(g_["cost"])
                 if roas_ * 100 < tgt * T["roas_goal_tolerance"]:
-                    behind.append(f"{g_['country']}: ROAS {roas_ * 100:.0f}% contra una meta de {tgt:.0f}%")
+                    behind.append(f"{_country(g_['country'])}: ROAS {roas_ * 100:.0f}% contra una meta de {tgt:.0f}%")
+                    behind_rows.append([_country(g_["country"]), f"{roas_ * 100:.0f}%", f"{tgt:.0f}%", f"{roas_ * 100 / tgt - 1:+.0%}"])
         if behind:
             findings.append(_finding("B7", "Redes y segmentación", "info", "Países que rinden por debajo de tu meta",
                 "Estos países pesan al menos el " + f"{T['geo_goal_min_share']:.0%}" + " del gasto y están peor que la meta declarada. Solo informativo: el problema general de la meta lo marca G1.",
-                "Revisar si conviene bajar la puja o el presupuesto en esos países, o separarlos en una campaña propia.", behind))
+                "Revisar si conviene bajar la puja o el presupuesto en esos países, o separarlos en una campaña propia.", behind,
+                table=(["País", "CPA logrado" if ctx["goal"] == "cpa" else "ROAS logrado", "Meta", "Diferencia"], behind_rows)))
 
     # B8 — rendimiento por dispositivo (informativa)
     dev = data.get("device_performance")
@@ -399,7 +431,11 @@ def run_audit(data, ctx, days):
                 return f"{names_.get(d_['device'], d_['device'])}: {_num(d_['cost']) / dev_cost:.0%} del gasto, {_num(d_['conversions']):.1f} conversiones{cpa_}{roas_}"
             findings.append(_finding("B8", "Redes y segmentación", "info", "Rendimiento por dispositivo",
                 "Cómo se reparten el gasto y las conversiones entre móvil, ordenador y tablet, según lo que reporta Google Ads. En hoteles es común que se navegue en móvil y se reserve en ordenador. Solo informativo.",
-                "Si un dispositivo gasta mucho y casi no convierte, revisar la página de reserva en ese dispositivo o ajustar la puja.", [dev_line(d_) for d_ in shown_]))
+                "Si un dispositivo gasta mucho y casi no convierte, revisar la página de reserva en ese dispositivo o ajustar la puja.", [dev_line(d_) for d_ in shown_],
+                table=(["Dispositivo", "% del gasto", "Gasto", "Clics", "Conversiones", "CPA", "ROAS"],
+                       [[names_.get(d_["device"], d_["device"]), f"{_num(d_['cost']) / dev_cost:.0%}", _money(_num(d_["cost"]), cur), f"{_num(d_['clicks']):,.0f}",
+                         f"{_num(d_['conversions']):,.1f}", _money(_num(d_["cost"]) / _num(d_["conversions"]), cur) if _num(d_["conversions"]) else "—",
+                         f"{_num(d_['value']) / _num(d_['cost']) * 100:.0f}%" if _num(d_["value"]) and _num(d_["cost"]) else "—"] for d_ in shown_])))
 
     # ---- C. Estructura y puja --------------------------------------------
     brand_campaigns = [c for c in enabled if _is_brand_name(c.get("name"), brand_words)]
@@ -799,7 +835,7 @@ def run_audit(data, ctx, days):
             by_camp = {}
             for g in groups:
                 by_camp.setdefault(g["campaign_id"], []).append(g)
-            lines_, notable = [], False
+            lines_, rows13, notable = [], [], False
             for cid_, gs in by_camp.items():
                 spending = [g for g in gs if _num(g.get("cost")) > 0]
                 if len(spending) < 2:
@@ -809,6 +845,8 @@ def run_audit(data, ctx, days):
                 for g in sorted(spending, key=lambda x: -_num(x["cost"])):
                     conv_share = f"{_num(g.get('conversions')) / camp_conv:.0%} de las conversiones" if camp_conv else "sin conversiones"
                     lines_.append(f"{gname(g)}: gasto {_money(_num(g['cost']), cur)} ({_num(g['cost']) / camp_cost:.0%}), {_num(g.get('conversions')):.1f} conversiones ({conv_share})")
+                    rows13.append([gname(g), _money(_num(g["cost"]), cur), f"{_num(g['cost']) / camp_cost:.0%}", f"{_num(g.get('conversions')):,.1f}",
+                                   f"{_num(g.get('conversions')) / camp_conv:.0%}" if camp_conv else "—"])
                     if _num(g.get("conversions")) == 0 and _num(g["cost"]) / pm_cost >= T["pmax_group_zero_share"]:
                         notable = True
                     if camp_conv and _num(g.get("conversions")) / camp_conv >= T["pmax_group_concentration"]:
@@ -816,7 +854,8 @@ def run_audit(data, ctx, days):
             if lines_ and notable:
                 findings.append(_finding("P13", AREA_P, "info", "Reparto del rendimiento entre grupos de recursos",
                     "Un grupo concentra casi todas las conversiones de su campaña, o hay un grupo con gasto relevante y sin conversiones. Google no explica por qué reparte así el presupuesto; solo informativo.",
-                    "Revisar los recursos y las señales de los grupos que no convierten, o aprender de lo que tiene el que sí.", lines_[:10]))
+                    "Revisar los recursos y las señales de los grupos que no convierten, o aprender de lo que tiene el que sí.", lines_[:10],
+                    table=(["Campaña · grupo de recursos", "Gasto", "% del gasto de la campaña", "Conversiones", "% de las conversiones"], rows13)))
 
         # P15 — PMax contra Search genérico (informativa; la atribución puede solaparse)
         def _perf(cs):
@@ -830,7 +869,10 @@ def run_audit(data, ctx, days):
             findings.append(_finding("P15", AREA_P, "info", "Performance Max frente a Search genérico",
                 "Comparación de CPA y ROAS entre las dos. Las dos campañas pueden atribuirse la misma reserva (PMax también muestra en búsquedas), así que es una referencia y no una prueba de cuál rinde mejor. No resta puntos.",
                 "Usarlo como contexto para repartir presupuesto, mirando también la marca dentro de PMax (P9).",
-                [_line("Performance Max", pm_c), _line("Search genérico", sg_c)]))
+                [_line("Performance Max", pm_c), _line("Search genérico", sg_c)],
+                table=(["Tipo", "Gasto", "Conversiones", "CPA", "ROAS"],
+                       [[lab, _money(t[0], cur), f"{t[1]:,.1f}", _money(t[0] / t[1], cur) if t[1] else "—", f"{t[2] / t[0] * 100:.0f}%" if t[2] and t[0] else "—"]
+                        for lab, t in (("Performance Max", pm_c), ("Search genérico", sg_c))])))
 
     # ---- G. Rendimiento contra la meta -----------------------------------
     goal, target = ctx.get("goal"), _num(ctx.get("target"))
@@ -874,19 +916,21 @@ def run_audit(data, ctx, days):
             rows_.append(("CPA", total_cost / total_conv, p_cost / p_conv, True))
         if total_value and p_val:
             rows_.append(("ROAS", total_value / total_cost * 100, p_val / p_cost * 100, False))
-        ev_, notable = [], False
+        ev_, rows5, notable = [], [], False
         for label, now, before, money in rows_:
             ch = _chg(now, before)
             if ch is None:
                 continue
             fmt = (lambda v: _money(v, cur)) if money or label == "Gasto" else ((lambda v: f"{v:.0f}%") if label == "ROAS" else (lambda v: f"{v:.0f}"))
             ev_.append(f"{label}: {fmt(before)} → {fmt(now)} ({ch:+.0%})")
+            rows5.append([label, fmt(before), fmt(now), f"{ch:+.0%}"])
             if label != "Gasto" and abs(ch) >= T["evolution_change"]:
                 notable = True
         if notable:
             findings.append(_finding("G5", "Rendimiento contra la meta", "info", "El rendimiento cambió frente al periodo anterior",
                 f"Comparación con los {days} días anteriores ({prev['date_from']} a {prev['date_to']}). Un cambio de {T['evolution_change']:.0%} o más en conversiones, CPA o ROAS merece una explicación (temporada, cambios en la cuenta, medición). Solo informativo.",
-                "Revisar si coincide con cambios en la cuenta, estacionalidad del destino o problemas de medición.", ev_))
+                "Revisar si coincide con cambios en la cuenta, estacionalidad del destino o problemas de medición.", ev_,
+                table=(["Métrica", f"Periodo anterior ({prev['date_from']} a {prev['date_to']})", "Periodo actual", "Cambio"], rows5)))
 
     # G6 — peso de la marca en las conversiones (informativa)
     brand_c = [c for c in campaigns if _campaign_kind(c, brand_words) == "search_marca"]

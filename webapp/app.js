@@ -7772,7 +7772,9 @@ function buildAuditMarkdown() {
     lines.push('', `## ${AUDIT_SEVERITY_LABELS[sev]}${sev === 'info' ? '' : 's'} (${items.length})`.replace('Críticos', 'Críticos').replace('Advertencias', 'Advertencias'));
     items.forEach((f) => {
       lines.push('', `### ${f.id} · ${f.title}`, '', `**Área:** ${f.area}${f.kind === 'oportunidad' ? ' · **Oportunidad**' : ''}`, '', f.detail, '', `**Qué hacer:** ${f.action}`);
-      if (f.evidence.length) { lines.push('', ...f.evidence.map((e) => `- ${e}`)); }
+      if (f.table) {
+        lines.push('', `| ${f.table.columns.join(' | ')} |`, `|${f.table.columns.map(() => ' --- ').join('|')}|`, ...f.table.rows.map((r) => `| ${r.join(' | ')} |`));
+      } else if (f.evidence.length) { lines.push('', ...f.evidence.map((e) => `- ${e}`)); }
     });
   });
   if (r.not_verifiable.length) {
@@ -7832,6 +7834,13 @@ const AUDIT_REPORT_CSS = `
 .ar-opp-d{color:#8a919d;font-size:16px;line-height:1.5;margin:0}
 .ar-rec{background:#f4f5f8;border-radius:12px;padding:14px 16px;margin-top:14px;font-size:16px;line-height:1.5}
 .ar-ev{margin:10px 0 0 18px;padding:0;color:#6b7280;font-size:14px;line-height:1.5}
+.ar-tw{margin-top:12px;overflow-x:auto}
+.ar-tbl{width:100%;border-collapse:collapse;font-size:14px;line-height:1.4}
+.ar-tbl th{text-align:right;color:#6b7280;font-weight:700;padding:7px 10px;border-bottom:2px solid #e3e6ec;white-space:nowrap}
+.ar-tbl td{text-align:right;padding:7px 10px;border-bottom:1px solid #eef0f4;color:#14213d;white-space:nowrap}
+.ar-tbl th:first-child,.ar-tbl td:first-child{text-align:left;white-space:normal}
+.ar-tbl td:first-child{font-weight:600}
+.ar-tbl tr:last-child td{border-bottom:none}
 .ar-ai{white-space:pre-wrap;font-size:16px;line-height:1.65}
 .ar-nv{margin:0 0 0 18px;padding:0;color:#6b7280;font-size:14px;line-height:1.6}
 .ar-note{background:#fdf3d9;border:1px solid #f2c419;border-radius:12px;padding:12px 16px;margin-bottom:18px;font-size:14px}
@@ -7910,7 +7919,8 @@ function auditReportBodyHtml() {
         <h3>${e(f.title)}</h3>
         <p class="ar-opp-d">${e(f.detail)}</p>
         <div class="ar-rec"><strong>Recomendación:</strong> ${e(f.action)}</div>
-        ${f.evidence.length ? `<ul class="ar-ev">${f.evidence.map((x) => `<li>${e(x)}</li>`).join('')}</ul>` : ''}
+        ${f.table ? `<div class="ar-tw"><table class="ar-tbl"><thead><tr>${f.table.columns.map((c) => `<th>${e(c)}</th>`).join('')}</tr></thead><tbody>${f.table.rows.map((r) => `<tr>${r.map((c) => `<td>${e(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`
+          : f.evidence.length ? `<ul class="ar-ev">${f.evidence.map((x) => `<li>${e(x)}</li>`).join('')}</ul>` : ''}
       </div>`;
   };
   const opps = r.findings.length
