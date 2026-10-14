@@ -2298,18 +2298,14 @@ def fetch_audit_data(customer_id, date_from, date_to):
 
     def customer_info():
         rows = _search(customer_id, """
-            SELECT customer.descriptive_name, customer.currency_code,
-                   customer.conversion_tracking_setting.enhanced_conversions_for_leads_enabled
+            SELECT customer.descriptive_name, customer.currency_code
             FROM customer
         """)
         c = (rows[0] if rows else {}).get("customer", {})
         data["currency"] = c.get("currencyCode") or ""
         data["account_name"] = c.get("descriptiveName") or ""
-        flag = c.get("conversionTrackingSetting", {}).get("enhancedConversionsForLeadsEnabled")
-        data["enhanced_conversions"] = bool(flag) if flag is not None else None
         return True
     block("customer", customer_info)
-    data.setdefault("enhanced_conversions", None)
     data.setdefault("currency", "")
 
     def conversion_actions():
@@ -2666,7 +2662,7 @@ def simulated_audit_data():
     ]
     return {
         "unavailable": {"recommendation_subscriptions": "Dato de ejemplo: recurso no consultado en modo simulado.", "customer": "Dato de ejemplo: campo no consultado en modo simulado."},
-        "currency": "USD", "account_name": "Hotel Demo (simulada)", "enhanced_conversions": None,
+        "currency": "USD", "account_name": "Hotel Demo (simulada)",
         "campaigns": campaigns,
         "conversion_actions": [
             {"id": "11", "name": "Reserva confirmada (web)", "status": "ENABLED", "type": "WEBPAGE", "category": "PURCHASE", "primary_for_goal": True, "lookback_days": 30},
