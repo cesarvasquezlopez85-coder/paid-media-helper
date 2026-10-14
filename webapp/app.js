@@ -2462,7 +2462,9 @@ function opportunityResultData() {
     ['Campaña', s.campaignFilter === 'all' ? 'Todas las seleccionadas' : s.campaignFilter],
     ['Campañas de marca', s.excludeBrand ? 'Excluidas' : 'Incluidas'],
   ];
-  return { summary, opps, filters, typeLabel, funnel: engine.buildOpportunityFunnel(summary.opportunities) };
+  const trend = s.source === 'api' && s.isTrend.status === 'ready' && s.isTrend.rows
+    ? engine.aggregateImpressionShareDaily(s.isTrend.rows, new Set(rows.map((r) => r.campaign))) : [];
+  return { summary, opps, filters, typeLabel, trend, funnel: engine.buildOpportunityFunnel(summary.opportunities) };
 }
 
 // CSV: resumen con los filtros arriba y, debajo, la tabla de campañas con una fila TOTAL.
@@ -2494,37 +2496,88 @@ function downloadOpportunityResult() {
   engine.downloadCsv(`oportunidad_ingresos_${new Date().toISOString().slice(0, 10)}.csv`, data);
 }
 
+// Gráficas del informe HTML de Oportunidad de ingresos. Son versiones autosuficientes de las de la
+// pantalla (colores literales y sin variables de la app), para que se vean igual fuera de la plataforma.
+function oppReportFunnelHtml(f) {
+  if (!f.has_data) return '';
+  const e = escapeHtml;
+  const pct0 = (v) => `${(v * 100).toFixed(0)}%`;
+  const box = (label, value, hl) => `<div style="border:1px solid ${hl ? '#1d6b41' : '#e3e6ec'};background:${hl ? '#e3f4ea' : '#fff'};border-radius:12px;padding:10px 14px;text-align:center"><div style="font-size:12px;color:#6b7280">${e(label)}</div><div style="font-size:18px;font-weight:800;color:${hl ? '#1d6b41' : '#14213d'}">${e(value)}</div></div>`;
+  const pill = (label, value, bg, fg) => `<div style="text-align:center"><span style="display:inline-block;background:${bg};color:${fg};border-radius:999px;padding:4px 14px;font-size:12px;font-weight:700">${e(label)}: ${e(value)}</span></div>`;
+  const col = (title, border, bg, color, nodes) => `<div style="border:1.5px solid ${border};background:${bg};border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:8px"><div style="text-align:center;font-weight:800;color:${color};text-transform:uppercase;font-size:11.5px;letter-spacing:.04em;margin-bottom:6px">${e(title)}</div>${nodes.join('')}</div>`;
+  const red = ['#d23c3c', '#fbe3e1'], green = ['#1d6b41', '#e3f4ea'];
+  const left = col('Escenario actual · con límite de presupuesto', '#f0c4c0', '#fdf3f2', '#a8231f', [
+    box('Inversión', fmtMoney(f.investment)), box('Total de búsquedas', fmtInt(f.totalQueries)),
+    pill('Perdido por presupuesto', pct0(f.lostIsBudgetPct), red[1], '#a8231f'), box('Búsquedas disponibles', fmtInt(f.availableQueries)),
+    pill('Impression Share', pct0(f.imprSharePct), red[1], '#a8231f'), box('Impresiones', fmtInt(f.impressions)),
+    box('Clics', fmtInt(f.clicks)), box('Conversiones', fmtInt(f.conversions)), box('Valor de conversión', fmtMoney(f.convValue), true)]);
+  const right = col('Escenario sin límite de presupuesto', '#bfe3cd', '#f1faf4', '#1d6b41', [
+    box('Inversión estimada', f.extraBudget != null ? fmtMoney(f.investmentUnconstrained) : 'N/D'), box('Total de búsquedas', fmtInt(f.totalQueries)),
+    pill('Perdido por presupuesto', '0%', green[1], green[0]), box('Búsquedas disponibles', fmtInt(f.totalQueries)),
+    pill('Impression Share potencial', pct0(f.potentialImprSharePct), green[1], green[0]), box('Impresiones potenciales', fmtInt(f.potentialImpressions)),
+    box('Clics potenciales', fmtInt(f.potentialClicks)), box('Conversiones potenciales', fmtInt(f.potentialConversions)), box('Valor de conversión potencial', fmtMoney(f.potentialConvValue), true)]);
+  return `<div class="ar-block"><h2 class="ar-h2">De dónde venimos y a dónde podríamos llegar</h2>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px">${left}${right}</div></div>`;
+}
+
+function oppReportShareBarsHtml(opps) {
+  const rows = opps.filter((o) => !Number.isNaN(o.impr_share));
+  if (!rows.length) return '';
+  const e = escapeHtml;
+  const sorted = [...rows].sort((a, b) => (b.lost_is_budget || 0) - (a.lost_is_budget || 0));
+  const bar = (label, v, color) => `<div style="display:flex;align-items:center;gap:10px;margin-top:5px"><div style="width:170px;font-size:12.5px;color:#6b7280;flex:none">${e(label)}</div><div style="flex:1;height:10px;background:#eceff4;border-radius:999px;overflow:hidden"><div style="width:${((v || 0) * 100).toFixed(1)}%;height:100%;background:${color}"></div></div><div style="width:40px;text-align:right;font-size:12.5px;font-weight:700;flex:none">${((v || 0) * 100).toFixed(0)}%</div></div>`;
+  const groups = sorted.map((o) => `<div style="margin-bottom:18px"><div style="font-weight:700;font-size:13.5px">${e(o.campaign)}</div>${bar('Impr. Share', o.impr_share, '#c5c9d3')}${bar('Perdido por ranking', o.lost_is_rank, '#ff9800')}${bar('Perdido por presupuesto', o.lost_is_budget, '#d23c3c')}</div>`).join('');
+  return `<div class="ar-block"><h2 class="ar-h2">Impression Share: presupuesto contra ranking<small>Ordenado de mayor a menor % perdido por presupuesto: ahí está la oportunidad de subir presupuesto.</small></h2><div class="ar-card">${groups}</div></div>`;
+}
+
+function oppReportTrendHtml(dailyRows) {
+  const rows = (dailyRows || []).filter((r) => r.impr_share != null || r.lost_is_budget != null || r.lost_is_rank != null);
+  if (rows.length < 2) return '';
+  const e = escapeHtml;
+  const W = 680, H = 230, ML = 42, MR = 16, MT = 14, MB = 28;
+  const plotW = W - ML - MR, plotH = H - MT - MB, n = rows.length;
+  const x = (i) => ML + (i / (n - 1)) * plotW;
+  const y = (v) => MT + plotH - Math.max(0, Math.min(1, v || 0)) * plotH;
+  const series = [
+    { key: 'lost_is_budget', label: 'Perdido por presupuesto', color: '#d23c3c' },
+    { key: 'lost_is_rank', label: 'Perdido por ranking', color: '#ff9800' },
+    { key: 'impr_share', label: 'Impr. Share', color: '#7d8798' },
+  ];
+  const lines = series.map((sr) => {
+    const pts = rows.map((r, i) => ({ i, v: r[sr.key] })).filter((p) => p.v != null);
+    if (pts.length < 2) return '';
+    const path = pts.map((p, k) => `${k === 0 ? 'M' : 'L'} ${x(p.i).toFixed(1)},${y(p.v).toFixed(1)}`).join(' ');
+    return `<path d="${path}" fill="none" stroke="${sr.color}" stroke-width="2.5" />`;
+  }).join('');
+  const grid = [0, 0.25, 0.5, 0.75, 1].map((fr) => `<line x1="${ML}" y1="${y(fr).toFixed(1)}" x2="${W - MR}" y2="${y(fr).toFixed(1)}" stroke="#e3e6ec" stroke-width="1" /><text x="${ML - 6}" y="${(y(fr) + 3).toFixed(1)}" font-size="10" fill="#6b7280" text-anchor="end">${(fr * 100).toFixed(0)}%</text>`).join('');
+  const every = Math.max(1, Math.ceil(n / 8));
+  const xl = rows.map((r, i) => ({ r, i })).filter(({ i }) => i % every === 0).map(({ r, i }) => {
+    const d = new Date(`${r.date}T00:00:00`);
+    const label = Number.isNaN(d.getTime()) ? r.date : d.toLocaleDateString('es-CO', { day: 'numeric', month: 'short' });
+    return `<text x="${x(i).toFixed(1)}" y="${H - 8}" font-size="10" fill="#6b7280" text-anchor="middle">${e(label)}</text>`;
+  }).join('');
+  const legend = series.map((sr) => `<span style="display:inline-flex;align-items:center;gap:6px;margin-right:16px;font-size:12.5px"><span style="width:10px;height:10px;border-radius:2px;background:${sr.color};display:inline-block"></span>${e(sr.label)}</span>`).join('');
+  return `<div class="ar-block"><h2 class="ar-h2">Evolución de Impression Share<small>Vista de cuenta día a día, ponderada por impresiones de campañas Search.</small></h2>
+    <div class="ar-card"><div style="margin-bottom:10px">${legend}</div>
+    <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Evolución diaria de Impression Share">${grid}${lines}${xl}</svg></div></div>`;
+}
+
 // Informe en HTML: un solo archivo, con el mismo estilo del informe de la auditoría
 // (AUDIT_REPORT_CSS) — se abre en cualquier navegador y se guarda como PDF con Ctrl+P.
 function opportunityReportBodyHtml() {
-  const { summary, opps, filters, typeLabel, funnel: f } = opportunityResultData();
+  const { summary, opps, filters, typeLabel, trend, funnel: f } = opportunityResultData();
   const e = escapeHtml;
   const pct0 = (v) => (v == null || Number.isNaN(v) ? 'N/D' : `${(v * 100).toFixed(0)}%`);
   const metric = (label, value) => `<div class="ar-metric"><div class="ar-metric-l">${e(label)}</div><div class="ar-metric-v">${e(value)}</div></div>`;
   const sumOf = (fn) => opps.reduce((acc, o) => acc + (fn(o) == null || Number.isNaN(fn(o)) ? 0 : fn(o)), 0);
 
-  const funnelRows = f.has_data ? [
-    ['Inversión', fmtMoney(f.investment), f.extraBudget != null ? fmtMoney(f.investmentUnconstrained) : 'N/D'],
-    ['Total de búsquedas', fmtInt(f.totalQueries), fmtInt(f.totalQueries)],
-    ['Perdido por presupuesto', pct0(f.lostIsBudgetPct), '0%'],
-    ['Búsquedas disponibles', fmtInt(f.availableQueries), fmtInt(f.totalQueries)],
-    ['Impression Share', pct0(f.imprSharePct), pct0(f.potentialImprSharePct)],
-    ['Impresiones', fmtInt(f.impressions), fmtInt(f.potentialImpressions)],
-    ['Clics', fmtInt(f.clicks), fmtInt(f.potentialClicks)],
-    ['Conversiones', fmtInt(f.conversions), fmtInt(f.potentialConversions)],
-    ['Valor de conversión', fmtMoney(f.convValue), fmtMoney(f.potentialConvValue)],
-  ] : [];
-  const funnelHtml = f.has_data ? `
-    <div class="ar-block"><h2 class="ar-h2">De dónde venimos y a dónde podríamos llegar</h2>
-    <div class="ar-card"><div class="ar-tw"><table class="ar-tbl"><thead><tr><th>Etapa</th><th>Escenario actual (con límite de presupuesto)</th><th>Escenario sin límite de presupuesto</th></tr></thead>
-    <tbody>${funnelRows.map((r) => `<tr>${r.map((c) => `<td>${e(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div></div></div>` : '';
-
+  const small = (t) => `<div style="font-weight:400;font-size:11.5px;color:#6b7280;margin-top:2px">${e(t)}</div>`;
   const body = opps.map((o) => `<tr>
-    <td>${e(o.campaign)}</td><td>${e(typeLabel(o.campaign_type))}</td><td>${e((o.bid_strategy || 'N/D').replace(/_/g, ' '))}</td>
+    <td>${e(o.campaign)}${small(`${typeLabel(o.campaign_type)} · ${(o.bid_strategy || 'N/D').replace(/_/g, ' ')}`)}</td>
     <td>${o.campaign_roas != null ? `${(o.campaign_roas * 100).toFixed(0)}%` : 'N/D'}</td>
     <td>${pct0(o.impr_share)}</td><td>${pct0(o.lost_is_rank)}</td><td>${pct0(o.lost_is_budget)}</td>
     <td>${e(fmtMoney(o.revenue_lost))}</td><td>${e(fmtMoney(o.cost))}</td><td>${e(fmtInt(o.conversions))}</td><td>${e(fmtInt(o.conversions_lost))}</td></tr>`).join('');
-  const total = `<tr><td><strong>Total</strong></td><td></td><td></td><td></td><td></td><td></td><td></td>
+  const total = `<tr><td><strong>Total</strong></td><td></td><td></td><td></td><td></td>
     <td><strong>${e(fmtMoney(sumOf((o) => o.revenue_lost)))}</strong></td><td><strong>${e(fmtMoney(sumOf((o) => o.cost)))}</strong></td>
     <td><strong>${e(fmtInt(sumOf((o) => o.conversions)))}</strong></td><td><strong>${e(fmtInt(sumOf((o) => o.conversions_lost)))}</strong></td></tr>`;
 
@@ -2544,9 +2597,11 @@ function opportunityReportBodyHtml() {
         ${metric('Gasto del periodo', fmtMoney(summary.total_cost))}
         ${metric('Valor de conversión', fmtMoney(summary.total_conv_value))}
       </div></div>
-      ${funnelHtml}
+      ${oppReportFunnelHtml(f)}
+      ${oppReportTrendHtml(trend)}
+      ${oppReportShareBarsHtml(opps)}
       <div class="ar-block"><h2 class="ar-h2">Campañas con mayor oportunidad de presupuesto<small>IS = Impression Share · LR = perdido por ranking · LB = perdido por presupuesto</small></h2>
-      <div class="ar-card"><div class="ar-tw"><table class="ar-tbl"><thead><tr><th style="min-width:240px">Campaña</th><th>Tipo</th><th>Estrategia</th><th>ROAS</th><th>IS</th><th>LR</th><th>LB</th><th>Ingresos perdidos</th><th>Gasto</th><th>Conversiones</th><th>Conv. perdidas</th></tr></thead>
+      <div class="ar-card"><div class="ar-tw"><table class="ar-tbl ar-compact"><thead><tr><th style="min-width:190px">Campaña</th><th>ROAS</th><th>IS</th><th>LR</th><th>LB</th><th>Ingresos perdidos</th><th>Gasto</th><th>Conv.</th><th>Conv. perdidas</th></tr></thead>
       <tbody>${body}${total}</tbody></table></div></div></div>
       <div class="ar-note">Es un análisis retrospectivo, no una predicción: para cada campaña asume el mismo Ad Auction Win Rate y la misma tasa de conversión que ya tiene, y calcula qué habría pasado sin el límite de presupuesto. La inversión adicional se calcula con el ROAS promedio de las campañas incluidas.</div>
       <div class="ar-foot">Generado con Paid Media Helper a partir de datos de Google Ads. Las cifras son las que reporta Google Ads: no verifican reservas reales ni ingresos finales del hotel.</div>
@@ -2558,7 +2613,7 @@ function buildOpportunityHtml() {
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Oportunidad de ingresos</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;700;800&display=swap" rel="stylesheet">
-<style>body{margin:0;padding:40px 20px;background:#f4f5f8}@media print{body{background:#fff;padding:0}@page{margin:14mm}}${AUDIT_REPORT_CSS}</style>
+<style>body{margin:0;padding:40px 20px;background:#f4f5f8}@media print{body{background:#fff;padding:0}@page{margin:14mm}}${AUDIT_REPORT_CSS}.ar-compact th,.ar-compact td{padding:7px 6px;font-size:12.5px}</style>
 </head><body>${opportunityReportBodyHtml()}</body></html>`;
 }
 
