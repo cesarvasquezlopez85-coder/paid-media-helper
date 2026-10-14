@@ -100,7 +100,7 @@ const state = {
   opportunity: {
     brandKeywords: 'marca, brand, branded, brnd',
     status: 'idle', error: null, fileName: null,
-    rows: null, campaignFilter: 'all', typeFilter: [], excludeBrand: true, hotelFilter: 'all',
+    rows: null, campaignFilter: 'all', typeFilter: [], excludeBrand: false, hotelFilter: 'all',
     sortBy: 'revenue_lost', sortDir: 'desc',
     source: 'file', // 'file' | 'api'
     api: {
@@ -2775,16 +2775,19 @@ function renderOpportunityReady() {
         </select>
       </div>` : '';
 
-  // Mismo criterio que el campo de palabras de marca: en modo API se oculta
-  // y se usa el valor ya guardado (por defecto true, excluir marca), sin
-  // pedírselo al usuario en esa pantalla; en modo archivo sigue visible.
-  const excludeBrandFieldHtml = s.source === 'file' ? `
+  // La casilla se muestra siempre (también con la API): si estaba oculta, "Todos" dejaba fuera las
+  // campañas de marca sin que se viera por qué, y no coincidía con sumar los tipos a mano.
+  const hiddenBrand = new Set(hotelFilteredRows.filter((r) => r.campaign_type === 'search_brand').map((r) => r.campaign));
+  const brandNote = s.excludeBrand && hiddenBrand.size && !s.typeFilter.includes('search_brand') && s.campaignFilter === 'all'
+    ? `<span class="field-hint">${hiddenBrand.size === 1 ? 'Hay 1 campaña de marca que no se cuenta' : `Hay ${hiddenBrand.size} campañas de marca que no se cuentan`}. Desmarca la casilla para incluir${hiddenBrand.size === 1 ? 'la' : 'las'}.</span>` : '';
+  const excludeBrandFieldHtml = `
       <div class="field">
         <label style="display:flex;align-items:center;gap:8px;font-weight:400">
           <input type="checkbox" id="opp-exclude-brand" ${s.excludeBrand ? 'checked' : ''} />
           Excluir campañas de marca (recomendado para un ROAS realista)
         </label>
-      </div>` : '';
+        ${brandNote}
+      </div>`;
 
   const filterPanel = `
     <div class="card control-panel align-end">
