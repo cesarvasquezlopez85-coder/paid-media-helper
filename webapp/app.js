@@ -100,12 +100,13 @@ const state = {
   opportunity: {
     brandKeywords: 'marca, brand, branded, brnd',
     status: 'idle', error: null, fileName: null,
-    rows: null, campaignFilter: 'all', excludeBrand: true, hotelFilter: 'all',
+    rows: null, campaignFilter: 'all', typeFilter: [], excludeBrand: true, hotelFilter: 'all',
     sortBy: 'revenue_lost', sortDir: 'desc',
     source: 'file', // 'file' | 'api'
     api: {
       statusChecked: false, configured: false,
       accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
+      accountIds: [], accountSearch: '', partial: [],
       dateFrom: '', dateTo: '', onlyActive: false,
       simulated: false, error: null,
       mcc: {
@@ -2099,7 +2100,7 @@ function runOpportunityAnalysis(text, fileName) {
     const brandKeywords = s.brandKeywords.split(',').map((v) => v.trim()).filter(Boolean);
     const rowsRaw = engine.loadCampaignReport(text, brandKeywords);
     const rows = engine.computeMetrics(rowsRaw);
-    Object.assign(s, { status: 'ready', error: null, rows, fileName, campaignFilter: 'all', hotelFilter: 'all' });
+    Object.assign(s, { status: 'ready', error: null, rows, fileName, campaignFilter: 'all', typeFilter: [], hotelFilter: 'all' });
   } catch (err) {
     Object.assign(s, { status: 'error', error: err.message || String(err), fileName, rows: null });
   }
@@ -2112,7 +2113,7 @@ function runOpportunityAnalysisFromApiRows(apiRows, fileName) {
     const brandKeywords = s.brandKeywords.split(',').map((v) => v.trim()).filter(Boolean);
     const rowsRaw = engine.loadCampaignReportFromApi(apiRows, brandKeywords);
     const rows = engine.computeMetrics(rowsRaw);
-    Object.assign(s, { status: 'ready', error: null, rows, fileName, campaignFilter: 'all', hotelFilter: 'all' });
+    Object.assign(s, { status: 'ready', error: null, rows, fileName, campaignFilter: 'all', typeFilter: [], hotelFilter: 'all' });
   } catch (err) {
     Object.assign(s, { status: 'error', error: err.message || String(err), fileName, rows: null });
   }
@@ -2154,58 +2155,98 @@ function loadOpportunityGoogleAdsAccounts() {
     });
 }
 
+const OPP_MAX_ACCOUNTS = 20;
+
+// Cuentas marcadas en la lista más la que se escriba a mano, sin repetir.
+function oppSelectedCustomerIds() {
+  const a = state.opportunity.api;
+  const manual = (a.accountIdManual || '').replace(/[^0-9]/g, '');
+  return [...new Set([...a.accountIds, ...(manual ? [manual] : [])])];
+}
+
+// Corre `worker` sobre cada elemento con pocas llamadas a la vez, para no
+// disparar decenas de consultas juntas contra la cuota de Google Ads.
+function oppMapPool(items, size, worker) {
+  const out = new Array(items.length);
+  let next = 0;
+  const run = () => {
+    if (next >= items.length) return Promise.resolve();
+    const i = next++;
+    return Promise.resolve(worker(items[i])).then((r) => { out[i] = r; }).then(run);
+  };
+  return Promise.all(Array.from({ length: Math.min(size, items.length) }, run)).then(() => out);
+}
+
 function fetchOpportunityGoogleAdsCampaigns() {
   const a = state.opportunity.api;
-  const manualId = (a.accountIdManual || '').replace(/[^0-9]/g, '');
-  const customerId = manualId || a.accountId;
-  if (!customerId && !a.simulated) { a.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
+  const ids = oppSelectedCustomerIds();
+  if (!ids.length && !a.simulated) { a.error = 'Marca al menos una cuenta o escribe su ID primero.'; render(); return; }
+  if (ids.length > OPP_MAX_ACCOUNTS) { a.error = `Elige como máximo ${OPP_MAX_ACCOUNTS} cuentas por análisis (marcaste ${ids.length}).`; render(); return; }
   if (!a.dateFrom || !a.dateTo) { a.error = 'Elige el rango de fechas primero.'; render(); return; }
 
-  a.error = null;
+  a.error = null; a.partial = [];
   state.opportunity.status = 'loading'; state.opportunity.error = null;
   render();
 
-  const params = new URLSearchParams({ customer_id: customerId || '', date_from: a.dateFrom, date_to: a.dateTo, only_active: a.onlyActive ? '1' : '0' });
-  fetch(`/api/google-ads/campaigns?${params.toString()}`)
-    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
-    .then(({ ok, data }) => {
-      if (!ok) throw new Error(data.error || 'Error desconocido.');
-      a.simulated = !!data.simulated;
-      const account = a.accounts.find((acc) => acc.id === customerId);
-      const label = a.simulated
-        ? `Google Ads (simulado) — ${a.dateFrom} a ${a.dateTo}`
-        : `Google Ads — ${account ? account.name : customerId} — ${a.dateFrom} a ${a.dateTo}`;
-      runOpportunityAnalysisFromApiRows(data.rows || [], label);
-    })
-    .catch((err) => {
-      a.error = err.message || String(err);
-      state.opportunity.status = 'idle';
-      render();
-    });
+  const targets = ids.length ? ids : [''];
+  const accountName = (id) => { const acc = a.accounts.find((x) => x.id === id); return acc ? acc.name : id; };
+  oppMapPool(targets, 4, (id) => {
+    const params = new URLSearchParams({ customer_id: id, date_from: a.dateFrom, date_to: a.dateTo, only_active: a.onlyActive ? '1' : '0' });
+    return fetch(`/api/google-ads/campaigns?${params.toString()}`)
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Error desconocido.');
+        return { id, rows: data.rows || [], simulated: !!data.simulated };
+      })
+      .catch((err) => ({ id, error: err.message || String(err) }));
+  }).then((results) => {
+    const good = results.filter((r) => !r.error);
+    const bad = results.filter((r) => r.error);
+    if (!good.length) throw new Error(bad[0].error + (bad.length > 1 ? ` (y ${bad.length - 1} cuentas más con error)` : ''));
+    a.simulated = good.some((r) => r.simulated);
+    a.partial = bad.map((r) => `${accountName(r.id)}: ${r.error}`);
+    const rows = good.flatMap((r) => r.rows);
+    let who;
+    if (a.simulated) who = 'Google Ads (simulado)';
+    else if (good.length === 1) who = `Google Ads — ${accountName(good[0].id)}`;
+    else who = `Google Ads — ${good.length} cuentas (${good.slice(0, 3).map((r) => accountName(r.id)).join(', ')}${good.length > 3 ? '…' : ''})`;
+    runOpportunityAnalysisFromApiRows(rows, `${who} — ${a.dateFrom} a ${a.dateTo}`);
+  }).catch((err) => {
+    a.error = err.message || String(err);
+    state.opportunity.status = 'idle';
+    render();
+  });
 
-  fetchOpportunityImpressionShareTrend(customerId, a.dateFrom, a.dateTo);
+  fetchOpportunityImpressionShareTrend(targets, a.dateFrom, a.dateTo);
 }
 
 // Serie diaria de Impression Share para el gráfico de tendencia — llamada
 // aparte de fetchOpportunityGoogleAdsCampaigns() para que, si esta falla,
 // no tumbe el embudo/tabla principal (que sí funcionó). Solo tiene sentido
-// en modo API: un CSV nativo de campañas no trae desglose día a día.
-function fetchOpportunityImpressionShareTrend(customerId, dateFrom, dateTo) {
+// en modo API: un CSV nativo de campañas no trae desglose día a día. Con varias
+// cuentas junta las filas de todas (una por campaña y día), que luego se agregan.
+function fetchOpportunityImpressionShareTrend(customerIds, dateFrom, dateTo) {
   const t = state.opportunity.isTrend;
   t.status = 'loading'; t.error = null;
   render();
-  const params = new URLSearchParams({ customer_id: customerId || '', date_from: dateFrom, date_to: dateTo });
-  fetch(`/api/google-ads/impression-share-daily?${params.toString()}`)
-    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
-    .then(({ ok, data }) => {
-      if (!ok) throw new Error(data.error || 'Error desconocido.');
-      t.status = 'ready'; t.rows = data.rows || [];
-      render();
-    })
-    .catch((err) => {
-      t.status = 'error'; t.error = err.message || String(err);
-      render();
-    });
+  oppMapPool(customerIds, 4, (id) => {
+    const params = new URLSearchParams({ customer_id: id || '', date_from: dateFrom, date_to: dateTo });
+    return fetch(`/api/google-ads/impression-share-daily?${params.toString()}`)
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Error desconocido.');
+        return { rows: data.rows || [] };
+      })
+      .catch((err) => ({ error: err.message || String(err) }));
+  }).then((results) => {
+    const good = results.filter((r) => !r.error);
+    if (!good.length) throw new Error(results[0].error);
+    t.status = 'ready'; t.rows = good.flatMap((r) => r.rows);
+    render();
+  }).catch((err) => {
+    t.status = 'error'; t.error = err.message || String(err);
+    render();
+  });
 }
 
 function loadOppMccGroups() {
@@ -2236,6 +2277,7 @@ function applyOppMccFilter(groupId, groupName) {
       m.accountIds = new Set((data.accounts || []).map((acc) => acc.id));
       m.accountIdsStatus = 'ready';
       if (a.accountId && !m.accountIds.has(a.accountId)) a.accountId = '';
+      a.accountIds = a.accountIds.filter((id) => m.accountIds.has(id));
       render();
     })
     .catch((err) => { m.accountIdsStatus = 'error'; m.error = err.message || String(err); render(); });
@@ -2330,17 +2372,29 @@ function renderOpportunityApiPanel() {
 
   const mccFilterActive = a.mcc.selectedId && a.mcc.accountIds;
   const visibleAccounts = mccFilterActive ? a.accounts.filter((acc) => a.mcc.accountIds.has(acc.id)) : a.accounts;
-  const accountOptions = ['<option value="">Elige una cuenta…</option>']
-    .concat(visibleAccounts.map((acc) => `<option value="${escapeHtml(acc.id)}" ${a.accountId === acc.id ? 'selected' : ''}>${escapeHtml(acc.name)} (${escapeHtml(acc.id)})</option>`))
-    .join('');
+  const q = (a.accountSearch || '').trim().toLowerCase();
+  const matches = q ? visibleAccounts.filter((acc) => `${acc.name} ${acc.id}`.toLowerCase().includes(q)) : visibleAccounts;
+  const shown = matches.slice(0, 150);
+  const selected = new Set(a.accountIds);
+  const canMarkAll = matches.length > 0 && matches.length <= OPP_MAX_ACCOUNTS;
+  const accountList = shown.length
+    ? shown.map((acc) => `<label style="display:flex;align-items:center;gap:8px;font-weight:400;padding:3px 0;cursor:pointer"><input type="checkbox" data-opp-acct="${escapeHtml(acc.id)}" ${selected.has(acc.id) ? 'checked' : ''} /><span>${escapeHtml(acc.name)} <span style="opacity:.6">(${escapeHtml(acc.id)})</span></span></label>`).join('')
+    : '<p class="footnote" style="margin:6px 0">Ninguna cuenta coincide.</p>';
 
   return `
     ${simulatedNotice}
     ${renderOppMccFilterPanel()}
-    <div class="field">
-      <label>Cuenta${mccFilterActive ? ` (${visibleAccounts.length} en "${escapeHtml(a.mcc.selectedName)}")` : ''}</label>
-      <select id="opp-api-account" style="width:320px">${accountOptions}</select>
+    <div class="field" style="min-width:380px">
+      <label>Cuentas a analizar juntas${mccFilterActive ? ` (${visibleAccounts.length} en "${escapeHtml(a.mcc.selectedName)}")` : ''}</label>
+      <input type="text" id="opp-api-account-search" placeholder="Buscar por nombre o ID…" value="${escapeHtml(a.accountSearch || '')}" style="width:380px" />
+      <div style="width:380px;max-height:230px;overflow:auto;border:1px solid var(--gray-200);border-radius:8px;padding:6px 12px;margin-top:6px;background:var(--white)">${accountList}</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
+        <button class="btn-outline xs" data-action="opp-acct-all" ${canMarkAll ? '' : 'disabled'} title="${canMarkAll ? '' : `Se pueden marcar todas solo cuando hay ${OPP_MAX_ACCOUNTS} o menos a la vista`}">Marcar las ${matches.length} a la vista</button>
+        <button class="btn-outline xs" data-action="opp-acct-none" ${a.accountIds.length ? '' : 'disabled'}>Quitar marcas</button>
+        <span class="footnote">${a.accountIds.length} marcada${a.accountIds.length === 1 ? '' : 's'} · máximo ${OPP_MAX_ACCOUNTS} por análisis${matches.length > shown.length ? ` · mostrando ${shown.length} de ${matches.length}, afina la búsqueda` : ''}</span>
+      </div>
     </div>
+
     <div class="field">
       <label>...o escribe el ID de la cuenta</label>
       <input type="text" id="opp-api-account-manual" value="${escapeHtml(a.accountIdManual)}" placeholder="ej. 6862893390" style="width:160px" />
@@ -2363,6 +2417,7 @@ function renderOpportunityApiPanel() {
     </div>
     <button class="btn-accent" data-action="opp-api-fetch">Traer datos de Google Ads</button>
     ${a.error ? `<div class="error-panel" style="margin-top:10px"><strong>No se pudo traer el reporte.</strong> ${escapeHtml(a.error)}</div>` : ''}
+    ${a.partial && a.partial.length ? `<div class="error-panel" style="margin-top:10px"><strong>${a.partial.length === 1 ? 'Una cuenta no se pudo traer y quedó fuera del análisis:' : `${a.partial.length} cuentas no se pudieron traer y quedaron fuera del análisis:`}</strong><ul style="margin:6px 0 0 18px">${a.partial.map((p) => `<li>${escapeHtml(p)}</li>`).join('')}</ul></div>` : ''}
   `;
 }
 
@@ -2380,10 +2435,11 @@ function getOpportunityFilteredRows() {
   const s = state.opportunity;
   let rows = s.rows || [];
   if (s.hotelFilter !== 'all') rows = rows.filter((r) => deriveHotelName(r.campaign) === s.hotelFilter);
-  // Elegir una campaña específica es una decisión explícita del usuario —
-  // se muestra igual aunque sea de marca, no la tapa el checkbox de excluir.
+  if (s.typeFilter.length) rows = rows.filter((r) => s.typeFilter.includes(r.campaign_type));
+  // Elegir una campaña específica, o el tipo "Search (marca)", es una decisión explícita
+  // del usuario: se muestra igual aunque sea de marca, no la tapa el checkbox de excluir.
   if (s.campaignFilter !== 'all') return rows.filter((r) => r.campaign === s.campaignFilter);
-  return s.excludeBrand ? rows.filter((r) => r.campaign_type !== 'search_brand') : rows;
+  return s.excludeBrand && !s.typeFilter.includes('search_brand') ? rows.filter((r) => r.campaign_type !== 'search_brand') : rows;
 }
 
 function renderOpportunityPage() {
@@ -2695,7 +2751,20 @@ function renderOpportunityReady() {
   const allRows = s.rows || [];
   const allHotels = [...new Set(allRows.map((r) => deriveHotelName(r.campaign)))].sort((a, b) => a.localeCompare(b));
   const hotelFilteredRows = s.hotelFilter === 'all' ? allRows : allRows.filter((r) => deriveHotelName(r.campaign) === s.hotelFilter);
-  const allCampaignNames = [...new Set(hotelFilteredRows.map((r) => r.campaign))].sort((a, b) => a.localeCompare(b));
+  const typeFilteredRows = s.typeFilter.length ? hotelFilteredRows.filter((r) => s.typeFilter.includes(r.campaign_type)) : hotelFilteredRows;
+  const allCampaignNames = [...new Set(typeFilteredRows.map((r) => r.campaign))].sort((a, b) => a.localeCompare(b));
+  const typeOrder = Object.keys(engine.CAMPAIGN_TYPE_LABELS);
+  const presentTypes = [...new Set(allRows.map((r) => r.campaign_type).filter(Boolean))]
+    .sort((a, b) => (typeOrder.indexOf(a) + 1 || 99) - (typeOrder.indexOf(b) + 1 || 99));
+  const typeChip = (on, attrs, label) => `<button class="${on ? 'btn-accent' : 'btn-outline'} xs" ${attrs} aria-pressed="${on}">${escapeHtml(label)}</button>`;
+  const typeFieldHtml = presentTypes.length > 1 ? `
+      <div class="field">
+        <label>Tipo de campaña</label>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          ${typeChip(!s.typeFilter.length, 'data-opp-type="__all"', 'Todos')}
+          ${presentTypes.map((t) => typeChip(s.typeFilter.includes(t), `data-opp-type="${escapeHtml(t)}"`, engine.CAMPAIGN_TYPE_LABELS[t] || t)).join('')}
+        </div>
+      </div>` : '';
 
   const hotelFieldHtml = allHotels.length > 1 ? `
       <div class="field">
@@ -2721,6 +2790,7 @@ function renderOpportunityReady() {
     <div class="card control-panel align-end">
       ${excludeBrandFieldHtml}
       ${hotelFieldHtml}
+      ${typeFieldHtml}
       <div class="field">
         <label>Ver solo esta campaña</label>
         <select id="opp-campaign-filter" style="width:320px">
@@ -9118,14 +9188,33 @@ function bindEvents() {
     render();
   });
 
+  document.querySelectorAll('[data-opp-type]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const s = state.opportunity;
+      const t = btn.dataset.oppType;
+      if (t === '__all') s.typeFilter = [];
+      else s.typeFilter = s.typeFilter.includes(t) ? s.typeFilter.filter((x) => x !== t) : [...s.typeFilter, t];
+      s.campaignFilter = 'all';
+      render();
+    });
+  });
+
   const oppCampaignFilter = document.getElementById('opp-campaign-filter');
   if (oppCampaignFilter) oppCampaignFilter.addEventListener('change', (e) => {
     state.opportunity.campaignFilter = e.target.value;
     render();
   });
 
-  const oppApiAccount = document.getElementById('opp-api-account');
-  if (oppApiAccount) oppApiAccount.addEventListener('change', (e) => { state.opportunity.api.accountId = e.target.value; });
+  const oppAcctSearch = document.getElementById('opp-api-account-search');
+  if (oppAcctSearch) oppAcctSearch.addEventListener('input', (e) => { state.opportunity.api.accountSearch = e.target.value; render(); });
+  document.querySelectorAll('[data-opp-acct]').forEach((box) => {
+    box.addEventListener('change', (e) => {
+      const a = state.opportunity.api;
+      const id = e.target.dataset.oppAcct;
+      a.accountIds = e.target.checked ? [...new Set([...a.accountIds, id])] : a.accountIds.filter((x) => x !== id);
+      render();
+    });
+  });
   const oppApiAccountManual = document.getElementById('opp-api-account-manual');
   if (oppApiAccountManual) oppApiAccountManual.addEventListener('input', (e) => { state.opportunity.api.accountIdManual = e.target.value; });
   const oppMccFilter = document.getElementById('opp-mcc-filter');
@@ -9754,6 +9843,17 @@ function handleAction(action) {
     case 'opp-mcc-load': loadOppMccGroups(); break;
     case 'opp-mcc-clear': clearOppMccFilter(); break;
     case 'opp-api-fetch': fetchOpportunityGoogleAdsCampaigns(); break;
+    case 'opp-acct-all': {
+      const a = state.opportunity.api;
+      const mccOn = a.mcc.selectedId && a.mcc.accountIds;
+      const pool = mccOn ? a.accounts.filter((acc) => a.mcc.accountIds.has(acc.id)) : a.accounts;
+      const q = (a.accountSearch || '').trim().toLowerCase();
+      const vis = q ? pool.filter((acc) => `${acc.name} ${acc.id}`.toLowerCase().includes(q)) : pool;
+      if (vis.length && vis.length <= OPP_MAX_ACCOUNTS) a.accountIds = [...new Set([...a.accountIds, ...vis.map((acc) => acc.id)])].slice(0, OPP_MAX_ACCOUNTS);
+      render();
+      break;
+    }
+    case 'opp-acct-none': state.opportunity.api.accountIds = []; render(); break;
 
     case 'roas-api-load-accounts': loadRoasGoogleAdsAccounts(); break;
     case 'roas-mcc-load': loadRoasMccGroups(); break;
