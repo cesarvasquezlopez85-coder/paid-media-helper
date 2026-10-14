@@ -2260,7 +2260,7 @@ def fetch_audit_data(customer_id, date_from, date_to):
     campaigns = []
     for r in _search(customer_id, f"""
         SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type,
-               campaign.bidding_strategy_type, campaign.campaign_budget,
+               campaign.bidding_strategy_type, campaign.campaign_budget, campaign.start_date_time,
                campaign.network_settings.target_google_search,
                campaign.network_settings.target_search_network,
                campaign.network_settings.target_content_network,
@@ -2277,6 +2277,7 @@ def fetch_audit_data(customer_id, date_from, date_to):
             "channel_type": c.get("advertisingChannelType") or "UNKNOWN",
             "bidding": c.get("biddingStrategyType") or "UNSPECIFIED",
             "budget_resource": c.get("campaignBudget"),
+            "start_date": (c.get("startDateTime") or "")[:10] or None,
             "search_partners": bool(ns.get("targetSearchNetwork")),
             "display_network": bool(ns.get("targetContentNetwork")),
             "geo_target_type": c.get("geoTargetTypeSetting", {}).get("positiveGeoTargetType"),
@@ -2363,7 +2364,7 @@ def fetch_audit_data(customer_id, date_from, date_to):
 
     def network_split():
         rows = _search(customer_id, f"""
-            SELECT campaign.id, segments.ad_network_type, metrics.cost_micros, metrics.conversions
+            SELECT campaign.id, segments.ad_network_type, metrics.cost_micros, metrics.conversions, metrics.clicks
             FROM campaign
             WHERE {between} AND campaign.advertising_channel_type = 'SEARCH' AND metrics.cost_micros > 0
         """)
@@ -2372,13 +2373,14 @@ def fetch_audit_data(customer_id, date_from, date_to):
             "network": r.get("segments", {}).get("adNetworkType"),
             "cost": _micros_to_units(_int_or_none(r.get("metrics", {}).get("costMicros"))) or 0,
             "conversions": _float_or_none(r.get("metrics", {}).get("conversions")) or 0,
+            "clicks": _int_or_none(r.get("metrics", {}).get("clicks")) or 0,
         } for r in rows]
     block("network_split", network_split)
 
     def keywords():
         rows = _search(customer_id, f"""
             SELECT campaign.id, ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type,
-                   ad_group_criterion.quality_info.quality_score, metrics.cost_micros, metrics.conversions
+                   ad_group_criterion.quality_info.quality_score, metrics.cost_micros, metrics.conversions, metrics.impressions
             FROM keyword_view
             WHERE {between} AND ad_group_criterion.status = 'ENABLED'
               AND campaign.status = 'ENABLED' AND ad_group.status = 'ENABLED' AND metrics.cost_micros > 0
@@ -2394,6 +2396,7 @@ def fetch_audit_data(customer_id, date_from, date_to):
                 "quality_score": _int_or_none(crit.get("qualityInfo", {}).get("qualityScore")),
                 "cost": _micros_to_units(_int_or_none(r.get("metrics", {}).get("costMicros"))) or 0,
                 "conversions": _float_or_none(r.get("metrics", {}).get("conversions")) or 0,
+                "impressions": _int_or_none(r.get("metrics", {}).get("impressions")) or 0,
             })
         return out
     block("keywords", keywords)
@@ -2453,6 +2456,40 @@ def fetch_audit_data(customer_id, date_from, date_to):
             out.append({"field_type": r.get("customerAsset", {}).get("fieldType")})
         return out
     block("assets", assets)
+
+    # B5 / B6: rendimiento por país. geographic_view separa "presencia" e "interés"
+    # en filas distintas; se suman por país. Los nombres salen de geo_target_constant.
+    def geo_performance():
+        rows = _search(customer_id, f"""
+            SELECT geographic_view.country_criterion_id, metrics.cost_micros, metrics.clicks,
+                   metrics.conversions, metrics.conversions_value
+            FROM geographic_view
+            WHERE {between} AND metrics.cost_micros > 0
+            ORDER BY metrics.cost_micros DESC LIMIT 500
+        """)
+        agg = {}
+        for r in rows:
+            cid = str(r.get("geographicView", {}).get("countryCriterionId") or "")
+            if not cid:
+                continue
+            m = r.get("metrics", {})
+            a = agg.setdefault(cid, {"country_id": cid, "country": cid, "cost": 0.0, "clicks": 0, "conversions": 0.0, "value": 0.0})
+            a["cost"] += _micros_to_units(_int_or_none(m.get("costMicros"))) or 0
+            a["clicks"] += _int_or_none(m.get("clicks")) or 0
+            a["conversions"] += _float_or_none(m.get("conversions")) or 0
+            a["value"] += _float_or_none(m.get("conversionsValue")) or 0
+        if agg:
+            try:
+                inl = ", ".join(f"'geoTargetConstants/{i}'" for i in sorted(agg))
+                for r in _search(customer_id, f"SELECT geo_target_constant.resource_name, geo_target_constant.name FROM geo_target_constant WHERE geo_target_constant.resource_name IN ({inl})"):
+                    g = r.get("geoTargetConstant", {})
+                    cid = (g.get("resourceName") or "").split("/")[-1]
+                    if cid in agg and g.get("name"):
+                        agg[cid]["country"] = g["name"]
+            except Exception:  # noqa: BLE001 — sin nombres se muestra el código del país
+                pass
+        return sorted(agg.values(), key=lambda a: -a["cost"])
+    block("geo_performance", geo_performance)
 
     def recommendation_subscriptions():
         rows = _search(customer_id, "SELECT recommendation_subscription.type, recommendation_subscription.status FROM recommendation_subscription")
@@ -2579,7 +2616,8 @@ def simulated_audit_data():
         camp("2", "Hotel Demo - CO:es - Search Todo Incluido", "SEARCH", "TARGET_SPEND", 4300, 18, 9400, 180000, search_partners=True),
         camp("3", "Hotel Demo - PMAX Reservas", "PERFORMANCE_MAX", "MAXIMIZE_CONVERSION_VALUE", 7600, 52, 38900, 520000, geo_target_type=None, budget_resource="customers/1/campaignBudgets/3"),
         camp("4", "Hotel Demo - Display Remarketing", "DISPLAY", "MAXIMIZE_CONVERSIONS", 1200, 6, 2100, 410000, geo_target_type="PRESENCE"),
-        camp("5", "Hotel Demo - Search Fin de Año", "SEARCH", "TARGET_CPA", 0, 0, 0, 0, geo_target_type="PRESENCE"),
+        camp("5", "Hotel Demo - Search Fin de Año", "SEARCH", "TARGET_CPA", 0, 0, 0, 0, geo_target_type="PRESENCE", start_date="2024-11-02"),
+        camp("8", "Hotel Demo - Search Semana Santa (nueva)", "SEARCH", "TARGET_CPA", 0, 0, 0, 0, geo_target_type="PRESENCE", start_date=datetime.date.today().isoformat()),
     ]
     return {
         "unavailable": {"recommendation_subscriptions": "Dato de ejemplo: recurso no consultado en modo simulado.", "customer": "Dato de ejemplo: campo no consultado en modo simulado."},
@@ -2607,16 +2645,22 @@ def simulated_audit_data():
             {"term": "hotel con piscina cartagena", "campaign_id": "1", "cost": 720.0, "conversions": 5.0},
         ],
         "network_split": [
-            {"campaign_id": "1", "network": "SEARCH", "cost": 7900.0, "conversions": 55.0},
-            {"campaign_id": "1", "network": "SEARCH_PARTNERS", "cost": 1900.0, "conversions": 6.0},
-            {"campaign_id": "2", "network": "SEARCH", "cost": 3400.0, "conversions": 14.0},
-            {"campaign_id": "2", "network": "SEARCH_PARTNERS", "cost": 900.0, "conversions": 1.0},
+            {"campaign_id": "1", "network": "SEARCH", "cost": 7900.0, "conversions": 55.0, "clicks": 4100},
+            {"campaign_id": "1", "network": "SEARCH_PARTNERS", "cost": 1900.0, "conversions": 6.0, "clicks": 1300},
+            {"campaign_id": "2", "network": "SEARCH", "cost": 3400.0, "conversions": 14.0, "clicks": 1900},
+            {"campaign_id": "2", "network": "SEARCH_PARTNERS", "cost": 900.0, "conversions": 1.0, "clicks": 600},
         ],
         "keywords": [
-            {"campaign_id": "2", "text": "hotel cartagena", "match_type": "BROAD", "quality_score": 4, "cost": 1500.0, "conversions": 5.0},
+            {"campaign_id": "2", "text": "hotel cartagena", "match_type": "BROAD", "quality_score": 4, "cost": 1500.0, "conversions": 5.0, "impressions": 52000},
             {"campaign_id": "2", "text": "hoteles todo incluido", "match_type": "BROAD", "quality_score": 6, "cost": 1100.0, "conversions": 7.0},
             {"campaign_id": "1", "text": "hotel demo", "match_type": "EXACT", "quality_score": 9, "cost": 900.0, "conversions": 11.0},
-            {"campaign_id": "1", "text": "hotel centro historico", "match_type": "PHRASE", "quality_score": 3, "cost": 420.0, "conversions": 1.0},
+            {"campaign_id": "1", "text": "hotel centro historico", "match_type": "PHRASE", "quality_score": 3, "cost": 420.0, "conversions": 1.0, "impressions": 9000},
+        ],
+        "geo_performance": [
+            {"country_id": "2170", "country": "Colombia", "cost": 14800.0, "clicks": 6900, "conversions": 118.0, "value": 71200.0},
+            {"country_id": "2840", "country": "Estados Unidos", "cost": 820.0, "clicks": 310, "conversions": 0.0, "value": 0.0},
+            {"country_id": "2484", "country": "México", "cost": 640.0, "clicks": 260, "conversions": 4.0, "value": 2900.0},
+            {"country_id": "2862", "country": "Venezuela", "cost": 90.0, "clicks": 40, "conversions": 0.0, "value": 0.0},
         ],
         "adgroup_keyword_counts": [{"name": "Genéricas Cartagena", "keywords": 34}, {"name": "Marca", "keywords": 6}],
         "negatives": [{"campaign_id": "1", "text": "piscina"}],

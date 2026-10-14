@@ -12,6 +12,7 @@ inventados. Una revisión cuyos datos no se pudieron leer NO genera hallazgo:
 queda en "no_verificables" para no inventar un Crítico con un campo dudoso.
 """
 
+import datetime
 import re
 
 SEVERITIES = ("critico", "advertencia", "info")
@@ -20,15 +21,19 @@ SEVERITY_POINTS = {"critico": 5, "advertencia": 2, "info": 0}
 THRESHOLDS = {
     "partner_spend_share": 0.10,       # B2: socios > 10% del gasto de Search
     "partner_cpa_ratio": 1.3,          # B2: y CPA > 1,3x el de Google Search
+    "partner_min_clicks": 30,          # B2: muestra mínima de clics en socios
+    "geo_zero_conv_spend_share": 0.03, # B6: país con >= 3% del gasto y 0 conversiones
+    "geo_zero_conv_min_clicks": 30,    # B6
+    "geo_table_min_share": 0.01,       # B5: países que se listan (>= 1% del gasto)
+    "new_campaign_days": 14,           # C6: campañas más nuevas que esto no cuentan como "sin impresiones"
     "brand_leak_share": 0.10,          # C2: marca en genéricas > 10% de su gasto
     "smart_bidding_min_conv_30d": 15,  # C4
     "lost_is_budget": 0.15,            # C5
     "wide_ad_group_keywords": 20,      # C7 (solo info)
-    "broad_spend_share": 0.30,         # D1
     "waste_spend_share": 0.15,         # D3: gasto sin conversión / gasto Search
     "negative_theme_share": 0.03,      # D4
     "low_quality_score": 4,            # D5
-    "low_quality_min_spend": 30,       # D5
+    "low_quality_spend_share": 0.01,   # D5: gasto de la palabra >= 1% del gasto de Search
     "min_lookback_days": 30,           # A10
     "min_sitelinks": 4,                # E3
     "pmax_min_conv_30d": 30,           # P2
@@ -60,6 +65,12 @@ RISKY_AUTO_APPLY = {
     "KEYWORD_MATCH_TYPE", "MOVE_UNUSED_BUDGET", "SITELINK_ASSET", "CALLOUT_ASSET",
     "RAISE_TARGET_CPA", "LOWER_TARGET_ROAS", "MAXIMIZE_CONVERSION_VALUE_OPT_IN",
 }
+# Riesgo de cada recomendación que Google puede aplicar sola: alto = mueve dinero,
+# puja o amplía la concordancia; medio = agrega activos.
+AUTO_APPLY_RISK = {t: "alto" for t in RISKY_AUTO_APPLY}
+for _t in ("SITELINK_ASSET", "CALLOUT_ASSET", "ENHANCED_CPC_OPT_IN"):
+    AUTO_APPLY_RISK[_t] = "medio"
+
 # Nombres legibles para el informe (el tipo crudo de Google no le dice nada a un cliente).
 AUTO_APPLY_LABELS = {
     "CAMPAIGN_BUDGET": "Ajustar presupuestos de campaña",
@@ -117,9 +128,26 @@ def _campaign_kind(c, brand_words):
     return None
 
 
-def _finding(fid, area, severity, title, detail, action, evidence=None):
-    return {"id": fid, "area": area, "severity": severity, "title": title, "detail": detail,
-            "action": action, "evidence": (evidence or [])[:10]}
+def _finding(fid, area, severity, title, detail, action, evidence=None, kind=None):
+    f = {"id": fid, "area": area, "severity": severity, "title": title, "detail": detail,
+         "action": action, "evidence": (evidence or [])[:10]}
+    if kind:
+        f["kind"] = kind  # "oportunidad": se muestra aparte y no resta puntos
+    return f
+
+
+def parse_negative_themes(raw):
+    """Temas de negativos del cuestionario: una línea por tema, 'Nombre: palabra, palabra'.
+    Vacío = los temas por defecto."""
+    themes = {}
+    for line in (raw or "").splitlines():
+        if ":" not in line:
+            continue
+        name, words = line.split(":", 1)
+        ws = [w.strip() for w in words.split(",") if w.strip()]
+        if name.strip() and ws:
+            themes[name.strip()] = r"\b(" + "|".join(re.escape(w) for w in ws) + r")\b"
+    return themes or dict(NEGATIVE_THEMES)
 
 
 def _money(v, cur):
@@ -147,6 +175,7 @@ def run_audit(data, ctx, days):
     def nv(fid, title, reason):
         not_verifiable.append({"id": fid, "title": title, "reason": reason})
 
+    booking_detected = None  # nombre de la conversión que se tomó como "reserva" (se muestra en el informe)
     campaigns = data.get("campaigns") or []
     enabled = [c for c in campaigns if c.get("status") == "ENABLED"]
     total_cost = sum(_num(c.get("cost")) for c in campaigns)
@@ -173,6 +202,7 @@ def run_audit(data, ctx, days):
             if cands and action_metrics:
                 cands = sorted(cands, key=lambda a: -_num((action_metrics.get(a["name"]) or {}).get("conversions")))
             booking = cands[0] if cands else None
+        booking_detected = booking["name"] if booking else None
 
         if not primary:
             findings.append(_finding("A1", "Conversiones", "critico", "No hay ninguna conversión primaria activa",
@@ -232,19 +262,19 @@ def run_audit(data, ctx, days):
                 uses_value = [c["name"] for c in enabled if c.get("bidding") in VALUE_BIDDING]
                 if uses_value or ctx.get("goal") == "roas":
                     findings.append(_finding("A7", "Conversiones", "critico", "La reserva no trae valor y hay puja o meta por ROAS",
-                        "Sin valor de conversión, el ROAS no se puede calcular y las pujas por valor no tienen qué optimizar.",
+                        "Sin valor de conversión, el ROAS no se puede calcular y las pujas por valor no tienen qué optimizar: la puja no distingue una reserva grande de una pequeña.",
                         "Pasar el valor de la reserva (precio total) desde la etiqueta o configurar un valor por defecto.", uses_value))
                 else:
                     findings.append(_finding("A8", "Conversiones", "advertencia", "La reserva no trae valor",
-                        "Las campañas pujan por conversiones, pero sin valor no se puede medir ROAS ni priorizar reservas más caras.",
+                        "Las campañas pujan por conversiones, pero sin valor no se puede medir ROAS ni priorizar reservas más caras: la optimización trata todas las reservas igual.",
                         "Pasar el valor de la reserva desde la etiqueta."))
         elif booking is not None:
             nv("A7", "Valor de la reserva", "No se pudieron leer las conversiones por acción.")
 
         if booking is not None and _num(booking.get("lookback_days")) and _num(booking["lookback_days"]) < T["min_lookback_days"]:
             findings.append(_finding("A10", "Conversiones", "info", "Ventana de conversión corta para una reserva",
-                f"La conversión '{booking['name']}' usa {int(booking['lookback_days'])} días; la decisión de reservar suele tardar más.",
-                f"Considerar {T['min_lookback_days']} días o más."))
+                f"La conversión '{booking['name']}' usa {int(booking['lookback_days'])} días; si tus huéspedes tardan más entre el primer clic y la reserva, esas reservas no se atribuyen a la campaña.",
+                f"Validar si la ventana cubre el ciclo de decisión de tus huéspedes; si no, considerar {T['min_lookback_days']} días o más."))
 
     # Google no devuelve por API si las conversiones mejoradas están activadas
     # (omite el campo cuando están apagadas), así que casi siempre llega None.
@@ -282,14 +312,18 @@ def run_audit(data, ctx, days):
         g_cost = sum(_num(r["cost"]) for r in net if r.get("network") == "SEARCH")
         g_conv = sum(_num(r["conversions"]) for r in net if r.get("network") == "SEARCH")
         tot = p_cost + g_cost
-        if tot > 0 and p_cost / tot > T["partner_spend_share"]:
+        p_clicks = sum(_num(r.get("clicks")) for r in net if r.get("network") == "SEARCH_PARTNERS")
+        if tot > 0 and p_cost / tot > T["partner_spend_share"] and p_clicks >= T["partner_min_clicks"]:
             p_cpa = p_cost / p_conv if p_conv else None
             g_cpa = g_cost / g_conv if g_conv else None
             worse = (p_cpa is None and g_cpa is not None) or (p_cpa is not None and g_cpa is not None and p_cpa > g_cpa * T["partner_cpa_ratio"])
             if worse:
                 findings.append(_finding("B2", "Redes y segmentación", "advertencia", "La red de socios de búsqueda gasta más y convierte peor",
                     f"Socios de búsqueda: {p_cost / tot:.0%} del gasto de Search, " + (f"CPA {_money(p_cpa, cur)} contra {_money(g_cpa, cur)} en Google Search." if p_cpa and g_cpa else "sin conversiones frente a Google Search."),
-                    "Desactivar la red de socios en las campañas afectadas o acotar el presupuesto.", [c["name"] for c in partner_campaigns][:6]))
+                    "Desactivar la red de socios en las campañas afectadas o acotar el presupuesto.",
+                    [f"Google Search: gasto {_money(g_cost, cur)}, {g_conv:.0f} conversiones" + (f", CPA {_money(g_cpa, cur)}" if g_cpa else ""),
+                     f"Socios de búsqueda: gasto {_money(p_cost, cur)}, {p_conv:.0f} conversiones, {p_clicks:.0f} clics" + (f", CPA {_money(p_cpa, cur)}" if p_cpa else "")]
+                    + [c["name"] for c in partner_campaigns][:6]))
 
     content_net = [c["name"] for c in search_enabled if c.get("display_network")]
     if content_net:
@@ -307,12 +341,46 @@ def run_audit(data, ctx, days):
             findings.append(_finding("B4", "Redes y segmentación", "info", "Campañas sin idioma configurado",
                 "Sin idioma, Google muestra los anuncios a cualquier idioma del navegador.", "Elegir los idiomas de los mercados objetivo.", no_lang))
 
+    # B5 / B6 — rendimiento por país. B5 solo muestra; B6 marca el gasto sin conversiones.
+    geo = data.get("geo_performance")
+    if geo is None:
+        nv("B5", "Rendimiento por país", "No se pudo leer el rendimiento por ubicación: " + unavailable.get("geo_performance", "sin detalle"))
+        nv("B6", "Países con gasto y sin conversiones", "No se pudo leer el rendimiento por ubicación: " + unavailable.get("geo_performance", "sin detalle"))
+    else:
+        geo_cost = sum(_num(g_["cost"]) for g_ in geo)
+        if geo_cost > 0:
+            def geo_line(g_):
+                cpa_ = f", CPA {_money(_num(g_['cost']) / _num(g_['conversions']), cur)}" if _num(g_["conversions"]) else ""
+                val_ = f", valor {_money(_num(g_['value']), cur)}" if _num(g_["value"]) else ""
+                return f"{g_['country']}: gasto {_money(_num(g_['cost']), cur)} ({_num(g_['cost']) / geo_cost:.0%}), {_num(g_['clicks']):.0f} clics, {_num(g_['conversions']):.1f} conversiones{cpa_}{val_}"
+            shown = [g_ for g_ in geo if _num(g_["cost"]) / geo_cost >= T["geo_table_min_share"]]
+            if len(shown) >= 2:
+                findings.append(_finding("B5", "Redes y segmentación", "info", "Rendimiento por país",
+                    "Dónde se fue el gasto y qué convirtió en cada país, según lo que reporta Google Ads. Solo informativo: no resta puntos.",
+                    "Comparar los países entre sí y con tus mercados prioritarios.", [geo_line(g_) for g_ in shown][:8]))
+            if total_conv > 0:
+                dead = [g_ for g_ in geo if _num(g_["conversions"]) == 0 and _num(g_["cost"]) / geo_cost >= T["geo_zero_conv_spend_share"]
+                        and _num(g_["clicks"]) >= T["geo_zero_conv_min_clicks"]]
+                if dead:
+                    findings.append(_finding("B6", "Redes y segmentación", "advertencia", "Países con gasto y sin conversiones",
+                        f"Estos países suman {_money(sum(_num(g_['cost']) for g_ in dead), cur)} ({sum(_num(g_['cost']) for g_ in dead) / geo_cost:.0%} del gasto) con al menos {T['geo_zero_conv_min_clicks']} clics y ninguna conversión reportada, mientras otros países sí convierten.",
+                        "Revisar si ese país es un mercado objetivo; si no, excluirlo de la segmentación geográfica.", [geo_line(g_) for g_ in dead][:8]))
+
     # ---- C. Estructura y puja --------------------------------------------
     brand_campaigns = [c for c in enabled if _is_brand_name(c.get("name"), brand_words)]
     if enabled and not brand_campaigns:
-        findings.append(_finding("C1", "Estructura y puja", "critico", "No hay campaña de marca activa",
-            "Sin una campaña de marca, las búsquedas del nombre del hotel las captura la competencia o las OTAs, o se mezclan con las genéricas.",
-            "Crear una campaña de marca separada del resto.", ["Se busca una campaña activa con alguna de estas palabras en el nombre: " + ", ".join(brand_words)]))
+        # El nombre no prueba la función de una campaña: antes de avisar se buscan también
+        # palabras clave de marca (con los términos de marca del cuestionario).
+        kws_ = data.get("keywords")
+        if not brand_terms:
+            nv("C1", "Estrategia de protección de marca", "Ninguna campaña activa lleva palabras de marca en el nombre y faltan los términos de marca en el cuestionario para buscar palabras clave de marca.")
+        elif kws_ is None:
+            nv("C1", "Estrategia de protección de marca", "No se pudieron leer las palabras clave: " + unavailable.get("keywords", "sin detalle"))
+        elif not any(any(w in (k["text"] or "").lower() for w in brand_terms) for k in kws_):
+            findings.append(_finding("C1", "Estructura y puja", "advertencia", "No se identifica una estrategia de protección de marca",
+                "Ninguna campaña activa lleva palabras de marca en el nombre ni hay palabras clave con el nombre del hotel que hayan gastado en el periodo. Las búsquedas del hotel las pueden captar la competencia o las OTAs.",
+                "Crear una campaña de marca separada o, al menos, palabras clave con el nombre del hotel.",
+                ["Palabras de marca buscadas en el nombre de campaña: " + ", ".join(brand_words), "Términos de marca buscados en las palabras clave: " + ", ".join(brand_terms)]))
     if not brand_terms:
         nv("C2", "Marca en campañas genéricas", "Falta el nombre del hotel o los términos de marca en el cuestionario.")
     else:
@@ -331,11 +399,15 @@ def run_audit(data, ctx, days):
                     "Agregar la marca como negativo en las genéricas y dejar esas búsquedas en la campaña de marca.",
                     [f"{t['term']} ({_money(_num(t['cost']), cur)})" for t in sorted(leak, key=lambda x: -_num(x['cost']))[:6]]))
 
-    maxclicks = [c["name"] for c in enabled if c.get("bidding") == "TARGET_SPEND"]
-    if maxclicks:
-        findings.append(_finding("C3", "Estructura y puja", "advertencia", "Campañas con la puja 'Maximizar clics'",
-            "Para un hotel el objetivo es la reserva; maximizar clics trae tráfico sin importar si convierte.",
-            "Pasarlas a una puja por conversiones o por valor de conversión.", maxclicks))
+    maxclicks_c = [c for c in enabled if c.get("bidding") == "TARGET_SPEND"]
+    if maxclicks_c:
+        # Maximizar clics no es un error por sí mismo (sirve para empezar o para marca):
+        # solo sube a Advertencia si la meta es CPA o ROAS y la campaña ya convierte.
+        goal_set = ctx.get("goal") in ("roas", "cpa")
+        warn_ = [c["name"] for c in maxclicks_c if goal_set and _num(c.get("conversions")) > 0]
+        findings.append(_finding("C3", "Estructura y puja", "advertencia" if warn_ else "info", "Campañas con la puja 'Maximizar clics'",
+            "Maximizar clics trae tráfico sin importar si convierte." + (" Estas campañas ya convierten y tu meta es CPA o ROAS: una puja por conversiones o valor estaría más alineada con la meta." if warn_ else " Puede ser una decisión válida (campaña nueva, marca); se muestra como informativo."),
+            "Evaluar pasarlas a una puja por conversiones o por valor de conversión.", [c["name"] for c in maxclicks_c]))
 
     low_data = [c["name"] for c in enabled if c.get("channel_type") != "PERFORMANCE_MAX" and c.get("bidding") in SMART_BIDDING and _num(c.get("conversions")) * 30.0 / max(days, 1) < T["smart_bidding_min_conv_30d"] and _num(c.get("cost")) > 0]
     if low_data:
@@ -362,14 +434,23 @@ def run_audit(data, ctx, days):
             if ok:
                 flagged.append(f"{c['name']} (pierde {_num(r['budget_lost']):.0%} por presupuesto)")
         if flagged:
-            findings.append(_finding("C5", "Estructura y puja", "advertencia", "Campañas que convierten bien y pierden impresiones por presupuesto",
-                "Hay demanda que estas campañas no alcanzan a captar porque el presupuesto diario se agota.",
-                "Subir el presupuesto o redistribuirlo desde campañas menos rentables (ver la sección Oportunidad de ingresos).", flagged))
+            findings.append(_finding("C5", "Estructura y puja", "info", "Oportunidad de escala: campañas que convierten y pierden impresiones por presupuesto",
+                "Hay demanda que estas campañas no alcanzan a captar porque el presupuesto diario se agota. Es una oportunidad, no un error: no resta puntos." + (" Cumplen la meta declarada." if ctx.get("goal") in ("roas", "cpa") and _num(ctx.get("target")) > 0 else ""),
+                "Subir el presupuesto o redistribuirlo desde campañas menos rentables (ver la sección Oportunidad de ingresos).", flagged, kind="oportunidad"))
 
-    idle = [c["name"] for c in enabled if _num(c.get("impressions")) == 0]
+    # Las campañas recién creadas todavía pueden estar en revisión o aprendiendo: no cuentan.
+    def _is_new(c):
+        try:
+            return (datetime.date.today() - datetime.date.fromisoformat(c.get("start_date") or "")).days < T["new_campaign_days"]
+        except ValueError:
+            return False
+    idle_all = [c for c in enabled if _num(c.get("impressions")) == 0]
+    idle = [c["name"] for c in idle_all if not _is_new(c)]
     if idle:
-        findings.append(_finding("C6", "Estructura y puja", "critico", "Campañas activas sin ninguna impresión en el periodo",
-            "Están activas pero no se muestran: pueden tener presupuesto en cero, estar sin anuncios aprobados o con una segmentación imposible.",
+        n_new = len(idle_all) - len(idle)
+        findings.append(_finding("C6", "Estructura y puja", "advertencia", "Campañas activas sin ninguna impresión en el periodo",
+            "Están activas pero no se muestran: pueden tener presupuesto en cero, estar sin anuncios aprobados o con una segmentación imposible."
+            + (f" No se cuentan {n_new} campaña(s) creadas hace menos de {T['new_campaign_days']} días." if n_new else ""),
             "Revisar su estado en Google Ads; si son estacionales, pausarlas.", idle))
 
     kw_counts = data.get("adgroup_keyword_counts")
@@ -383,27 +464,22 @@ def run_audit(data, ctx, days):
     # ---- D. Palabras clave y términos ------------------------------------
     keywords = data.get("keywords")
     if keywords is None:
-        for fid, t in (("D1", "Concordancia amplia sin puja inteligente"), ("D2", "Gasto en concordancia exacta"), ("D5", "Índice de calidad bajo")):
+        for fid, t in (("D2", "Gasto en concordancia exacta"), ("D5", "Índice de calidad bajo")):
             nv(fid, t, "No se pudieron leer las palabras clave: " + unavailable.get("keywords", "sin detalle"))
     else:
         kw_cost = sum(_num(k["cost"]) for k in keywords)
-        broad_manual = [k for k in keywords if k.get("match_type") == "BROAD" and (by_id.get(k["campaign_id"]) or {}).get("bidding") not in SMART_BIDDING]
-        broad_cost = sum(_num(k["cost"]) for k in broad_manual)
-        if kw_cost > 0 and broad_cost / kw_cost > T["broad_spend_share"]:
-            findings.append(_finding("D1", "Palabras clave y términos", "advertencia", "Concordancia amplia gastando sin puja inteligente",
-                f"{broad_cost / kw_cost:.0%} del gasto en palabras clave va a concordancia amplia en campañas sin puja inteligente: Google puede mostrar el anuncio en búsquedas poco relacionadas.",
-                "Pasar esas palabras a frase o exacta, o cambiar la campaña a una puja inteligente.",
-                [f"{k['text']} ({_money(_num(k['cost']), cur)})" for k in sorted(broad_manual, key=lambda x: -_num(x['cost']))[:6]]))
         exact_cost = sum(_num(k["cost"]) for k in keywords if k.get("match_type") == "EXACT")
         if kw_cost > 0:
             findings.append(_finding("D2", "Palabras clave y términos", "info", "Peso de la concordancia exacta en el gasto",
                 f"{exact_cost / kw_cost:.0%} del gasto en palabras clave va a concordancia exacta.", "Solo informativo."))
-        poor = [k for k in keywords if k.get("quality_score") and k["quality_score"] <= T["low_quality_score"] and _num(k["cost"]) > T["low_quality_min_spend"]]
+        # Umbral relativo: la palabra tiene que pesar al menos el 1% del gasto de Search.
+        poor = [k for k in keywords if k.get("quality_score") and k["quality_score"] <= T["low_quality_score"]
+                and search_cost > 0 and _num(k["cost"]) >= search_cost * T["low_quality_spend_share"]]
         if poor:
             findings.append(_finding("D5", "Palabras clave y términos", "advertencia", "Palabras clave con índice de calidad bajo y gasto",
-                f"{len(poor)} palabra(s) con índice de calidad de {T['low_quality_score']} o menos gastan en el periodo; pagan más por clic.",
+                f"{len(poor)} palabra(s) con índice de calidad de {T['low_quality_score']} o menos pesan al menos el {T['low_quality_spend_share']:.0%} del gasto de Search; pagan más por clic.",
                 "Mejorar la relevancia del anuncio y de la página de destino, o pausarlas.",
-                [f"{k['text']} (QS {k['quality_score']}, {_money(_num(k['cost']), cur)})" for k in sorted(poor, key=lambda x: -_num(x['cost']))[:6]]))
+                [f"{k['text']} (QS {k['quality_score']}, {_money(_num(k['cost']), cur)}, {_num(k.get('impressions')):,.0f} impresiones)" for k in sorted(poor, key=lambda x: -_num(x['cost']))[:6]]))
 
     terms = data.get("search_terms")
     if terms is None:
@@ -421,7 +497,7 @@ def run_audit(data, ctx, days):
             negatives = data.get("negatives")
             neg_text = " ".join((n.get("text") or "").lower() for n in (negatives or []))
             hits, theme_cost = [], 0.0
-            for theme, rx in NEGATIVE_THEMES.items():
+            for theme, rx in parse_negative_themes(ctx.get("negative_themes")).items():
                 pat = re.compile(rx, re.I)
                 matched = [t for t in terms if _num(t["conversions"]) == 0 and pat.search(t["term"] or "")]
                 cost = sum(_num(t["cost"]) for t in matched)
@@ -430,39 +506,45 @@ def run_audit(data, ctx, days):
                     theme_cost += cost
             if theme_cost / search_cost > T["negative_theme_share"]:
                 findings.append(_finding("D4", "Palabras clave y términos", "advertencia", "Faltan negativos de temas típicos que no son reservas",
-                    f"{theme_cost / search_cost:.0%} del gasto de Search ({_money(theme_cost, cur)}) fue a búsquedas de empleo, gratis o alquiler largo, sin conversiones.",
+                    f"{theme_cost / search_cost:.0%} del gasto de Search ({_money(theme_cost, cur)}) fue a búsquedas de los temas de la lista ({', '.join(parse_negative_themes(ctx.get('negative_themes')))}), sin conversiones.",
                     "Agregar esos temas como negativos (lista compartida de la cuenta).", hits))
 
     # ---- E. Activos -------------------------------------------------------
     assets = data.get("assets")
     if assets is None:
-        nv("E3", "Enlaces de sitio, llamadas y ubicación", "No se pudieron leer los activos: " + unavailable.get("assets", "sin detalle"))
+        for fid, t in (("E3", "Enlaces de sitio"), ("E4", "Ubicación"), ("E5", "Llamada")):
+            nv(fid, t, "No se pudieron leer los activos: " + unavailable.get("assets", "sin detalle"))
     else:
         count = {}
         for a in assets:
             count[a["field_type"]] = count.get(a["field_type"], 0) + 1
-        missing = []
         if count.get("SITELINK", 0) < T["min_sitelinks"]:
-            missing.append(f"enlaces de sitio ({count.get('SITELINK', 0)} de {T['min_sitelinks']} recomendados)")
-        if not count.get("CALL"):
-            missing.append("llamada")
+            findings.append(_finding("E3", "Activos", "advertencia", "Faltan enlaces de sitio",
+                f"Hay {count.get('SITELINK', 0)} de {T['min_sitelinks']} enlaces de sitio recomendados. Sin ellos los anuncios ocupan menos espacio y llevan a menos páginas útiles (habitaciones, ofertas).",
+                "Agregar enlaces de sitio a las páginas clave."))
         if not (count.get("LOCATION") or count.get("AFFILIATE_LOCATION")):
-            missing.append("ubicación (perfil de empresa)")
-        if missing:
-            findings.append(_finding("E3", "Activos", "advertencia", "Faltan activos que ayudan en hoteles",
-                "Sin estos activos los anuncios ocupan menos espacio y no muestran la ubicación del hotel.",
-                "Agregar los activos que faltan.", missing))
+            findings.append(_finding("E4", "Activos", "advertencia", "Falta el activo de ubicación",
+                "Sin la ubicación (perfil de empresa) los anuncios no muestran dónde está el hotel.",
+                "Vincular el perfil de empresa de Google a la cuenta."))
+        if not count.get("CALL"):
+            findings.append(_finding("E5", "Activos", "info", "Falta el activo de llamada",
+                "Sin el teléfono, quien prefiere llamar no tiene el botón en el anuncio. Depende de si el hotel atiende llamadas de reservas; no resta puntos.",
+                "Agregar el teléfono si el hotel atiende reservas por llamada."))
 
     # ---- F. Automatización ------------------------------------------------
     subs = data.get("recommendation_subscriptions")
     if subs is None:
         nv("F1", "Recomendaciones que se aplican solas", "No se pudo leer: " + unavailable.get("recommendation_subscriptions", "sin detalle"))
     else:
-        risky = sorted({s["type"] for s in subs if s.get("status") == "ENABLED" and s.get("type") in RISKY_AUTO_APPLY})
+        risky = sorted({s["type"] for s in subs if s.get("status") == "ENABLED" and s.get("type") in RISKY_AUTO_APPLY},
+                       key=lambda t: (AUTO_APPLY_RISK.get(t) != "alto", AUTO_APPLY_LABELS.get(t, t)))
         if risky:
-            findings.append(_finding("F1", "Automatización", "critico", "Hay recomendaciones que Google aplica automáticamente",
-                "Algunas pueden subir presupuestos, cambiar pujas o agregar palabras amplias sin que nadie lo apruebe.",
-                "Desactivarlas en Google Ads > Recomendaciones > Aplicar automáticamente.", [AUTO_APPLY_LABELS.get(t, t) for t in risky]))
+            high = [t for t in risky if AUTO_APPLY_RISK.get(t) == "alto"]
+            findings.append(_finding("F1", "Automatización", "critico" if high else "advertencia", "Hay recomendaciones que Google aplica automáticamente",
+                "Algunas pueden subir presupuestos, cambiar pujas o agregar palabras amplias sin que nadie lo apruebe. Riesgo alto: mueven dinero, puja o concordancia; riesgo medio: agregan activos."
+                + ("" if high else " Aquí solo hay de riesgo medio, por eso es Advertencia."),
+                "Desactivarlas en Google Ads > Recomendaciones > Aplicar automáticamente.",
+                [f"{AUTO_APPLY_LABELS.get(t, t)} · riesgo {AUTO_APPLY_RISK.get(t, 'alto')}" for t in risky]))
 
     # ---- P. Performance Max ----------------------------------------------
     # Solo si hay campañas PMax activas. Ver auditoria_pmax_reglas_propuesta.md.
@@ -495,8 +577,8 @@ def run_audit(data, ctx, days):
         low_conv = [f"{c['name']} ({_num(c.get('conversions')) * 30.0 / max(days, 1):.0f} conversiones al mes)"
                     for c in pmax_camps if _num(c.get("cost")) > 0 and _num(c.get("conversions")) * 30.0 / max(days, 1) < T["pmax_min_conv_30d"]]
         if low_conv:
-            findings.append(_finding("P2", AREA_P, "advertencia", "Performance Max con muy pocas conversiones para aprender",
-                f"Con menos de {T['pmax_min_conv_30d']} conversiones al mes la puja tiene pocos datos y rinde de forma irregular (umbral orientativo: Google no publica un mínimo estricto).",
+            findings.append(_finding("P2", AREA_P, "info", "Performance Max con pocas conversiones: contexto para leer el resultado",
+                f"Con menos de {T['pmax_min_conv_30d']} conversiones al mes la puja tiene pocos datos y puede rendir de forma irregular. Es contexto, no un requisito: Google no publica un mínimo estricto y no resta puntos.",
                 "Agrupar campañas parecidas, ampliar el presupuesto o medir una conversión más temprana como secundaria.", low_conv))
 
         groups = data.get("pmax_asset_groups")
@@ -509,7 +591,8 @@ def run_audit(data, ctx, days):
         else:
             weak = [f"{gname(g)} ({'Pobre' if g['ad_strength'] == 'POOR' else 'Promedio'})" for g in groups if g.get("ad_strength") in ("POOR", "AVERAGE")]
             if weak:
-                findings.append(_finding("P3", AREA_P, creative_sev, "Grupos de recursos con calidad baja",
+                poor_ = any(g.get("ad_strength") == "POOR" for g in groups)
+                findings.append(_finding("P3", AREA_P, creative_sev if poor_ else "info", "Grupos de recursos con calidad baja",
                     "Google califica estos grupos de recursos como Pobre o Promedio: tienen menos combinaciones de anuncios para probar." + feed_note,
                     "Agregar títulos, descripciones, imágenes y video hasta llegar a calidad Buena o Excelente.", weak))
 
@@ -537,11 +620,11 @@ def run_audit(data, ctx, days):
                 if gaps:
                     missing.append(f"{gname(g)}: faltan " + ", ".join(gaps))
             if no_video:
-                findings.append(_finding("P5", AREA_P, creative_sev, "Grupos de recursos sin video propio",
+                findings.append(_finding("P5", AREA_P, "info", "Grupos de recursos sin video propio",
                     "Sin video, Google genera uno automático a partir de tus imágenes, que suele ser de menor calidad." + feed_note,
                     "Subir al menos un video propio, horizontal y vertical si es posible.", no_video))
             if missing:
-                findings.append(_finding("P6", AREA_P, creative_sev, "Faltan imágenes o textos en grupos de recursos",
+                findings.append(_finding("P6", AREA_P, "info", "Faltan imágenes o textos en grupos de recursos",
                     "Menos recursos significan menos combinaciones que Google puede probar." + feed_note,
                     "Completar hasta los mínimos recomendados (editables en la auditoría).", missing))
 
@@ -551,7 +634,7 @@ def run_audit(data, ctx, days):
             with_sig = {s_["asset_group_id"] for s_ in signals}
             no_sig = [gname(g) for g in groups if g["id"] not in with_sig]
             if no_sig:
-                findings.append(_finding("P7", AREA_P, "advertencia", "Grupos de recursos sin señales de audiencia ni temas de búsqueda",
+                findings.append(_finding("P7", AREA_P, "info", "Grupos de recursos sin señales de audiencia ni temas de búsqueda",
                     "Las señales no limitan la campaña, pero le dan a Google un punto de partida más cercano a quien reserva.",
                     "Agregar audiencias propias (visitantes del sitio, lista de clientes) y temas de búsqueda del destino.", no_sig))
 
@@ -574,9 +657,9 @@ def run_audit(data, ctx, days):
                 if ok:
                     flagged.append(f"{c['name']} (pierde {_num(r_['budget_lost']):.0%} por presupuesto)")
             if flagged:
-                findings.append(_finding("P12", AREA_P, "advertencia", "Performance Max rentable que pierde impresiones por presupuesto",
-                    "Hay demanda que estas campañas no alcanzan a captar porque el presupuesto diario se agota.",
-                    "Subir el presupuesto o redistribuirlo desde campañas menos rentables.", flagged))
+                findings.append(_finding("P12", AREA_P, "info", "Oportunidad de escala: Performance Max que pierde impresiones por presupuesto",
+                    "Hay demanda que estas campañas no alcanzan a captar porque el presupuesto diario se agota. Es una oportunidad, no un error: no resta puntos.",
+                    "Subir el presupuesto o redistribuirlo desde campañas menos rentables.", flagged, kind="oportunidad"))
 
         # P9 — marca dentro de PMax (informativa)
         lists_ = data.get("pmax_brand_lists")
@@ -629,9 +712,9 @@ def run_audit(data, ctx, days):
                 if budget_n + bid_n > T["pmax_changes_14d"]:
                     frequent.append(f"{c['name']}: {budget_n + bid_n} cambios en 14 días (presupuesto {budget_n}, puja {bid_n})")
             if frequent:
-                findings.append(_finding("P11", AREA_P, "advertencia", "Cambios frecuentes de presupuesto o de puja en Performance Max",
-                    f"Más de {T['pmax_changes_14d']} cambios en 14 días: cada cambio fuerte puede reiniciar parte del aprendizaje y hace difícil saber qué funcionó.",
-                    "Agrupar los cambios y esperar una o dos semanas entre ajustes grandes.", frequent))
+                findings.append(_finding("P11", AREA_P, "info", "Cambios frecuentes de presupuesto o de puja en Performance Max",
+                    f"Más de {T['pmax_changes_14d']} cambios en 14 días. El efecto sobre el aprendizaje depende del tipo y tamaño de cada cambio (aquí solo se mide la frecuencia, no la magnitud), pero tantos ajustes hacen difícil saber qué funcionó. No resta puntos.",
+                    "Revisar si todos los cambios eran necesarios y esperar entre ajustes grandes.", frequent))
 
     # ---- G. Rendimiento contra la meta -----------------------------------
     goal, target = ctx.get("goal"), _num(ctx.get("target"))
@@ -658,8 +741,8 @@ def run_audit(data, ctx, days):
         if pct > OPTIMAL_CPA_PCT[kind]:
             over.append(f"{c['name']}: CPA % {pct:.0%} (óptimo {OPTIMAL_CPA_PCT[kind]:.0%})")
     if over:
-        findings.append(_finding("G2", "Rendimiento contra la meta", "advertencia", "Campañas con CPA % por encima del óptimo de su tipo",
-            "Mismos óptimos que usa la sección Rendimiento: Search marca 11%, Performance Max 20%, Demand Gen 30%, Display 30%, Search genérica 30%.",
+        findings.append(_finding("G2", "Rendimiento contra la meta", "info", "Referencia: campañas con CPA % por encima del óptimo de su tipo",
+            "Mismos óptimos que usa la sección Rendimiento: Search marca 11%, Performance Max 20%, Demand Gen 30%, Display 30%, Search genérica 30%. Son referencias de la plataforma, no una meta de tu hotel: no resta puntos. La meta que cuenta es la que declaras arriba (G1).",
             "Revisar presupuesto y pujas de estas campañas.", over))
 
     # ---- Puntaje ----------------------------------------------------------
@@ -710,6 +793,7 @@ def run_audit(data, ctx, days):
             "campaigns_total": len(campaigns), "campaigns_enabled": len(enabled),
             "spend_by_type": spend_by_type,
         },
+        "booking_conversion": booking_detected,
         "conversion_actions": [{"name": a["name"], "category": a.get("category"), "primary": bool(a.get("primary_for_goal")), "status": a.get("status")}
                                for a in (actions or [])],
     }

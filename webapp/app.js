@@ -139,7 +139,7 @@ const state = {
     // Cuestionario del hotel — ver auditoria_reglas_propuesta.md, sección 1.
     ctx: {
       hotel_name: '', brand_terms: '', brand_campaign_words: 'marca, brand, branded, brnd',
-      goal: 'roas', target: '', enhanced_conversions: 'nose', hotel_feed: 'nose',
+      goal: 'roas', target: '', enhanced_conversions: 'nose', hotel_feed: 'nose', negative_themes: '',
     },
     ai: { status: 'idle', narrativa: null, error: null },
   },
@@ -7711,7 +7711,7 @@ function runAuditAi() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       resumen: { puntaje: r.score, totales: r.summary },
-      findings: r.findings.map((f) => ({ id: f.id, area: f.area, severidad: f.severity, titulo: f.title, detalle: f.detail, accion: f.action, evidencia: f.evidence })),
+      findings: r.findings.map((f) => ({ id: f.id, area: f.area, severidad: f.severity, titulo: f.title, detalle: f.detail, accion: f.action, evidencia: f.evidence, tipo: f.kind || '' })),
       no_verificables: r.not_verifiable,
       contexto: r.meta.context,
     }),
@@ -7771,7 +7771,7 @@ function buildAuditMarkdown() {
     if (!items.length) return;
     lines.push('', `## ${AUDIT_SEVERITY_LABELS[sev]}${sev === 'info' ? '' : 's'} (${items.length})`.replace('Críticos', 'Críticos').replace('Advertencias', 'Advertencias'));
     items.forEach((f) => {
-      lines.push('', `### ${f.id} · ${f.title}`, '', `**Área:** ${f.area}`, '', f.detail, '', `**Qué hacer:** ${f.action}`);
+      lines.push('', `### ${f.id} · ${f.title}`, '', `**Área:** ${f.area}${f.kind === 'oportunidad' ? ' · **Oportunidad**' : ''}`, '', f.detail, '', `**Qué hacer:** ${f.action}`);
       if (f.evidence.length) { lines.push('', ...f.evidence.map((e) => `- ${e}`)); }
     });
   });
@@ -7844,6 +7844,7 @@ const AUDIT_PRIORITY = {
   critico: { label: 'Prioridad alta', color: '#d23c3c', bg: '#fbe3e1', fg: '#a8231f' },
   advertencia: { label: 'Prioridad media', color: '#f2c419', bg: '#f6e8bd', fg: '#a77a00' },
   info: { label: 'Informativo', color: '#9fb0cf', bg: '#e8edf5', fg: '#31456b' },
+  oportunidad: { label: 'Oportunidad', color: '#2e9b5f', bg: '#dff3e8', fg: '#1d6b41' },
 };
 const AUDIT_STACK_COLORS = ['#14213d', '#f2c419', '#5f7aa8', '#c5c9d3', '#2e9b5f', '#d23c3c'];
 
@@ -7902,7 +7903,7 @@ function auditReportBodyHtml() {
     ? `<h2 class="ar-h2">Lectura priorizada</h2><div class="ar-card ar-ai">${e(s.ai.narrativa)}</div>` : '';
 
   const opp = (f) => {
-    const p = AUDIT_PRIORITY[f.severity];
+    const p = f.kind === 'oportunidad' ? AUDIT_PRIORITY.oportunidad : AUDIT_PRIORITY[f.severity];
     return `
       <div class="ar-opp" style="--c:${p.color}">
         <div><span class="ar-pill" style="background:${p.bg};color:${p.fg}">${p.label}</span><span class="ar-opp-id">${e(f.id)} · ${e(f.area)}</span></div>
@@ -7937,7 +7938,8 @@ function auditReportBodyHtml() {
         <div class="ar-bars">${bars}</div>
       </div>
       <div class="ar-block"><h2 class="ar-h2">Métricas principales</h2>
-      <div class="ar-grid">${metrics}</div></div>
+      <div class="ar-grid">${metrics}</div>
+      ${r.booking_conversion ? `<div class="ar-sub" style="margin:10px 0 0">Conversión tomada como reserva: <strong>${e(r.booking_conversion)}</strong>. Si no es la correcta, las reglas de conversiones (A1 a A8) se evalúan sobre otra acción: valídalo.</div>` : ''}</div>
       ${stack}
       ${ai}
       ${opps}
@@ -8005,6 +8007,9 @@ function renderAuditForm() {
         <span class="field-hint">Google no lo entrega por API. Míralo en Objetivos &gt; Conversiones &gt; Configuración.</span></div>
       ${s.report && s.report.score.by_area['Performance Max'] ? `<div class="field"><label>¿Usas feed de Hotel Center con PMax?</label>${sel('hotel_feed', AUDIT_FEED)}
         <span class="field-hint">Con feed, las revisiones de imágenes, video y calidad de recursos (P3, P5, P6) pasan a informativas.</span></div>` : ''}
+      <div class="field" style="width:100%"><label>Temas de negativos a vigilar (opcional)</label>
+        <textarea data-audit-ctx="negative_themes" rows="3" style="width:100%;max-width:560px" placeholder="Una línea por tema, así: Empleo: empleo, trabajo, vacante&#10;Si lo dejas vacío se usan: Empleo, Gratis y Alquiler o vivienda de largo plazo.">${escapeHtml(c.negative_themes)}</textarea>
+        <span class="field-hint">Búsquedas que no son de huéspedes según el tipo de hotel (por ejemplo, 'pasadía' en un hotel que no lo vende). La regla D4 las busca entre los términos que gastaron sin convertir.</span></div>
       <div class="field"><label>Meta principal</label>${sel('goal', AUDIT_GOALS)}</div>
       ${c.goal !== 'volumen' ? `<div class="field"><label>${c.goal === 'roas' ? 'ROAS objetivo (ej. 450 = 450%)' : 'CPA objetivo'}</label>${txt('target', c.goal === 'roas' ? '450' : '25', 110)}</div>` : ''}
       <button class="btn-accent" data-action="audit-run" ${s.status === 'loading' ? 'disabled' : ''}>${s.report ? 'Auditar de nuevo' : 'Auditar cuenta'}</button>
