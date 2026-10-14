@@ -7762,7 +7762,7 @@ function buildAuditMarkdown() {
   lines.push(`- Gasto: ${auditMoney(r.summary.cost, cur)}`);
   lines.push(`- Conversiones: ${Math.round(r.summary.conversions)}`);
   lines.push(`- ROAS: ${r.summary.roas != null ? Math.round(r.summary.roas * 100) + '%' : 'N/D'}`);
-  lines.push(`- CPA: ${auditMoney(r.summary.cpa, cur)}`);
+  lines.push(`- CPA %: ${r.summary.cpa_pct != null ? `${(r.summary.cpa_pct * 100).toFixed(1)}%` : 'N/D'}`);
   lines.push(`- Campañas activas: ${r.summary.campaigns_enabled} de ${r.summary.campaigns_total}`);
   if (s.ai.status === 'ready' && s.ai.narrativa) lines.push('', '## Lectura priorizada', '', s.ai.narrativa);
   ['critico', 'advertencia', 'info'].forEach((sev) => {
@@ -7894,7 +7894,7 @@ function auditReportBodyHtml() {
     metric('Gasto del periodo', e(auditMoney(sm.cost, cur))),
     metric('Conversiones', Math.round(sm.conversions)),
     metric('ROAS logrado', sm.roas != null ? `${Math.round(sm.roas * 100)}%` : 'N/D', hasGoalFinding && ctx.goal === 'roas'),
-    metric('CPA', e(auditMoney(sm.cpa, cur)), hasGoalFinding && ctx.goal === 'cpa'),
+    metric('CPA %', sm.cpa_pct != null ? `${(sm.cpa_pct * 100).toFixed(1)}%` : 'N/D'),
     metric('Campañas activas', `${sm.campaigns_enabled} de ${sm.campaigns_total}`),
     metric('Meta indicada', goalText),
   ].join('');

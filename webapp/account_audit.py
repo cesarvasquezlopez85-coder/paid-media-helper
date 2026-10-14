@@ -970,6 +970,7 @@ def run_audit(data, ctx, days):
             "currency": cur, "days": days, "cost": total_cost, "conversions": total_conv, "conv_value": total_value,
             "roas": (total_value / total_cost) if total_cost and total_value else None,
             "cpa": (total_cost / total_conv) if total_conv else None,
+            "cpa_pct": (total_cost / total_value) if total_value else None,  # gasto ÷ valor de conversión, como en Rendimiento
             "campaigns_total": len(campaigns), "campaigns_enabled": len(enabled),
             "spend_by_type": spend_by_type,
         },
