@@ -227,6 +227,46 @@ def get_db():
     return conn
 
 
+def save_audit_history(user_id, customer_id, simulated, report, ctx, days):
+    sc = report["score"]
+    findings = [{"id": f["id"], "severity": f["severity"], "title": f["title"]} for f in report["findings"]]
+    conn = get_db()
+    try:
+        conn.execute(
+            """INSERT INTO audit_history (customer_id, account_name, user_id, simulated, created_at, days, rules_version,
+                   goal, target, score_total, label, critical, warnings, info, area_scores, findings)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (customer_id, (report.get("meta") or {}).get("account_name") or "", user_id, 1 if simulated else 0, time.time(), days,
+             account_audit.RULES_VERSION, ctx.get("goal"), ctx.get("target"), sc["total"], sc["label"], sc["critical"], sc["warnings"],
+             sc["info"], json.dumps({a: v["score"] for a, v in sc["by_area"].items()}, ensure_ascii=False),
+             json.dumps(findings, ensure_ascii=False)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def load_audit_history(customer_id, simulated, limit=50):
+    """Las últimas `limit` auditorías de la cuenta, de la más vieja a la más nueva."""
+    conn = get_db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM audit_history WHERE customer_id = ? AND simulated = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+            (customer_id, 1 if simulated else 0, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+    out = []
+    for r in reversed(rows):
+        out.append({
+            "id": r["id"], "at": datetime.datetime.fromtimestamp(r["created_at"]).isoformat(timespec="seconds"),
+            "days": r["days"], "rules_version": r["rules_version"], "goal": r["goal"], "target": r["target"],
+            "score": r["score_total"], "label": r["label"], "critical": r["critical"], "warnings": r["warnings"], "info": r["info"],
+            "areas": json.loads(r["area_scores"] or "{}"), "findings": json.loads(r["findings"] or "[]"),
+        })
+    return out
+
+
 def init_db():
     conn = get_db()
     try:
@@ -339,6 +379,34 @@ def init_db():
             )
             """
         )
+        # Historial de la Auditoría de cuenta: una fila por auditoría, con el puntaje, el
+        # puntaje por área y los hallazgos (id, gravedad, título) para poder mostrar la
+        # tendencia y qué cambió entre una auditoría y la anterior. Se lee por cuenta de
+        # Google Ads (customer_id), no por usuario: lo ve quien tenga acceso a la cuenta.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                customer_id TEXT NOT NULL,
+                account_name TEXT,
+                user_id INTEGER,
+                simulated INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL,
+                days INTEGER NOT NULL,
+                rules_version INTEGER NOT NULL,
+                goal TEXT,
+                target REAL,
+                score_total INTEGER NOT NULL,
+                label TEXT,
+                critical INTEGER NOT NULL DEFAULT 0,
+                warnings INTEGER NOT NULL DEFAULT 0,
+                info INTEGER NOT NULL DEFAULT 0,
+                area_scores TEXT,
+                findings TEXT
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_history_customer ON audit_history(customer_id, created_at)")
         # PMH_ADMIN_USERNAMES es solo un piso mínimo garantizado en cada
         # arranque (para nunca quedar sin ningún admin) — SOLO sube a admin
         # a esos usernames, nunca baja a nadie. Bajar el flag a alguien más
@@ -415,6 +483,9 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_bigquery_explore(parse_qs(parsed.query))
             return
 
+        if path == "/api/google-ads/audit-history":
+            self._handle_audit_history(parse_qs(parsed.query))
+            return
         if path == "/api/google-ads/mcc-groups":
             if not self._require_auth_json():
                 return
@@ -1926,7 +1997,34 @@ class Handler(SimpleHTTPRequestHandler):
             "generated_at": datetime.datetime.now().isoformat(timespec="seconds"), "context": ctx,
             "unavailable": data.get("unavailable") or {},
         }
+        # Historial: se guarda esta auditoría y se devuelve la serie de la cuenta junto con el informe.
+        # Si falla el guardado, el informe se entrega igual, solo sin tendencia.
+        history_id = customer_id or "simulada"
+        try:
+            save_audit_history(user["id"], history_id, simulated, report, ctx, days)
+            report["history"] = load_audit_history(history_id, simulated)
+        except Exception as e:  # noqa: BLE001
+            print(f"[audit-history-error] {e}", flush=True)
+            report["history"] = []
+        report["rules_version"] = account_audit.RULES_VERSION
         self._send_json(200, {"report": report, "simulated": simulated})
+
+    def _handle_audit_history(self, query):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        if not google_ads_client.is_configured():
+            self._send_json(200, {"history": load_audit_history(customer_id or "simulada", True), "simulated": True})
+            return
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+        self._send_json(200, {"history": load_audit_history(customer_id, False), "simulated": False})
 
     def _handle_ai_analizar_auditoria(self, payload):
         user = self._get_current_user()

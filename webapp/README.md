@@ -25,7 +25,7 @@ Luego abre `http://localhost:8642` — te va a pedir iniciar sesión o crear cue
 - `account_audit.py` — motor de reglas de la Auditoría de cuenta (52 reglas): Python puro, sin llamadas de red, recibe los datos que arma `fetch_audit_data()` de `google_ads_client.py` y devuelve hallazgos, puntaje y revisiones no verificables. Se prueba con `simulated_audit_data()`.
 - `bigquery_client.py` / `get_bigquery_refresh_token.py` — cliente de solo lectura de BigQuery (con tope de bytes por consulta) y el script que genera el refresh token. Sin las variables `BIGQUERY_PROJECT_ID` y `BIGQUERY_REFRESH_TOKEN` no hace nada.
 - `claude_client.py` — cliente de la API de Claude (análisis con IA en Rendimiento y lectura de la Auditoría de cuenta) — mismo criterio que `google_ads_client.py`.
-- `data.db` — se crea sola al arrancar el servidor por primera vez. Guarda usuarios, sesiones, a qué cuentas de Google Ads tiene acceso cada quien, y la watchlist de Ritmo de consumo. No se sirve por HTTP. En producción vive en un volumen persistente de Railway, separado del código.
+- `data.db` — se crea sola al arrancar el servidor por primera vez. Guarda usuarios, sesiones, a qué cuentas de Google Ads tiene acceso cada quien, la watchlist de Ritmo de consumo y el historial de auditorías por cuenta (`audit_history`). No se sirve por HTTP. En producción vive en un volumen persistente de Railway, separado del código.
 
 ## Login
 

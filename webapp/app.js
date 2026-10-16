@@ -131,6 +131,7 @@ const state = {
   // escribir a la cuenta real), así que no hay modo "Subir archivo" acá.
   audit: {
     status: 'idle', error: null, report: null, reportAccountName: '',
+    history: { status: 'idle', rows: null, error: null, customerId: '' },
     api: {
       statusChecked: false, configured: false,
       accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
@@ -7934,6 +7935,7 @@ function runAudit() {
   const customerId = auditCustomerId();
   if (!customerId && !a.simulated) { a.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
   a.error = null;
+  s.history = { status: 'idle', rows: null, error: null, customerId: '' };
   s.status = 'loading'; s.error = null; s.ai = { status: 'idle', narrativa: null, error: null };
   render();
   fetch('/api/google-ads/audit', {
@@ -8017,6 +8019,12 @@ function buildAuditMarkdown() {
   lines.push(`- ROAS: ${r.summary.roas != null ? Math.round(r.summary.roas * 100) + '%' : 'N/D'}`);
   lines.push(`- CPA %: ${r.summary.cpa_pct != null ? `${(r.summary.cpa_pct * 100).toFixed(1)}%` : 'N/D'}`);
   lines.push(`- Campañas activas: ${r.summary.campaigns_enabled} de ${r.summary.campaigns_total}`);
+  if (r.history && r.history.length) {
+    const h = r.history, hp = h.length > 1 ? h[h.length - 2] : null;
+    lines.push('', '## Evolución del puntaje', '');
+    lines.push(hp ? `El puntaje ${h[h.length - 1].score - hp.score >= 0 ? (h[h.length - 1].score - hp.score === 0 ? 'se mantuvo igual' : `subió ${h[h.length - 1].score - hp.score}`) : `bajó ${hp.score - h[h.length - 1].score}`} frente a la auditoría del ${String(hp.at).slice(0, 16).replace('T', ' ')} (${hp.score} → ${h[h.length - 1].score}).` : 'Primera auditoría guardada de esta cuenta.');
+    if (h.length > 1) { lines.push('', '| Fecha | Puntaje | Críticos | Advertencias |', '|---|---|---|---|'); [...h].reverse().slice(0, 8).forEach((x) => lines.push(`| ${String(x.at).slice(0, 16).replace('T', ' ')} | ${x.score} | ${x.critical} | ${x.warnings} |`)); }
+  }
   if (s.ai.status === 'ready' && s.ai.narrativa) lines.push('', '## Lectura priorizada', '', s.ai.narrativa);
   ['critico', 'advertencia', 'info'].forEach((sev) => {
     const items = r.findings.filter((f) => f.severity === sev);
@@ -8108,6 +8116,99 @@ const AUDIT_PRIORITY = {
   oportunidad: { label: 'Oportunidad', color: '#2e9b5f', bg: '#dff3e8', fg: '#1d6b41' },
 };
 const AUDIT_STACK_COLORS = ['#14213d', '#f2c419', '#5f7aa8', '#c5c9d3', '#2e9b5f', '#d23c3c'];
+
+// Evolución del puntaje de una cuenta: `rows` viene del servidor, de la auditoría más vieja a la más
+// nueva (la última es la actual). Se usa dentro del informe (pantalla, HTML y Markdown) y en la vista
+// "Ver historial". Los colores usan las variables del informe con un valor de respaldo.
+function auditHistoryHtml(rows) {
+  if (!rows || !rows.length) return '';
+  const e = escapeHtml;
+  const last = rows[rows.length - 1];
+  const prev = rows.length > 1 ? rows[rows.length - 2] : null;
+  const day = (iso) => String(iso).slice(0, 10);
+  const stamp = (iso) => `${String(iso).slice(0, 10)} ${String(iso).slice(11, 16)}`;
+  const sevOf = (sev) => AUDIT_PRIORITY[sev] || AUDIT_PRIORITY.info;
+  const pill = (sev) => { const p = sevOf(sev); return `<span class="ar-pill" style="background:${p.bg};color:${p.fg}">${e(p.label)}</span>`; };
+
+  let headline;
+  if (!prev) {
+    headline = `Es la primera auditoría guardada de esta cuenta (${e(stamp(last.at))}). Desde la próxima verás aquí cómo cambia el puntaje.`;
+  } else {
+    const d = last.score - prev.score;
+    const verb = d > 0 ? `subió ${d} punto${d === 1 ? '' : 's'}` : d < 0 ? `bajó ${-d} punto${d === -1 ? '' : 's'}` : 'se mantuvo igual';
+    headline = `El puntaje ${verb} frente a la auditoría del ${e(stamp(prev.at))} (${prev.score} → ${last.score}).`;
+  }
+
+  const notes = [];
+  if (prev) {
+    if (prev.rules_version !== last.rules_version) notes.push('Las reglas de la auditoría cambiaron entre estas dos auditorías: parte de la diferencia puede venir de las reglas y no de la cuenta.');
+    if (prev.days !== last.days) notes.push(`Se auditaron periodos de distinta duración (${prev.days} y ${last.days} días), así que las cifras no son del todo comparables.`);
+    if (prev.goal !== last.goal || Number(prev.target || 0) !== Number(last.target || 0)) notes.push('La meta del cuestionario cambió entre las dos auditorías.');
+  }
+
+  // Gráfica de línea: un punto por auditoría (hasta las últimas 20), separados por igual.
+  let chart = '';
+  const pts = rows.slice(-20);
+  if (pts.length >= 2) {
+    const W = 680, H = 210, ML = 40, MR = 18, MT = 20, MB = 30;
+    const pw = W - ML - MR, ph = H - MT - MB;
+    const x = (i) => ML + (i / (pts.length - 1)) * pw;
+    const y = (v) => MT + ph - (Math.max(0, Math.min(100, v)) / 100) * ph;
+    const grid = [0, 25, 50, 75, 100].map((g) => `<line x1="${ML}" y1="${y(g).toFixed(1)}" x2="${W - MR}" y2="${y(g).toFixed(1)}" stroke="var(--ar-line,#e3e6ec)" stroke-width="1" /><text x="${ML - 6}" y="${(y(g) + 3).toFixed(1)}" font-size="10" fill="var(--ar-muted,#6b7280)" text-anchor="end">${g}</text>`).join('');
+    const path = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${x(i).toFixed(1)},${y(p.score).toFixed(1)}`).join(' ');
+    const dots = pts.map((p, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(p.score).toFixed(1)}" r="${i === pts.length - 1 ? 5 : 3.5}" fill="var(--ar-ink,#14213d)"><title>${e(stamp(p.at))}: ${p.score} puntos</title></circle><text x="${x(i).toFixed(1)}" y="${(y(p.score) - 9).toFixed(1)}" font-size="10.5" font-weight="700" fill="var(--ar-ink,#14213d)" text-anchor="middle">${p.score}</text>`).join('');
+    const every = Math.max(1, Math.ceil(pts.length / 7));
+    const sameDay = new Set(pts.map((p) => day(p.at))).size < pts.length;
+    const labels = pts.map((p, i) => ({ p, i })).filter(({ i }) => i % every === 0 || i === pts.length - 1).map(({ p, i }) => `<text x="${(i === pts.length - 1 ? x(i) + 14 : x(i)).toFixed(1)}" y="${H - 8}" font-size="10" fill="var(--ar-muted,#6b7280)" text-anchor="${i === pts.length - 1 ? 'end' : 'middle'}">${e(sameDay ? `${day(p.at).slice(5)} ${String(p.at).slice(11, 16)}` : day(p.at).slice(5))}</text>`).join('');
+    chart = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;display:block;margin-top:6px" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Evolución del puntaje de la cuenta">${grid}<path d="${path}" fill="none" stroke="var(--ar-ink,#14213d)" stroke-width="2.5" />${dots}${labels}</svg>`;
+  }
+
+  // Qué cambió respecto a la auditoría anterior (solo críticos y advertencias, para no llenarlo de ruido).
+  let changes = '';
+  if (prev) {
+    const relevant = (f) => f.severity === 'critico' || f.severity === 'advertencia';
+    const prevIds = new Set(prev.findings.map((f) => f.id));
+    const lastIds = new Set(last.findings.map((f) => f.id));
+    const added = last.findings.filter((f) => relevant(f) && !prevIds.has(f.id));
+    const gone = prev.findings.filter((f) => relevant(f) && !lastIds.has(f.id));
+    const list = (title, items) => `<div style="flex:1;min-width:240px"><div style="font-weight:700;margin-bottom:6px">${e(title)} (${items.length})</div>${items.length
+      ? `<ul class="ar-ev" style="margin:0 0 0 16px">${items.map((f) => `<li>${pill(f.severity)} ${e(f.id)} · ${e(f.title)}</li>`).join('')}</ul>` : '<div style="color:var(--ar-muted,#6b7280);font-size:14px">Ninguno</div>'}</div>`;
+    changes = `<div style="display:flex;gap:24px;flex-wrap:wrap;margin-top:18px">${list('Resueltos desde la anterior', gone)}${list('Nuevos desde la anterior', added)}</div>`;
+  }
+
+  const recent = [...rows].reverse().slice(0, 8);
+  const table = `<div class="ar-tw"><table class="ar-tbl"><thead><tr><th>Fecha</th><th>Puntaje</th><th>Críticos</th><th>Advertencias</th><th>Cambio</th></tr></thead><tbody>${recent.map((r, i) => {
+    const before = rows[rows.length - 1 - i - 1];
+    const d = before ? r.score - before.score : null;
+    return `<tr><td>${e(stamp(r.at))}</td><td>${r.score}</td><td>${r.critical}</td><td>${r.warnings}</td><td>${d == null ? '—' : d > 0 ? `+${d}` : String(d)}</td></tr>`;
+  }).join('')}</tbody></table></div>`;
+
+  return `
+    <div class="ar-block"><h2 class="ar-h2">Evolución del puntaje<small>${rows.length} auditoría${rows.length === 1 ? '' : 's'} guardada${rows.length === 1 ? '' : 's'} de esta cuenta</small></h2>
+    <div class="ar-card"><p style="margin:0 0 4px;font-size:16px;font-weight:600">${headline}</p>
+      ${notes.map((n) => `<p class="ar-opp-d" style="margin:6px 0 0;font-size:14px">${e(n)}</p>`).join('')}
+      ${chart}${changes}
+      ${rows.length > 1 ? `<div style="margin-top:18px">${table}</div>` : ''}
+    </div></div>`;
+}
+
+// Vista "Ver historial": la tendencia de la cuenta elegida sin volver a auditar (no gasta cuota de Google).
+function loadAuditHistoryOnly() {
+  const s = state.audit;
+  const customerId = auditCustomerId();
+  if (!customerId && !s.api.simulated) { s.api.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
+  s.api.error = null;
+  s.history = { status: 'loading', rows: null, error: null, customerId: customerId || '' };
+  render();
+  fetch(`/api/google-ads/audit-history?customer_id=${encodeURIComponent(customerId || '')}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      s.history = { status: 'ready', rows: data.history || [], error: null, customerId: customerId || '' };
+      render();
+    })
+    .catch((err) => { s.history = { status: 'error', rows: null, error: err.message || String(err), customerId: customerId || '' }; render(); });
+}
 
 function auditReportBodyHtml() {
   const s = state.audit;
@@ -8204,6 +8305,7 @@ function auditReportBodyHtml() {
       ${r.booking_conversion ? `<div class="ar-sub" style="margin:10px 0 0">Conversión tomada como reserva: <strong>${e(r.booking_conversion)}</strong>. Si no es la correcta, las reglas de conversiones (A1 a A8) se evalúan sobre otra acción: valídalo.</div>` : ''}</div>
       ${stack}
       ${ai}
+      ${auditHistoryHtml(r.history)}
       ${opps}
       ${nv}
       <div class="ar-foot">Generado con Paid Media Helper a partir de datos de Google Ads. Los umbrales son heurísticos y no reemplazan el criterio del estratega de cuenta.</div>
@@ -8270,6 +8372,7 @@ function renderAuditForm() {
       <div class="field"><label>Meta principal</label>${sel('goal', AUDIT_GOALS)}</div>
       ${c.goal !== 'volumen' ? `<div class="field"><label>${c.goal === 'roas' ? 'ROAS objetivo (ej. 450 = 450%)' : 'CPA objetivo'}</label>${txt('target', c.goal === 'roas' ? '450' : '25', 110)}</div>` : ''}
       <button class="btn-accent" data-action="audit-run" ${s.status === 'loading' ? 'disabled' : ''}>${s.report ? 'Auditar de nuevo' : 'Auditar cuenta'}</button>
+      <button class="btn-outline" data-action="audit-history" ${s.history.status === 'loading' ? 'disabled' : ''} title="Muestra cómo ha cambiado el puntaje de esta cuenta, sin volver a consultar Google Ads">Ver historial de la cuenta</button>
       ${a.error ? `<div class="error-panel" style="width:100%"><strong>No se pudo auditar.</strong> ${escapeHtml(a.error)}</div>` : ''}
     </div>`;
 }
@@ -8300,13 +8403,22 @@ function renderAuditPage() {
   ensureAuditStatusLoaded();
   let body = '';
   if (s.status === 'loading') {
-    body = `<div class="card state-panel loading"><div class="spinner"></div><p>Auditando la cuenta (unas 12 consultas a Google Ads)…</p></div>`;
+    body = `<div class="card state-panel loading"><div class="spinner"></div><p>Auditando la cuenta (unas 18 consultas a Google Ads)…</p></div>`;
   } else if (s.report) {
     body = renderAuditResults();
   } else {
     body = `<div class="card state-panel idle">${icon('clipboard-check', 30)}<p>Elige una cuenta, llena el cuestionario del hotel y audita: la plataforma revisa conversiones, redes, estructura, palabras clave y activos, y entrega un informe descargable.</p></div>`;
   }
-  return `${renderAuditForm()}${body}`;
+  const h = s.history;
+  let historyBlock = '';
+  if (h.status === 'loading') historyBlock = `<div class="card state-panel loading"><div class="spinner"></div><p>Cargando el historial…</p></div>`;
+  else if (h.status === 'error') historyBlock = `<div class="error-panel"><strong>No se pudo cargar el historial.</strong> ${escapeHtml(h.error)}</div>`;
+  else if (h.status === 'ready') {
+    historyBlock = h.rows.length
+      ? `<style>${AUDIT_REPORT_CSS}</style><div class="ar" style="margin-bottom:20px">${auditHistoryHtml(h.rows)}</div>`
+      : `<div class="card state-panel idle"><p>Esta cuenta todavía no tiene auditorías guardadas. Corre la primera con "Auditar cuenta" y desde ahí quedará su historial.</p></div>`;
+  }
+  return `${renderAuditForm()}${historyBlock}${body}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -10349,6 +10461,7 @@ function handleAction(action) {
     case 'admin-grant-submit': grantAdminAccess(); break;
     case 'audit-load-accounts': loadAuditAccounts(); break;
     case 'audit-run': runAudit(); break;
+    case 'audit-history': loadAuditHistoryOnly(); break;
     case 'audit-ai': runAuditAi(); break;
     case 'audit-mcc-load': loadAuditMccGroups(); break;
     case 'audit-mcc-clear': clearAuditMccFilter(); break;

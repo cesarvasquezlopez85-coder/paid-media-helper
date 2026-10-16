@@ -15,6 +15,10 @@ queda en "no_verificables" para no inventar un Crítico con un campo dudoso.
 import datetime
 import re
 
+# Se sube cuando cambian las reglas o el puntaje: el historial lo guarda para avisar que dos auditorías
+# hechas con reglas distintas no son del todo comparables.
+RULES_VERSION = 1
+
 SEVERITIES = ("critico", "advertencia", "info")
 SEVERITY_POINTS = {"critico": 5, "advertencia": 2, "info": 0}
 
