@@ -2621,7 +2621,8 @@ def fetch_audit_data(customer_id, date_from, date_to):
         block("pmax_placements", pmax_placements)
 
         # P11: cambios de presupuesto o puja de los últimos 14 días (el historial de Google
-        # guarda 30 como máximo). No se guarda quién hizo el cambio.
+        # guarda 30 como máximo). El historial también trae change_event.user_email y
+        # client_type (quién y desde dónde), que P11 todavía no usa.
         def pmax_changes():
             d_to = datetime.date.fromisoformat(date_to)
             d_from = max(datetime.date.fromisoformat(date_from), d_to - datetime.timedelta(days=13))
