@@ -2544,6 +2544,64 @@ def fetch_audit_data(customer_id, date_from, date_to):
                  "status": r.get("recommendationSubscription", {}).get("status")} for r in rows]
     block("recommendation_subscriptions", recommendation_subscriptions)
 
+    # Audiencias (reglas U1 a U5): listas propias con su tamaño, dónde se usan y en qué modo.
+    def user_lists():
+        rows = _search(customer_id, """
+            SELECT user_list.resource_name, user_list.name, user_list.type, user_list.membership_status,
+                   user_list.size_for_search, user_list.size_for_display, user_list.membership_life_span
+            FROM user_list LIMIT 2000
+        """)
+        out = []
+        for r in rows:
+            u = r.get("userList", {})
+            out.append({"resource": u.get("resourceName"), "name": u.get("name") or "", "type": u.get("type"),
+                        "status": u.get("membershipStatus"),
+                        "size_search": _int_or_none(u.get("sizeForSearch")), "size_display": _int_or_none(u.get("sizeForDisplay")),
+                        "life_span": _int_or_none(u.get("membershipLifeSpan"))})
+        return out
+    block("user_lists", user_lists)
+
+    def audience_criteria():
+        out = []
+        for r in _search(customer_id, """
+            SELECT campaign.id, campaign.name, campaign.advertising_channel_type, campaign_criterion.negative,
+                   campaign_criterion.user_list.user_list
+            FROM campaign_criterion
+            WHERE campaign_criterion.type = 'USER_LIST' AND campaign.status = 'ENABLED'
+        """):
+            out.append({"level": "campaign", "campaign_id": str(r.get("campaign", {}).get("id")), "campaign": r.get("campaign", {}).get("name") or "",
+                        "channel": r.get("campaign", {}).get("advertisingChannelType"), "ad_group_id": None, "ad_group": "",
+                        "negative": bool(r.get("campaignCriterion", {}).get("negative")),
+                        "list": r.get("campaignCriterion", {}).get("userList", {}).get("userList")})
+        for r in _search(customer_id, """
+            SELECT ad_group.id, ad_group.name, campaign.id, campaign.name, campaign.advertising_channel_type,
+                   ad_group_criterion.negative, ad_group_criterion.user_list.user_list
+            FROM ad_group_criterion
+            WHERE ad_group_criterion.type = 'USER_LIST' AND ad_group_criterion.status = 'ENABLED'
+              AND ad_group.status = 'ENABLED' AND campaign.status = 'ENABLED'
+        """):
+            out.append({"level": "ad_group", "campaign_id": str(r.get("campaign", {}).get("id")), "campaign": r.get("campaign", {}).get("name") or "",
+                        "channel": r.get("campaign", {}).get("advertisingChannelType"),
+                        "ad_group_id": str(r.get("adGroup", {}).get("id")), "ad_group": r.get("adGroup", {}).get("name") or "",
+                        "negative": bool(r.get("adGroupCriterion", {}).get("negative")),
+                        "list": r.get("adGroupCriterion", {}).get("userList", {}).get("userList")})
+        return out
+    block("audience_criteria", audience_criteria)
+
+    # Modo de las audiencias por grupo de anuncios: "observación" (bid_only) solo ajusta la puja;
+    # "segmentación" limita la campaña a esa audiencia.
+    def audience_modes():
+        out = {}
+        for r in _search(customer_id, """
+            SELECT ad_group.id, ad_group.targeting_setting.target_restrictions
+            FROM ad_group WHERE ad_group.status = 'ENABLED' AND campaign.status = 'ENABLED'
+        """):
+            for t in r.get("adGroup", {}).get("targetingSetting", {}).get("targetRestrictions", []):
+                if t.get("targetingDimension") == "AUDIENCE":
+                    out[str(r["adGroup"].get("id"))] = "observation" if t.get("bidOnly") else "targeting"
+        return out
+    block("audience_modes", audience_modes)
+
     # Performance Max: solo si hay campañas PMax activas (suma unas 4 consultas).
     if any(c["channel_type"] == "PERFORMANCE_MAX" and c["status"] == "ENABLED" for c in campaigns):
         def pmax_asset_groups():
@@ -2590,6 +2648,30 @@ def fetch_audit_data(customer_id, date_from, date_to):
             """)
             return [{"asset_group_id": str(r.get("assetGroup", {}).get("id"))} for r in rows]
         block("pmax_signals", pmax_signals)
+
+        # Audiencias de las señales de PMax resueltas hasta las listas que contienen (para U4).
+        def pmax_signal_lists():
+            segs = {}
+            for r in _search(customer_id, "SELECT audience.resource_name, audience.dimensions FROM audience"):
+                a_ = r.get("audience", {})
+                lists_ = []
+                for dim in a_.get("dimensions", []):
+                    for seg in dim.get("audienceSegments", {}).get("segments", []):
+                        ul = seg.get("userList", {}).get("userList")
+                        if ul:
+                            lists_.append(ul)
+                segs[a_.get("resourceName")] = lists_
+            out = {}
+            for r in _search(customer_id, """
+                SELECT asset_group.id, asset_group.status, campaign.status, asset_group_signal.audience.audience
+                FROM asset_group_signal
+                WHERE asset_group.status = 'ENABLED' AND campaign.status = 'ENABLED'
+            """):
+                aud = r.get("assetGroupSignal", {}).get("audience", {}).get("audience")
+                if aud:
+                    out.setdefault(str(r.get("assetGroup", {}).get("id")), []).extend(segs.get(aud, []))
+            return out
+        block("pmax_signal_lists", pmax_signal_lists)
 
         def pmax_lost_is():
             rows = _search(customer_id, f"""
@@ -2747,6 +2829,18 @@ def simulated_audit_data():
             + [{"asset_group_id": "g3", "field_type": ft, "label": "GOOD"} for ft in ("MARKETING_IMAGE", "MARKETING_IMAGE", "SQUARE_MARKETING_IMAGE", "SQUARE_MARKETING_IMAGE", "PORTRAIT_MARKETING_IMAGE", "PORTRAIT_MARKETING_IMAGE")]
         ),
         "pmax_signals": [{"asset_group_id": "g2"}],
+        "user_lists": [
+            {"resource": "customers/1/userLists/1", "name": "Todos los visitantes", "type": "RULE_BASED", "status": "OPEN", "size_search": 3100, "size_display": 1500, "life_span": 30},
+            {"resource": "customers/1/userLists/2", "name": "Carrito abandonado", "type": "REMARKETING", "status": "OPEN", "size_search": 200, "size_display": 270, "life_span": 90},
+            {"resource": "customers/1/userLists/3", "name": "Clientes 2026", "type": "CRM_BASED", "status": "OPEN", "size_search": 2700, "size_display": 2200, "life_span": 540},
+            {"resource": "customers/1/userLists/4", "name": "AdWords optimized list", "type": "LOGICAL", "status": "OPEN", "size_search": 350000, "size_display": 110000, "life_span": 30},
+        ],
+        "audience_criteria": [
+            {"level": "campaign", "campaign_id": "1", "campaign": "Hotel Demo - CO:es - Search Genérica", "channel": "SEARCH", "ad_group_id": None, "ad_group": "", "negative": False, "list": "customers/1/userLists/2"},
+            {"level": "ad_group", "campaign_id": "2", "campaign": "Hotel Demo - CO:es - Search Todo Incluido", "channel": "SEARCH", "ad_group_id": "20", "ad_group": "Remarketing", "negative": False, "list": "customers/1/userLists/1"},
+        ],
+        "audience_modes": {"20": "targeting"},
+        "pmax_signal_lists": {"g2": [], "g3": ["customers/1/userLists/1"]},
         "pmax_lost_is": [{"campaign_id": "3", "budget_lost": 0.22}, {"campaign_id": "7", "budget_lost": 0.02}],
         "pmax_brand_lists": [],
         "pmax_categories": [

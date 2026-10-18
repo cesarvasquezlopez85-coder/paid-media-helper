@@ -17,7 +17,7 @@ import re
 
 # Se sube cuando cambian las reglas o el puntaje: el historial lo guarda para avisar que dos auditorías
 # hechas con reglas distintas no son del todo comparables.
-RULES_VERSION = 2  # 2: vuelve A9 (conversiones mejoradas), ahora leída desde la API v26
+RULES_VERSION = 3  # 3: se suma el área Audiencias (U1 a U5); 2: vuelve A9, leída desde la API v26
 
 SEVERITIES = ("critico", "advertencia", "info")
 SEVERITY_POINTS = {"critico": 5, "advertencia": 2, "info": 0}
@@ -58,6 +58,8 @@ THRESHOLDS = {
     "pmax_lost_is_budget": 0.15,       # P12
     "pmax_brand_share": 0.15,          # P9: impresiones de categorías con la marca
     "pmax_changes_14d": 3,             # P11: más de N cambios en 14 días
+    "list_min_search": 1000,           # U2: usuarios mínimos de una lista para usarla en Search
+    "list_min_display": 100,           # U2: y en Display, Demand Gen y demás redes
     "roas_goal_tolerance": 0.90,       # G1
     "cpa_goal_tolerance": 1.10,        # G1 (meta de CPA)
 }
@@ -115,7 +117,18 @@ NEGATIVE_THEMES = {
 }
 
 DEFAULT_BRAND_CAMPAIGN_WORDS = ("marca", "brand", "branded", "brnd")
-AREAS = ["Conversiones", "Redes y segmentación", "Estructura y puja", "Palabras clave y términos", "Activos", "Automatización", "Performance Max", "Rendimiento contra la meta"]
+AREAS = ["Conversiones", "Redes y segmentación", "Estructura y puja", "Palabras clave y términos", "Activos", "Automatización", "Performance Max", "Audiencias", "Rendimiento contra la meta"]
+
+
+# Listas que Google arma solo (optimizadas, parecidas): no son listas propias del hotel.
+def _system_list(u):
+    return u.get("type") in ("LOGICAL", "SIMILAR", "LOOKALIKE") or (u.get("name") or "").lower().startswith("adwords optimized")
+
+
+# Nombres que suelen tener las listas de quienes ya reservaron (en español e inglés).
+PURCHASER_RE = re.compile(r"compr|client|reserv|hu[eé]sped|purchas|convert|customer|booker|booked|guest", re.I)
+# ...salvo las listas que dicen lo contrario ("NO COMPRADORES", "non-converters", "sin reserva").
+NOT_PURCHASER_RE = re.compile(r"\b(no|non|not|sin|never|nunca)\b", re.I)
 
 
 def _num(v):
@@ -868,6 +881,77 @@ def run_audit(data, ctx, days):
                        [[lab, _money(t[0], cur), f"{t[1]:,.1f}", _money(t[0] / t[1], cur) if t[1] else "—", f"{t[2] / t[0] * 100:.0f}%" if t[2] and t[0] else "—"]
                         for lab, t in (("Performance Max", pm_c), ("Search genérico", sg_c))])))
 
+    # ---- U. Audiencias ------------------------------------------------------
+    # Listas propias (visitantes, clientes), dónde se usan y en qué modo. Solo lectura.
+    ulists = data.get("user_lists")
+    aud_crit = data.get("audience_criteria")
+    aud_modes = data.get("audience_modes")
+    audiences_present = ulists is not None
+    AREA_U = "Audiencias"
+    if ulists is None:
+        for fid, t in (("U1", "Listas propias"), ("U2", "Tamaño de las listas en uso"), ("U3", "Compradores sin excluir")):
+            nv(fid, t, "No se pudieron leer las listas de audiencia: " + unavailable.get("user_lists", "sin detalle"))
+    else:
+        by_res = {u["resource"]: u for u in ulists}
+        own = [u for u in ulists if not _system_list(u)]
+        if not own:
+            findings.append(_finding("U1", AREA_U, "info", "La cuenta no tiene listas propias de visitantes ni de clientes",
+                "Sin listas propias no se puede mostrar publicidad a quien ya visitó el sitio o el motor de reservas, ni excluir a quien ya reservó. Solo informativo.",
+                "Crear listas de visitantes del sitio y del motor de reservas, y subir la de huéspedes anteriores si hay consentimiento."))
+        if aud_crit is None:
+            for fid, t in (("U2", "Tamaño de las listas en uso"), ("U3", "Compradores sin excluir")):
+                nv(fid, t, "No se pudieron leer las audiencias de las campañas: " + unavailable.get("audience_criteria", "sin detalle"))
+        else:
+            # U2 — una lista en uso por debajo del mínimo de Google no sirve para mostrar anuncios.
+            small = {}
+            for c in aud_crit:
+                if c["negative"] or c["list"] not in by_res or _system_list(by_res[c["list"]]):
+                    continue
+                u = by_res[c["list"]]
+                is_search = c["channel"] == "SEARCH"
+                size = u.get("size_search") if is_search else u.get("size_display")
+                need = T["list_min_search"] if is_search else T["list_min_display"]
+                if size is not None and size < need:
+                    small.setdefault((u["name"], is_search), (size, need, set()))[2].add(c["campaign"])
+            if small:
+                lines = [f"{n}: {size:,} usuarios en {'Search' if s_ else 'Display y otras redes'} (mínimo {need:,}) · en {', '.join(sorted(camps)[:2])}"
+                         for (n, s_), (size, need, camps) in sorted(small.items(), key=lambda kv: kv[1][0])]
+                findings.append(_finding("U2", AREA_U, "advertencia", "Listas en uso demasiado pequeñas para mostrar anuncios",
+                    "Google solo muestra anuncios a una lista cuando tiene un mínimo de usuarios (hasta donde conocemos, 1.000 en Search y 100 en Display). Mientras no lo alcance, la audiencia no hace nada.",
+                    "Esperar a que la lista crezca, ampliar su ventana o juntarla con otra; mientras tanto no depender de ella.", lines))
+            # U3 — hay listas de quien ya compró y ninguna se excluye en ninguna campaña.
+            buyers = [u for u in own if u.get("status") == "OPEN" and PURCHASER_RE.search(u["name"]) and not NOT_PURCHASER_RE.search(u["name"]) and ((u.get("size_search") or 0) + (u.get("size_display") or 0)) > 0]
+            excluded = {c["list"] for c in aud_crit if c["negative"]}
+            if buyers and not any(u["resource"] in excluded for u in buyers):
+                findings.append(_finding("U3", AREA_U, "info", "Hay listas de quien ya reservó y no se excluyen en ninguna campaña",
+                    "Excluir a los huéspedes recientes de las campañas de captación evita pagar por quien ya reservó. Es una decisión de estrategia (a veces se les quiere volver a vender), por eso es solo informativa.",
+                    "Evaluar excluir estas listas en las campañas de captación, o usarlas en una campaña propia de huéspedes anteriores.",
+                    [f"{u['name']}: {(u.get('size_search') or 0):,} usuarios en Search, {(u.get('size_display') or 0):,} en Display" for u in buyers][:6]))
+            # U5 — grupos de anuncios que limitan el alcance a su audiencia.
+            if aud_modes is not None:
+                targeted = {}
+                for c in aud_crit:
+                    if c["level"] == "ad_group" and not c["negative"] and aud_modes.get(c["ad_group_id"]) == "targeting":
+                        targeted[c["ad_group_id"]] = f"{c['campaign']} · {c['ad_group']}"
+                if targeted:
+                    findings.append(_finding("U5", AREA_U, "info", "Grupos de anuncios que muestran los anuncios solo a su audiencia",
+                        "En estos grupos la audiencia es una segmentación: solo la ve quien está en la lista. En observación (lo más común) la audiencia solo ajusta la puja y no limita el alcance.",
+                        "Confirmar que limitar el alcance a esa lista es lo que se quiere.", sorted(targeted.values())[:8]))
+        # U4 — señales de PMax con audiencias que no incluyen ninguna lista propia.
+        if pmax_present:
+            sig_lists = data.get("pmax_signal_lists")
+            pm_groups = data.get("pmax_asset_groups")
+            if sig_lists is None or pm_groups is None:
+                nv("U4", "Señales de PMax con listas propias", "No se pudieron leer las audiencias de las señales: " + unavailable.get("pmax_signal_lists", unavailable.get("pmax_asset_groups", "sin detalle")))
+            else:
+                own_res = {u["resource"] for u in own}
+                names_ = {g["id"]: f"{(by_id.get(g['campaign_id']) or {}).get('name', 'campaña')} · {g['name']}" for g in pm_groups}
+                no_own = [names_.get(gid, gid) for gid, ls in sig_lists.items() if not any(l in own_res for l in ls)]
+                if no_own:
+                    findings.append(_finding("U4", AREA_U, "info", "Señales de Performance Max sin listas propias del hotel",
+                        "Estos grupos de recursos tienen audiencias como señal, pero ninguna incluye una lista de visitantes o de clientes del hotel. Las señales no limitan la campaña, pero una lista propia le da a Google un punto de partida más cercano a quien reserva.",
+                        "Agregar como señal la lista de visitantes del sitio o de clientes.", sorted(no_own)[:8]))
+
     # ---- G. Rendimiento contra la meta -----------------------------------
     goal, target = ctx.get("goal"), _num(ctx.get("target"))
     if goal in ("roas", "cpa") and target > 0 and total_cost > 0:
@@ -944,6 +1028,8 @@ def run_audit(data, ctx, days):
     by_area = {}
     for area in AREAS:
         if area == "Performance Max" and not pmax_present:
+            continue
+        if area == "Audiencias" and not audiences_present:
             continue
         items = [f for f in findings if f["area"] == area]
         by_area[area] = {"score": max(0, 100 - penalty(items)), "critical": sum(f["severity"] == "critico" for f in items),

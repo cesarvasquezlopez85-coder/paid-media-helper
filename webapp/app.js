@@ -8403,7 +8403,7 @@ function renderAuditPage() {
   ensureAuditStatusLoaded();
   let body = '';
   if (s.status === 'loading') {
-    body = `<div class="card state-panel loading"><div class="spinner"></div><p>Auditando la cuenta (unas 18 consultas a Google Ads)…</p></div>`;
+    body = `<div class="card state-panel loading"><div class="spinner"></div><p>Auditando la cuenta (unas 22 consultas a Google Ads)…</p></div>`;
   } else if (s.report) {
     body = renderAuditResults();
   } else {
