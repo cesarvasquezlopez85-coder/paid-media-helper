@@ -42,7 +42,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-API_VERSION = "v25"
+API_VERSION = "v26"
 BASE_URL = f"https://googleads.googleapis.com/{API_VERSION}"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 TIMEOUT_SECONDS = 20
@@ -2308,6 +2308,18 @@ def fetch_audit_data(customer_id, date_from, date_to):
     block("customer", customer_info)
     data.setdefault("currency", "")
 
+    # A9: conversiones mejoradas. Desde la API v26 el ajuste de la cuenta se puede leer
+    # (customer.conversion_tracking_setting.effective_enablement_setting: ON, OFF, o sin dato).
+    # Va en su propio bloque para que, si Google lo rechaza, no se pierdan el nombre ni la moneda.
+    def enhanced_conversions_setting():
+        rows = _search(customer_id, "SELECT customer.conversion_tracking_setting.effective_enablement_setting FROM customer")
+        c = (rows[0] if rows else {}).get("customer", {})
+        v = c.get("conversionTrackingSetting", {}).get("effectiveEnablementSetting")
+        data["enhanced_conversions"] = {"ON": True, "OFF": False}.get(v)
+        return True
+    data["enhanced_conversions"] = None
+    block("enhanced_conversions_setting", enhanced_conversions_setting)
+
     def conversion_actions():
         rows = _search(customer_id, """
             SELECT conversion_action.id, conversion_action.name, conversion_action.status, conversion_action.type,
@@ -2663,7 +2675,7 @@ def simulated_audit_data():
     ]
     return {
         "unavailable": {"recommendation_subscriptions": "Dato de ejemplo: recurso no consultado en modo simulado.", "customer": "Dato de ejemplo: campo no consultado en modo simulado."},
-        "currency": "USD", "account_name": "Hotel Demo (simulada)",
+        "currency": "USD", "account_name": "Hotel Demo (simulada)", "enhanced_conversions": False,
         "campaigns": campaigns,
         "conversion_actions": [
             {"id": "11", "name": "Reserva confirmada (web)", "status": "ENABLED", "type": "WEBPAGE", "category": "PURCHASE", "primary_for_goal": True, "lookback_days": 30},

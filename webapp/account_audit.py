@@ -17,7 +17,7 @@ import re
 
 # Se sube cuando cambian las reglas o el puntaje: el historial lo guarda para avisar que dos auditorías
 # hechas con reglas distintas no son del todo comparables.
-RULES_VERSION = 1
+RULES_VERSION = 2  # 2: vuelve A9 (conversiones mejoradas), ahora leída desde la API v26
 
 SEVERITIES = ("critico", "advertencia", "info")
 SEVERITY_POINTS = {"critico": 5, "advertencia": 2, "info": 0}
@@ -296,6 +296,13 @@ def run_audit(data, ctx, days):
             findings.append(_finding("A10", "Conversiones", "info", "Ventana de conversión corta para una reserva",
                 f"La conversión '{booking['name']}' usa {int(booking['lookback_days'])} días; si tus huéspedes tardan más entre el primer clic y la reserva, esas reservas no se atribuyen a la campaña.",
                 f"Validar si la ventana cubre el ciclo de decisión de tus huéspedes; si no, considerar {T['min_lookback_days']} días o más."))
+
+    # A9 — conversiones mejoradas. Se lee del ajuste de la cuenta (API v26). Si Google no devuelve
+    # un valor claro (ni ON ni OFF), no se dice nada: no es un hallazgo ni una revisión pendiente.
+    if data.get("enhanced_conversions") is False:
+        findings.append(_finding("A9", "Conversiones", "critico", "Conversiones mejoradas no activadas",
+            "Sin conversiones mejoradas se pierden reservas que Google no puede atribuir por los cambios de privacidad.",
+            "Activarlas en Google Ads > Objetivos > Conversiones > Configuración de conversiones."))
 
     # ---- B. Redes y segmentación -----------------------------------------
     search_enabled = [c for c in search_campaigns if c.get("status") == "ENABLED"]
