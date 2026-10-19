@@ -333,7 +333,8 @@ const state = {
     watchlistStatus: 'idle', watchlist: null, // [{customer_id, account_name}]
     rowsStatus: 'idle', rows: null, error: null, simulated: false,
     sortBy: 'account_name', sortDir: 'asc',
-    hotelFilter: '', // customer_id del hotel elegido en el selector de la tabla; '' = todos
+    hotelFilter: [], // customer_id de los hoteles marcados en el selector de la tabla; [] = todos
+    hotelMenuOpen: false,
     // Periodo consultado (AAAA-MM, desde/hasta); '' = mes en curso. Un periodo ya
     // cerrado se compara contra el objetivo completo en vez de contra un ritmo
     // esperado a la fecha; con varios meses se suman objetivos y gastos.
@@ -8764,7 +8765,7 @@ const PACING_SORT_KEYS = {
 };
 function getPacingRowsSorted() {
   const p = state.pacing;
-  const rows = (p.rows || []).filter((r) => !p.hotelFilter || r.customer_id === p.hotelFilter);
+  const rows = (p.rows || []).filter((r) => !p.hotelFilter.length || p.hotelFilter.includes(r.customer_id));
   const keyFn = PACING_SORT_KEYS[p.sortBy] || PACING_SORT_KEYS.account_name;
   const dir = p.sortDir === 'desc' ? -1 : 1;
   if (p.sortBy === 'account_name') {
@@ -8828,24 +8829,30 @@ function renderPacingTable() {
   if (!p.watchlist || !p.watchlist.length) {
     return `<div class="ok-panel">Todavía no estás vigilando ninguna cuenta — agrégala arriba para empezar.</div>`;
   }
-  // Si el hotel elegido ya no está en la lista (se quitó), el selector vuelve a "Todos".
-  if (p.hotelFilter && !p.watchlist.some((w) => w.customer_id === p.hotelFilter)) p.hotelFilter = '';
+  // Los hoteles marcados que ya no están en la lista (se quitaron) salen del filtro.
+  p.hotelFilter = p.hotelFilter.filter((id) => p.watchlist.some((w) => w.customer_id === id));
   const rowsHtml = getPacingRowsSorted().map((r) => pacingRowHtml(r)).join('');
-  const hotelOptions = [...p.watchlist]
+  const hotelItems = [...p.watchlist]
     .sort((a, b) => String(a.account_name || a.customer_id).localeCompare(String(b.account_name || b.customer_id)))
-    .map((w) => `<option value="${escapeHtml(w.customer_id)}" ${p.hotelFilter === w.customer_id ? 'selected' : ''}>${escapeHtml(w.account_name || w.customer_id)}</option>`)
+    .map((w) => `<label style="display:flex;align-items:center;gap:8px;padding:6px 12px;font-size:13px;cursor:pointer;white-space:nowrap"><input type="checkbox" data-pacing-hotel="${escapeHtml(w.customer_id)}" ${p.hotelFilter.includes(w.customer_id) ? 'checked' : ''} /> ${escapeHtml(w.account_name || w.customer_id)}</label>`)
     .join('');
+  const hotelLabel = !p.hotelFilter.length ? 'Todos los hoteles'
+    : p.hotelFilter.length === 1 ? ((p.watchlist.find((w) => w.customer_id === p.hotelFilter[0]) || {}).account_name || p.hotelFilter[0])
+    : `${p.hotelFilter.length} hoteles`;
   const hotelSelect = p.watchlist.length > 1 ? `
-          <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-muted)">
+          <div class="pacing-hotel-menu" style="position:relative;display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-muted)">
             Hotel
-            <select id="pacing-hotel-filter" style="max-width:260px">
-              <option value="">Todos los hoteles</option>${hotelOptions}
-            </select>
-          </label>` : '';
+            <button type="button" id="pacing-hotel-toggle" class="btn-outline sm" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" aria-haspopup="true" aria-expanded="${p.hotelMenuOpen}">${escapeHtml(hotelLabel)} ▾</button>
+            ${p.hotelMenuOpen ? `<div style="position:absolute;top:100%;right:0;z-index:20;margin-top:4px;min-width:240px;max-height:320px;overflow:auto;background:var(--color-surface,#fff);border:1px solid var(--color-border,#d9dde5);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.14);padding:6px 0">
+              <label style="display:flex;align-items:center;gap:8px;padding:6px 12px;font-size:13px;cursor:pointer;font-weight:600"><input type="checkbox" data-pacing-hotel-all ${!p.hotelFilter.length ? 'checked' : ''} /> Todos los hoteles</label>
+              <div style="border-top:1px solid var(--color-border,#e3e6ec);margin:4px 0"></div>
+              ${hotelItems}
+            </div>` : ''}
+          </div>` : '';
   return `
     <div class="card table-panel">
       <div class="table-panel-head">
-        <h3>Cuentas vigiladas (${p.hotelFilter ? `1 de ${p.watchlist.length}` : p.watchlist.length})</h3>
+        <h3>Cuentas vigiladas (${p.hotelFilter.length ? `${p.hotelFilter.length} de ${p.watchlist.length}` : p.watchlist.length})</h3>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           ${hotelSelect}
           <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-muted)">
@@ -9992,9 +9999,22 @@ function bindEvents() {
     state.pacing.accountToAdd = e.target.value;
     render();
   });
-  const pacingHotelFilter = document.getElementById('pacing-hotel-filter');
-  if (pacingHotelFilter) pacingHotelFilter.addEventListener('change', (e) => {
-    state.pacing.hotelFilter = e.target.value;
+  const pacingHotelToggle = document.getElementById('pacing-hotel-toggle');
+  if (pacingHotelToggle) pacingHotelToggle.addEventListener('click', () => {
+    state.pacing.hotelMenuOpen = !state.pacing.hotelMenuOpen;
+    render();
+  });
+  document.querySelectorAll('[data-pacing-hotel]').forEach((box) => {
+    box.addEventListener('change', () => {
+      const f = state.pacing.hotelFilter;
+      const id = box.dataset.pacingHotel;
+      state.pacing.hotelFilter = box.checked ? [...f, id] : f.filter((x) => x !== id);
+      render();
+    });
+  });
+  const pacingHotelAll = document.querySelector('[data-pacing-hotel-all]');
+  if (pacingHotelAll) pacingHotelAll.addEventListener('change', () => {
+    state.pacing.hotelFilter = [];
     render();
   });
   document.querySelectorAll('[data-pacing-remove]').forEach((btn) => {
@@ -10557,9 +10577,20 @@ sidebarToggleBtn?.addEventListener('click', () => {
 
 // Cerrar la ventana flotante del histórico de keywords, o la de campañas
 // de Ritmo de consumo, con Escape.
+// Cerrar el menú de hoteles de Ritmo de consumo al hacer clic fuera de él.
+document.addEventListener('click', (e) => {
+  if (state.pacing.hotelMenuOpen && !e.target.closest('.pacing-hotel-menu')) {
+    state.pacing.hotelMenuOpen = false;
+    render();
+  }
+});
+
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
-  if (state.keywordPlanner.historico.modalKeyword) {
+  if (state.pacing.hotelMenuOpen) {
+    state.pacing.hotelMenuOpen = false;
+    render();
+  } else if (state.keywordPlanner.historico.modalKeyword) {
     state.keywordPlanner.historico.modalKeyword = null;
     render();
   } else if (state.pacing.campaignsModal.customerId) {
