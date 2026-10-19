@@ -4452,7 +4452,7 @@ function renderBookComparePage() {
         <h3 class="dense-chart-title" style="margin:0">Reservas, noches y prom. de noches por mercado — periodo actual vs. anterior</h3>
         <button class="btn-outline sm" data-action="book-compare-download-markets-html" title="Descarga esta gráfica como una página HTML que cabe completa en una sola pantalla">Descargar (HTML)</button>
       </div>
-      ${renderBookingsHeatmapCompare(currentRows, previousRows)}
+      ${renderBookingsHeatmapCompare(currentRows, previousRows, bookingPeriodShiftMonths(s.current.rows, s.previous.rows))}
     </div>
     <div class="card chart-card">
       <h3 class="dense-chart-title">Llegadas por día de semana — periodo actual vs. anterior</h3>
@@ -4634,19 +4634,55 @@ function heatDeltaBadge(diff, label) {
 
 // Mapa de calor de mercados por mes de llegada con los dos periodos en la misma tabla: cada celda
 // muestra las reservas del periodo actual con el % de cambio frente al mismo mes del anterior (verde
-// si sube, rojo si baja); el valor anterior queda en el tooltip. Un mes que solo existe en el periodo
-// anterior cuenta como 0 en el actual (baja 100%).
-function renderBookingsHeatmapCompare(currentRows, previousRows) {
+// si sube, rojo si baja); el valor anterior queda en el tooltip. Solo se comparan los meses que tienen
+// llegadas en los dos periodos: un mes que solo está en el actual se muestra sin %, y los meses que solo
+// están en el anterior se ocultan (siguen sumados en las columnas de Total). Si los dos archivos son de
+// épocas distintas (por ejemplo, reservas hechas en oct-2026 y en oct-2025), `shiftMonths` desplaza los meses
+// del anterior para que cada mes se compare con el que le corresponde (oct-2026 contra oct-2025).
+const BOOK_OTHER_MARKETS = 'Otros mercados';
+
+function bookingPeriodShiftMonths(currentAll, previousAll) {
+  const firstAlta = (rows) => rows.reduce((min, r) => {
+    if (!r.altaDate) return min;
+    const idx = r.altaDate.getFullYear() * 12 + r.altaDate.getMonth();
+    return min === null || idx < min ? idx : min;
+  }, null);
+  const c = firstAlta(currentAll);
+  const p = firstAlta(previousAll);
+  return c === null || p === null ? 0 : c - p;
+}
+
+function addMonthsToKey(key, n) {
+  const [y, m] = key.split('-').map(Number);
+  const idx = y * 12 + (m - 1) + n;
+  return `${Math.floor(idx / 12)}-${String((idx % 12) + 1).padStart(2, '0')}`;
+}
+
+function bookingShiftLabel(n) {
+  if (!n) return '';
+  const abs = Math.abs(n);
+  if (abs % 12 === 0) return abs === 12 ? 'un año' : `${abs / 12} años`;
+  return abs === 1 ? '1 mes' : `${abs} meses`;
+}
+
+function renderBookingsHeatmapCompare(currentRows, previousRows, shiftMonths = 0) {
   const cur = engine.summarizeByMarketAndMonth(currentRows);
   const prev = engine.summarizeByMarketAndMonth(previousRows);
-  if (!cur.months.length && !prev.months.length) {
-    return `<p style="font-size:12.5px;color:var(--color-text-muted)">No hay reservas con fecha de entrada válida para graficar.</p>`;
+  if (!cur.months.length) {
+    return `<p style="font-size:12.5px;color:var(--color-text-muted)">No hay reservas del periodo actual con fecha de entrada válida para graficar.</p>`;
   }
-  const months = [...new Set([...cur.months, ...prev.months])].sort();
+  const months = cur.months;
+  const prevKeys = prev.months.map((m) => addMonthsToKey(m, shiftMonths)); // mes del anterior ya llevado a la época del actual
+  const prevMonthSet = new Set(prevKeys);
+  const prevLabelOf = new Map(prevKeys.map((k, i) => [k, prev.months[i]]));
+  const sharedCount = months.filter((m) => prevMonthSet.has(m)).length;
+  const hiddenIdx = prevKeys.map((k, i) => (months.includes(k) ? -1 : i)).filter((i) => i >= 0);
+  const hiddenPrevMonths = hiddenIdx.map((i) => prev.months[i]);
+  const hiddenPrevReservas = prev.markets.reduce((acc, m) => acc + hiddenIdx.reduce((a, i) => a + m.cells[i].reservas, 0), 0);
   const curMap = new Map(cur.markets.map((m) => [m.market, m]));
   const prevMap = new Map(prev.markets.map((m) => [m.market, m]));
   const markets = [...new Set([...cur.markets.map((m) => m.market), ...prev.markets.map((m) => m.market)])]
-    .sort((a, b) => ((curMap.get(b) || {}).reservas || 0) - ((curMap.get(a) || {}).reservas || 0) || ((prevMap.get(b) || {}).reservas || 0) - ((prevMap.get(a) || {}).reservas || 0));
+    .sort((a, b) => (a === BOOK_OTHER_MARKETS) - (b === BOOK_OTHER_MARKETS) || ((curMap.get(b) || {}).reservas || 0) - ((curMap.get(a) || {}).reservas || 0) || ((prevMap.get(b) || {}).reservas || 0) - ((prevMap.get(a) || {}).reservas || 0));
   const empty = { reservas: 0, noches: 0 };
   const cellOf = (map, market, month, monthsList) => {
     const m = map.get(market);
@@ -4655,18 +4691,21 @@ function renderBookingsHeatmapCompare(currentRows, previousRows) {
   };
   const maxNoches = Math.max(1, ...cur.markets.flatMap((m) => m.cells.map((c) => c.noches)));
 
-  const headerCells = months.map((m) => `<th>${escapeHtml(m)}</th>`).join('');
+  const headerCells = months.map((m) => `<th${shiftMonths && prevLabelOf.has(m) ? ` title="Se compara con ${escapeHtml(prevLabelOf.get(m))} del periodo anterior"` : ''}>${escapeHtml(m)}</th>`).join('');
   const bodyRows = markets.map((market) => {
     const cm = curMap.get(market);
     const pm = prevMap.get(market);
     const cells = months.map((month) => {
       const c = cellOf(curMap, market, month, cur.months);
-      const p = cellOf(prevMap, market, month, prev.months);
+      const p = cellOf(prevMap, market, month, prevKeys);
       const { bg, fg } = heatColor(c.noches, maxNoches);
       // Cambio de reservas del mes frente al periodo anterior, en %: verde si sube, rojo si baja.
       // Sin base anterior (0) no hay % posible: se marca "nuevo". El valor anterior queda en el tooltip.
+      const comparable = prevMonthSet.has(month);
       let badge = '';
-      if (p.reservas > 0) {
+      if (!comparable) {
+        badge = '';
+      } else if (p.reservas > 0) {
         const pct = (c.reservas - p.reservas) / p.reservas;
         badge = heatDeltaBadge(c.reservas - p.reservas, `${Math.abs(pct * 100).toFixed(0)}%`);
       } else if (c.reservas > 0) {
@@ -4675,7 +4714,7 @@ function renderBookingsHeatmapCompare(currentRows, previousRows) {
       const content = c.reservas === 0 && p.reservas === 0
         ? `<div class="heatmap-cell-main" style="opacity:.35">0</div>`
         : `<div class="heatmap-cell-main">${fmtInt(c.reservas)} ${badge}</div>${c.reservas > 0 ? `<div class="heatmap-cell-sub">(${fmtInt(c.noches)}N)</div>` : ''}`;
-      const tip = `Actual: ${fmtInt(c.reservas)} reservas (${fmtInt(c.noches)} noches) · Anterior: ${fmtInt(p.reservas)} reservas (${fmtInt(p.noches)} noches)`;
+      const tip = `Actual: ${fmtInt(c.reservas)} reservas (${fmtInt(c.noches)} noches) · Anterior${comparable && shiftMonths ? ` (${prevLabelOf.get(month)})` : ''}: ${comparable ? `${fmtInt(p.reservas)} reservas (${fmtInt(p.noches)} noches)` : 'sin llegadas en este mes, no se compara'}`;
       return `<td class="heatmap-cell" style="background:${bg};color:${fg}" title="${escapeHtml(tip)}">${content}</td>`;
     }).join('');
     const cr = cm ? cm.reservas : 0;
@@ -4701,7 +4740,10 @@ function renderBookingsHeatmapCompare(currentRows, previousRows) {
         <tbody>${bodyRows}</tbody>
       </table>
     </div>
-    <p style="margin:12px 0 0;font-size:11px;color:var(--color-text-muted)">Formato de celda: reservas del periodo actual con el % de cambio frente al mismo mes del periodo anterior (▲ verde sube, ▼ rojo baja; "nuevo" = no había reservas ese mes en el anterior) y, debajo, las noches entre paréntesis. Pasa el cursor sobre una celda para ver el valor del periodo anterior. Las dos primeras columnas comparan el total de reservas y el promedio de noches por reserva de cada mercado. Mes = mes de llegada (entrada); el color de fondo sigue las noches del periodo actual.</p>
+    ${shiftMonths ? `<p style="margin:10px 0 0;font-size:12px;color:var(--color-text-muted)">Los periodos son de épocas distintas, así que cada mes se compara con el de ${bookingShiftLabel(shiftMonths)} ${shiftMonths > 0 ? 'antes' : 'después'} (por ejemplo, ${escapeHtml(months[0])} contra ${escapeHtml(addMonthsToKey(months[0], -shiftMonths))}).</p>` : ''}
+    ${!sharedCount ? `<p style="margin:10px 0 0;font-size:12px;color:var(--color-text-muted)">Los dos periodos no comparten ningún mes de llegada, así que mes a mes no hay con qué comparar: usa las columnas de Total.</p>` : ''}
+    ${hiddenPrevMonths.length ? `<p style="margin:10px 0 0;font-size:12px;color:var(--color-text-muted)">${hiddenPrevMonths.length === 1 ? 'No se muestra 1 mes con llegadas' : `No se muestran ${hiddenPrevMonths.length} meses con llegadas`} solo en el periodo anterior (${escapeHtml(hiddenPrevMonths[0])}${hiddenPrevMonths.length > 1 ? ` a ${escapeHtml(hiddenPrevMonths[hiddenPrevMonths.length - 1])}` : ''}, ${fmtInt(hiddenPrevReservas)} reserva${hiddenPrevReservas === 1 ? '' : 's'}): siguen incluidas en las columnas de Total.</p>` : ''}
+    <p style="margin:12px 0 0;font-size:11px;color:var(--color-text-muted)">Formato de celda: reservas del periodo actual con el % de cambio frente al mes equivalente del periodo anterior (▲ verde sube, ▼ rojo baja; "nuevo" = no había reservas ese mes en el anterior) y, debajo, las noches entre paréntesis. Pasa el cursor sobre una celda para ver el valor del periodo anterior. Las dos primeras columnas comparan el total de reservas y el promedio de noches por reserva de cada mercado. Mes = mes de llegada (entrada); solo se compara cuando el mes tiene llegadas en los dos periodos. El color de fondo sigue las noches del periodo actual.</p>
   `;
 }
 
@@ -4716,6 +4758,14 @@ function buildBookCompareMarketsHtml() {
   const previousRows = s.previous.rows
     .filter((r) => s.marketFilter === 'all' || r.pais === s.marketFilter)
     .filter((r) => s.hotelFilter === 'all' || r.hotel === s.hotelFilter);
+  // Para que quepa en una sola pantalla, solo se muestran los mercados con más reservas; el resto se junta en una fila.
+  const MAX_MARKETS = 12;
+  const totals = new Map();
+  [...currentRows, ...previousRows].forEach((r) => { const k = r.pais || 'Sin dato'; totals.set(k, (totals.get(k) || 0) + 1); });
+  const ranked = [...totals.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k);
+  const grouped = ranked.length > MAX_MARKETS + 1;
+  const keep = new Set(ranked.slice(0, MAX_MARKETS));
+  const group = (rows) => (grouped ? rows.map((r) => (keep.has(r.pais || 'Sin dato') ? r : { ...r, pais: BOOK_OTHER_MARKETS })) : rows);
   const scope = [s.marketFilter !== 'all' ? `Mercado: ${s.marketFilter}` : 'Todos los mercados', s.hotelFilter !== 'all' ? `Hotel: ${s.hotelFilter}` : 'Todos los hoteles'].join(' · ');
   const today = new Date().toISOString().slice(0, 10);
   return `<!doctype html>
@@ -4747,7 +4797,8 @@ h1{font-size:clamp(15px,1.6vw,22px);margin:0 0 4px}
 </style></head><body>
 <h1>Reservas, noches y prom. de noches por mercado — periodo actual vs. anterior</h1>
 <p class="meta">${escapeHtml(scope)} · Actual: ${escapeHtml(s.current.fileName || 'periodo actual')} · Anterior: ${escapeHtml(s.previous.fileName || 'periodo anterior')} · Generado el ${today} con Paid Media Helper</p>
-${renderBookingsHeatmapCompare(currentRows, previousRows)}
+${renderBookingsHeatmapCompare(group(currentRows), group(previousRows), bookingPeriodShiftMonths(s.current.rows, s.previous.rows))}
+${grouped ? `<p class="note">Se muestran los ${MAX_MARKETS} mercados con más reservas; los otros ${ranked.length - MAX_MARKETS} mercados se suman en la fila "${BOOK_OTHER_MARKETS}". En la aplicación puedes ver todos.</p>` : ''}
 </body></html>`;
 }
 
