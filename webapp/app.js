@@ -4633,17 +4633,15 @@ function heatDeltaBadge(diff, label) {
 }
 
 // Mapa de calor de mercados por mes de llegada con los dos periodos en la misma tabla: cada celda
-// muestra el periodo actual y, debajo, el anterior, con una flecha verde/roja del cambio en reservas.
-// La flecha solo sale cuando ese mes existe en los dos archivos; si un mes solo está en uno de
-// los periodos (por ejemplo, periodos de meses distintos) se muestra el valor sin comparar.
+// muestra las reservas del periodo actual con el % de cambio frente al mismo mes del anterior (verde
+// si sube, rojo si baja); el valor anterior queda en el tooltip. Un mes que solo existe en el periodo
+// anterior cuenta como 0 en el actual (baja 100%).
 function renderBookingsHeatmapCompare(currentRows, previousRows) {
   const cur = engine.summarizeByMarketAndMonth(currentRows);
   const prev = engine.summarizeByMarketAndMonth(previousRows);
   if (!cur.months.length && !prev.months.length) {
     return `<p style="font-size:12.5px;color:var(--color-text-muted)">No hay reservas con fecha de entrada válida para graficar.</p>`;
   }
-  const curMonths = new Set(cur.months);
-  const prevMonths = new Set(prev.months);
   const months = [...new Set([...cur.months, ...prev.months])].sort();
   const curMap = new Map(cur.markets.map((m) => [m.market, m]));
   const prevMap = new Map(prev.markets.map((m) => [m.market, m]));
@@ -4655,7 +4653,7 @@ function renderBookingsHeatmapCompare(currentRows, previousRows) {
     const i = monthsList.indexOf(month);
     return m && i >= 0 ? m.cells[i] : empty;
   };
-  const maxNoches = Math.max(1, ...[...cur.markets, ...prev.markets].flatMap((m) => m.cells.map((c) => c.noches)));
+  const maxNoches = Math.max(1, ...cur.markets.flatMap((m) => m.cells.map((c) => c.noches)));
 
   const headerCells = months.map((m) => `<th>${escapeHtml(m)}</th>`).join('');
   const bodyRows = markets.map((market) => {
@@ -4664,26 +4662,21 @@ function renderBookingsHeatmapCompare(currentRows, previousRows) {
     const cells = months.map((month) => {
       const c = cellOf(curMap, market, month, cur.months);
       const p = cellOf(prevMap, market, month, prev.months);
-      const inCur = curMonths.has(month);
-      const inPrev = prevMonths.has(month);
-      const { bg, fg } = heatColor(Math.max(c.noches, p.noches), maxNoches);
-      let content;
-      if (inCur && inPrev) {
-        content = c.reservas === 0 && p.reservas === 0
-          ? `<div class="heatmap-cell-main" style="opacity:.35">0</div>`
-          : `<div class="heatmap-cell-main">${fmtInt(c.reservas)} ${heatDeltaBadge(c.reservas - p.reservas, (c.reservas - p.reservas > 0 ? '+' : '') + fmtInt(c.reservas - p.reservas))}</div>
-             <div class="heatmap-cell-sub">(${fmtInt(c.noches)}N)</div>
-             <div class="heatmap-cell-sub" style="opacity:.7">ant. ${fmtInt(p.reservas)} (${fmtInt(p.noches)}N)</div>`;
-      } else if (inCur) {
-        content = c.reservas > 0
-          ? `<div class="heatmap-cell-main">${fmtInt(c.reservas)}</div><div class="heatmap-cell-sub">(${fmtInt(c.noches)}N)</div>`
-          : `<div class="heatmap-cell-main" style="opacity:.35">0</div>`;
-      } else {
-        content = p.reservas > 0
-          ? `<div class="heatmap-cell-main" style="opacity:.7">ant. ${fmtInt(p.reservas)}</div><div class="heatmap-cell-sub" style="opacity:.7">(${fmtInt(p.noches)}N)</div>`
-          : `<div class="heatmap-cell-main" style="opacity:.35">0</div>`;
+      const { bg, fg } = heatColor(c.noches, maxNoches);
+      // Cambio de reservas del mes frente al periodo anterior, en %: verde si sube, rojo si baja.
+      // Sin base anterior (0) no hay % posible: se marca "nuevo". El valor anterior queda en el tooltip.
+      let badge = '';
+      if (p.reservas > 0) {
+        const pct = (c.reservas - p.reservas) / p.reservas;
+        badge = heatDeltaBadge(c.reservas - p.reservas, `${Math.abs(pct * 100).toFixed(0)}%`);
+      } else if (c.reservas > 0) {
+        badge = heatDeltaBadge(1, 'nuevo');
       }
-      return `<td class="heatmap-cell" style="background:${bg};color:${fg}">${content}</td>`;
+      const content = c.reservas === 0 && p.reservas === 0
+        ? `<div class="heatmap-cell-main" style="opacity:.35">0</div>`
+        : `<div class="heatmap-cell-main">${fmtInt(c.reservas)} ${badge}</div>${c.reservas > 0 ? `<div class="heatmap-cell-sub">(${fmtInt(c.noches)}N)</div>` : ''}`;
+      const tip = `Actual: ${fmtInt(c.reservas)} reservas (${fmtInt(c.noches)} noches) · Anterior: ${fmtInt(p.reservas)} reservas (${fmtInt(p.noches)} noches)`;
+      return `<td class="heatmap-cell" style="background:${bg};color:${fg}" title="${escapeHtml(tip)}">${content}</td>`;
     }).join('');
     const cr = cm ? cm.reservas : 0;
     const pr = pm ? pm.reservas : 0;
@@ -4708,7 +4701,7 @@ function renderBookingsHeatmapCompare(currentRows, previousRows) {
         <tbody>${bodyRows}</tbody>
       </table>
     </div>
-    <p style="margin:12px 0 0;font-size:11px;color:var(--color-text-muted)">Formato de celda: reservas del periodo actual con la flecha del cambio frente al anterior (▲ verde sube, ▼ rojo baja), noches entre paréntesis y, debajo, el periodo anterior ("ant."). Las dos primeras columnas comparan el total de reservas y el promedio de noches por reserva de cada mercado. Mes = mes de llegada (entrada). Si un mes aparece solo en uno de los dos archivos no se compara: se muestra solo su valor.</p>
+    <p style="margin:12px 0 0;font-size:11px;color:var(--color-text-muted)">Formato de celda: reservas del periodo actual con el % de cambio frente al mismo mes del periodo anterior (▲ verde sube, ▼ rojo baja; "nuevo" = no había reservas ese mes en el anterior) y, debajo, las noches entre paréntesis. Pasa el cursor sobre una celda para ver el valor del periodo anterior. Las dos primeras columnas comparan el total de reservas y el promedio de noches por reserva de cada mercado. Mes = mes de llegada (entrada); el color de fondo sigue las noches del periodo actual.</p>
   `;
 }
 
