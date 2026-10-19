@@ -333,6 +333,7 @@ const state = {
     watchlistStatus: 'idle', watchlist: null, // [{customer_id, account_name}]
     rowsStatus: 'idle', rows: null, error: null, simulated: false,
     sortBy: 'account_name', sortDir: 'asc',
+    hotelFilter: '', // customer_id del hotel elegido en el selector de la tabla; '' = todos
     // Periodo consultado (AAAA-MM, desde/hasta); '' = mes en curso. Un periodo ya
     // cerrado se compara contra el objetivo completo en vez de contra un ritmo
     // esperado a la fecha; con varios meses se suman objetivos y gastos.
@@ -8763,7 +8764,7 @@ const PACING_SORT_KEYS = {
 };
 function getPacingRowsSorted() {
   const p = state.pacing;
-  const rows = [...(p.rows || [])];
+  const rows = (p.rows || []).filter((r) => !p.hotelFilter || r.customer_id === p.hotelFilter);
   const keyFn = PACING_SORT_KEYS[p.sortBy] || PACING_SORT_KEYS.account_name;
   const dir = p.sortDir === 'desc' ? -1 : 1;
   if (p.sortBy === 'account_name') {
@@ -8827,12 +8828,26 @@ function renderPacingTable() {
   if (!p.watchlist || !p.watchlist.length) {
     return `<div class="ok-panel">Todavía no estás vigilando ninguna cuenta — agrégala arriba para empezar.</div>`;
   }
+  // Si el hotel elegido ya no está en la lista (se quitó), el selector vuelve a "Todos".
+  if (p.hotelFilter && !p.watchlist.some((w) => w.customer_id === p.hotelFilter)) p.hotelFilter = '';
   const rowsHtml = getPacingRowsSorted().map((r) => pacingRowHtml(r)).join('');
+  const hotelOptions = [...p.watchlist]
+    .sort((a, b) => String(a.account_name || a.customer_id).localeCompare(String(b.account_name || b.customer_id)))
+    .map((w) => `<option value="${escapeHtml(w.customer_id)}" ${p.hotelFilter === w.customer_id ? 'selected' : ''}>${escapeHtml(w.account_name || w.customer_id)}</option>`)
+    .join('');
+  const hotelSelect = p.watchlist.length > 1 ? `
+          <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-muted)">
+            Hotel
+            <select id="pacing-hotel-filter" style="max-width:260px">
+              <option value="">Todos los hoteles</option>${hotelOptions}
+            </select>
+          </label>` : '';
   return `
     <div class="card table-panel">
       <div class="table-panel-head">
-        <h3>Cuentas vigiladas (${p.watchlist.length})</h3>
+        <h3>Cuentas vigiladas (${p.hotelFilter ? `1 de ${p.watchlist.length}` : p.watchlist.length})</h3>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          ${hotelSelect}
           <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-muted)">
             Desde
             <input type="month" id="pacing-month-from" value="${escapeHtml(p.monthFrom || currentMonthValue())}" max="${currentMonthValue()}" />
@@ -9975,6 +9990,11 @@ function bindEvents() {
   const pacingAccountSelect = document.getElementById('pacing-account-select');
   if (pacingAccountSelect) pacingAccountSelect.addEventListener('change', (e) => {
     state.pacing.accountToAdd = e.target.value;
+    render();
+  });
+  const pacingHotelFilter = document.getElementById('pacing-hotel-filter');
+  if (pacingHotelFilter) pacingHotelFilter.addEventListener('change', (e) => {
+    state.pacing.hotelFilter = e.target.value;
     render();
   });
   document.querySelectorAll('[data-pacing-remove]').forEach((btn) => {
