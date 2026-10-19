@@ -9045,6 +9045,30 @@ function renderPacingCampaignsModal() {
       body = `<div class="ok-panel">Sin campañas activas para esta cuenta.</div>`;
     } else {
       const rowsHtml = cm.rows.map((r) => pacingCampaignRowHtml(r)).join('');
+      // Totales de la cuenta. El CTR y el costo/conv se recalculan con los totales (no se promedian) y el
+      // presupuesto diario suma cada presupuesto una sola vez, porque varias campañas pueden compartir uno.
+      const tot = { impressions: 0, clicks: 0, cost: 0, conversions: 0, budget: 0 };
+      const seenBudgets = new Set();
+      cm.rows.forEach((r) => {
+        tot.impressions += r.impressions || 0;
+        tot.clicks += r.clicks || 0;
+        tot.cost += r.cost || 0;
+        tot.conversions += r.conversions || 0;
+        const key = r.budget_resource_name || `c${r.campaign_id}`;
+        if (r.daily_budget != null && !seenBudgets.has(key)) { seenBudgets.add(key); tot.budget += r.daily_budget; }
+      });
+      const totalHtml = `<tr class="pacing-total-row" style="font-weight:700;border-top:2px solid currentColor">
+        <td>Total (${cm.rows.length} campaña${cm.rows.length === 1 ? '' : 's'})</td>
+        <td></td>
+        <td>${fmtInt(tot.impressions)}</td>
+        <td>${fmtInt(tot.clicks)}</td>
+        <td>${tot.impressions > 0 ? (tot.clicks / tot.impressions * 100).toFixed(2) + '%' : 'N/D'}</td>
+        <td>${fmtMoney(tot.cost)}</td>
+        <td>${fmtInt(tot.conversions)}</td>
+        <td>${tot.conversions > 0 ? fmtMoney(tot.cost / tot.conversions) : 'N/D'}</td>
+        <td>${seenBudgets.size ? fmtMoney(tot.budget) : 'N/D'}</td>
+        <td></td>
+      </tr>`;
       body = `
         ${cm.simulated ? `<div class="ok-panel" style="margin-bottom:12px"><strong>Modo simulado.</strong> Datos de ejemplo, no de una cuenta real.</div>` : ''}
         <div class="table-scroll">
@@ -9062,9 +9086,10 @@ function renderPacingCampaignsModal() {
               <th></th>
             </tr></thead>
             <tbody>${rowsHtml}</tbody>
+            <tfoot>${totalHtml}</tfoot>
           </table>
         </div>
-        <p class="footnote" style="margin-top:12px">Solo campañas con status ENABLED. KPIs del mes en curso (mismo rango que el resto de Ritmo de consumo). Ajustar el presupuesto diario escribe de inmediato en la cuenta real de Google Ads — siempre pasa por vista previa antes de aplicar.</p>`;
+        <p class="footnote" style="margin-top:12px">Solo campañas con status ENABLED. La fila Total suma las campañas de la lista (el presupuesto diario cuenta una sola vez los presupuestos compartidos). KPIs del mes en curso (mismo rango que el resto de Ritmo de consumo). Ajustar el presupuesto diario escribe de inmediato en la cuenta real de Google Ads — siempre pasa por vista previa antes de aplicar.</p>`;
     }
   }
 
