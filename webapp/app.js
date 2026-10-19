@@ -4447,25 +4447,16 @@ function renderBookComparePage() {
         </table>
       </div>
     </div>
-    <div class="two-col">
-      <div class="card chart-card">
-        <h3 class="dense-chart-title">Periodo actual — reservas, noches y prom. de noches por mercado</h3>
-        ${renderBookingsHeatmap(currentRows)}
+    <div class="card chart-card">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:6px">
+        <h3 class="dense-chart-title" style="margin:0">Reservas, noches y prom. de noches por mercado — periodo actual vs. anterior</h3>
+        <button class="btn-outline sm" data-action="book-compare-download-markets-html" title="Descarga esta gráfica como una página HTML que cabe completa en una sola pantalla">Descargar (HTML)</button>
       </div>
-      <div class="card chart-card">
-        <h3 class="dense-chart-title">Periodo anterior — reservas, noches y prom. de noches por mercado</h3>
-        ${renderBookingsHeatmap(previousRows)}
-      </div>
+      ${renderBookingsHeatmapCompare(currentRows, previousRows)}
     </div>
-    <div class="two-col">
-      <div class="card chart-card">
-        <h3 class="dense-chart-title">Periodo actual — llegadas por día de semana</h3>
-        ${renderArrivalsByWeekday(currentRows)}
-      </div>
-      <div class="card chart-card">
-        <h3 class="dense-chart-title">Periodo anterior — llegadas por día de semana</h3>
-        ${renderArrivalsByWeekday(previousRows)}
-      </div>
+    <div class="card chart-card">
+      <h3 class="dense-chart-title">Llegadas por día de semana — periodo actual vs. anterior</h3>
+      ${renderArrivalsByWeekdayCompare(currentRows, previousRows)}
     </div>
     <p class="footnote">
       Las reservas se agrupan por mercado (país). Los badges ▲/▼ comparan el periodo actual contra el anterior — más es mejor en reservas, noches y conversiones; en antelación solo se informa la tendencia, sin juicio de bueno/malo.
@@ -4631,6 +4622,177 @@ function renderBookingsHeatmap(rows) {
       </table>
     </div>
     <p style="margin:12px 0 0;font-size:11px;color:var(--color-text-muted)">Formato de celda: reservas (noches). La columna derecha muestra el promedio de noches por reserva de cada mercado. Mes = mes de llegada (entrada), incluye todo el rango del archivo (pasado y futuro).</p>
+  `;
+}
+
+// Flecha de cambio para el mapa de calor comparado: verde si sube, roja si baja (más es mejor).
+// `label` es el texto que acompaña la flecha (diferencia absoluta o porcentaje ya formateado).
+function heatDeltaBadge(diff, label) {
+  if (!diff) return '<span class="delta-badge neutral">—</span>';
+  return `<span class="delta-badge ${diff > 0 ? 'good' : 'bad'}">${diff > 0 ? '▲' : '▼'} ${label}</span>`;
+}
+
+// Mapa de calor de mercados por mes de llegada con los dos periodos en la misma tabla: cada celda
+// muestra el periodo actual y, debajo, el anterior, con una flecha verde/roja del cambio en reservas.
+// La flecha solo sale cuando ese mes existe en los dos archivos; si un mes solo está en uno de
+// los periodos (por ejemplo, periodos de meses distintos) se muestra el valor sin comparar.
+function renderBookingsHeatmapCompare(currentRows, previousRows) {
+  const cur = engine.summarizeByMarketAndMonth(currentRows);
+  const prev = engine.summarizeByMarketAndMonth(previousRows);
+  if (!cur.months.length && !prev.months.length) {
+    return `<p style="font-size:12.5px;color:var(--color-text-muted)">No hay reservas con fecha de entrada válida para graficar.</p>`;
+  }
+  const curMonths = new Set(cur.months);
+  const prevMonths = new Set(prev.months);
+  const months = [...new Set([...cur.months, ...prev.months])].sort();
+  const curMap = new Map(cur.markets.map((m) => [m.market, m]));
+  const prevMap = new Map(prev.markets.map((m) => [m.market, m]));
+  const markets = [...new Set([...cur.markets.map((m) => m.market), ...prev.markets.map((m) => m.market)])]
+    .sort((a, b) => ((curMap.get(b) || {}).reservas || 0) - ((curMap.get(a) || {}).reservas || 0) || ((prevMap.get(b) || {}).reservas || 0) - ((prevMap.get(a) || {}).reservas || 0));
+  const empty = { reservas: 0, noches: 0 };
+  const cellOf = (map, market, month, monthsList) => {
+    const m = map.get(market);
+    const i = monthsList.indexOf(month);
+    return m && i >= 0 ? m.cells[i] : empty;
+  };
+  const maxNoches = Math.max(1, ...[...cur.markets, ...prev.markets].flatMap((m) => m.cells.map((c) => c.noches)));
+
+  const headerCells = months.map((m) => `<th>${escapeHtml(m)}</th>`).join('');
+  const bodyRows = markets.map((market) => {
+    const cm = curMap.get(market);
+    const pm = prevMap.get(market);
+    const cells = months.map((month) => {
+      const c = cellOf(curMap, market, month, cur.months);
+      const p = cellOf(prevMap, market, month, prev.months);
+      const inCur = curMonths.has(month);
+      const inPrev = prevMonths.has(month);
+      const { bg, fg } = heatColor(Math.max(c.noches, p.noches), maxNoches);
+      let content;
+      if (inCur && inPrev) {
+        content = c.reservas === 0 && p.reservas === 0
+          ? `<div class="heatmap-cell-main" style="opacity:.35">0</div>`
+          : `<div class="heatmap-cell-main">${fmtInt(c.reservas)} ${heatDeltaBadge(c.reservas - p.reservas, (c.reservas - p.reservas > 0 ? '+' : '') + fmtInt(c.reservas - p.reservas))}</div>
+             <div class="heatmap-cell-sub">(${fmtInt(c.noches)}N)</div>
+             <div class="heatmap-cell-sub" style="opacity:.7">ant. ${fmtInt(p.reservas)} (${fmtInt(p.noches)}N)</div>`;
+      } else if (inCur) {
+        content = c.reservas > 0
+          ? `<div class="heatmap-cell-main">${fmtInt(c.reservas)}</div><div class="heatmap-cell-sub">(${fmtInt(c.noches)}N)</div>`
+          : `<div class="heatmap-cell-main" style="opacity:.35">0</div>`;
+      } else {
+        content = p.reservas > 0
+          ? `<div class="heatmap-cell-main" style="opacity:.7">ant. ${fmtInt(p.reservas)}</div><div class="heatmap-cell-sub" style="opacity:.7">(${fmtInt(p.noches)}N)</div>`
+          : `<div class="heatmap-cell-main" style="opacity:.35">0</div>`;
+      }
+      return `<td class="heatmap-cell" style="background:${bg};color:${fg}">${content}</td>`;
+    }).join('');
+    const cr = cm ? cm.reservas : 0;
+    const pr = pm ? pm.reservas : 0;
+    const resPct = pr > 0 ? (cr - pr) / pr : null;
+    const cp = cm ? cm.promNoches : null;
+    const pp = pm ? pm.promNoches : null;
+    const promPct = cp != null && pp != null && pp > 0 ? (cp - pp) / pp : null;
+    const pctLabel = (v) => `${Math.abs(v * 100).toFixed(0)}%`;
+    return `
+      <tr>
+        <td class="heatmap-row-label">${escapeHtml(market)}</td>
+        <td><div class="heatmap-avg-cell">${fmtInt(cr)} ${resPct == null ? '' : heatDeltaBadge(resPct, pctLabel(resPct))}</div><div class="heatmap-cell-sub" style="color:var(--color-text-muted)">ant. ${fmtInt(pr)}</div></td>
+        <td><div class="heatmap-avg-cell">${cp != null ? cp.toFixed(2) : '—'} ${promPct == null ? '' : heatDeltaBadge(promPct, pctLabel(promPct))}</div><div class="heatmap-cell-sub" style="color:var(--color-text-muted)">ant. ${pp != null ? pp.toFixed(2) : '—'}</div></td>
+        ${cells}
+      </tr>`;
+  }).join('');
+
+  return `
+    <div class="heatmap-wrap">
+      <table class="heatmap-table">
+        <thead><tr><th></th><th>Total<br>reservas</th><th>Prom.<br>noches</th>${headerCells}</tr></thead>
+        <tbody>${bodyRows}</tbody>
+      </table>
+    </div>
+    <p style="margin:12px 0 0;font-size:11px;color:var(--color-text-muted)">Formato de celda: reservas del periodo actual con la flecha del cambio frente al anterior (▲ verde sube, ▼ rojo baja), noches entre paréntesis y, debajo, el periodo anterior ("ant."). Las dos primeras columnas comparan el total de reservas y el promedio de noches por reserva de cada mercado. Mes = mes de llegada (entrada). Si un mes aparece solo en uno de los dos archivos no se compara: se muestra solo su valor.</p>
+  `;
+}
+
+// HTML descargable del mapa de mercados (actual vs. anterior). Es una página autosuficiente que ajusta
+// las columnas al ancho de la pantalla para que se vea completa sin desplazarse; el HTML del mapa es el
+// mismo de la pantalla, con estilos propios.
+function buildBookCompareMarketsHtml() {
+  const s = state.book.compare;
+  const currentRows = s.current.rows
+    .filter((r) => s.marketFilter === 'all' || r.pais === s.marketFilter)
+    .filter((r) => s.hotelFilter === 'all' || r.hotel === s.hotelFilter);
+  const previousRows = s.previous.rows
+    .filter((r) => s.marketFilter === 'all' || r.pais === s.marketFilter)
+    .filter((r) => s.hotelFilter === 'all' || r.hotel === s.hotelFilter);
+  const scope = [s.marketFilter !== 'all' ? `Mercado: ${s.marketFilter}` : 'Todos los mercados', s.hotelFilter !== 'all' ? `Hotel: ${s.hotelFilter}` : 'Todos los hoteles'].join(' · ');
+  const today = new Date().toISOString().slice(0, 10);
+  return `<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reservas por mercado — periodo actual vs. anterior</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--gray-50:#f4f5f8;--gray-100:#eceef2;--color-text-heading:#14213d;--color-text-muted:#6b7280;--color-border:#d7dae1;--ok-bg:#eef6f1;--ok-text:#256a45;--danger:#b3352b;--danger-bg:#fbeceb}
+*{box-sizing:border-box}
+body{margin:0;padding:16px 20px;font-family:Inter,system-ui,-apple-system,sans-serif;color:var(--color-text-heading);background:#fff}
+h1{font-size:clamp(15px,1.6vw,22px);margin:0 0 4px}
+.meta{font-size:clamp(10px,.85vw,12.5px);color:var(--color-text-muted);margin:0 0 12px}
+.heatmap-wrap{overflow:visible}
+.heatmap-table{border-collapse:separate;border-spacing:2px;width:100%;table-layout:fixed}
+.heatmap-table th{font-size:clamp(8px,.72vw,10.5px);font-weight:600;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:.02em;padding:3px 1px;text-align:center}
+.heatmap-table th:first-child,.heatmap-row-label{width:8%}
+.heatmap-table td{padding:0;text-align:center;white-space:normal;overflow:hidden}
+.heatmap-row-label{text-align:left!important;font-size:clamp(9px,.85vw,12.5px);font-weight:600;padding:0 4px!important}
+.heatmap-cell{border-radius:5px;padding:5px 1px!important;min-width:0}
+.heatmap-cell-main{font-size:clamp(9px,.85vw,13px);font-weight:700;line-height:1.25}
+.heatmap-cell-sub{font-size:clamp(7.5px,.65vw,10px);opacity:.85;line-height:1.2}
+.heatmap-avg-cell{font-weight:700;font-size:clamp(9px,.8vw,12.5px);background:var(--gray-50);border:1px solid var(--color-border);border-radius:5px;padding:5px 1px}
+.delta-badge{display:inline-block;font-size:clamp(7.5px,.65vw,11px);font-weight:600;padding:0 4px;border-radius:999px;white-space:nowrap}
+.delta-badge.good{background:var(--ok-bg);color:var(--ok-text)}
+.delta-badge.bad{background:var(--danger-bg);color:var(--danger)}
+.delta-badge.neutral{background:var(--gray-100);color:var(--color-text-muted)}
+.note{font-size:clamp(9px,.75vw,11px);color:var(--color-text-muted);margin:10px 0 0}
+@media print{@page{size:landscape;margin:8mm}body{padding:0}}
+</style></head><body>
+<h1>Reservas, noches y prom. de noches por mercado — periodo actual vs. anterior</h1>
+<p class="meta">${escapeHtml(scope)} · Actual: ${escapeHtml(s.current.fileName || 'periodo actual')} · Anterior: ${escapeHtml(s.previous.fileName || 'periodo anterior')} · Generado el ${today} con Paid Media Helper</p>
+${renderBookingsHeatmapCompare(currentRows, previousRows)}
+</body></html>`;
+}
+
+// Llegadas por día de la semana con los dos periodos en el mismo cuadro: una fila por periodo y una
+// tercera con la flecha del cambio en reservas (verde si sube, roja si baja) y, debajo, el cambio
+// en puntos porcentuales del peso de ese día sobre el total de llegadas.
+function renderArrivalsByWeekdayCompare(currentRows, previousRows) {
+  const cur = engine.summarizeArrivalsByWeekday(currentRows);
+  const prev = engine.summarizeArrivalsByWeekday(previousRows);
+  const curTotal = cur.reduce((acc, d) => acc + d.reservas, 0);
+  const prevTotal = prev.reduce((acc, d) => acc + d.reservas, 0);
+  if (!curTotal && !prevTotal) {
+    return `<p style="font-size:12.5px;color:var(--color-text-muted)">No hay reservas con fecha de entrada válida para graficar.</p>`;
+  }
+  const maxPct = Math.max(1, ...cur.map((d) => d.pct), ...prev.map((d) => d.pct));
+  const headerCells = cur.map((d) => `<th>${d.day}</th>`).join('');
+  const heatCells = (data) => data.map((d) => {
+    const { bg, fg } = heatColor(d.pct, maxPct);
+    return `<td class="heatmap-cell" style="background:${bg};color:${fg}"><div class="heatmap-cell-main">${d.pct.toFixed(1)}%</div><div class="heatmap-cell-sub">${fmtInt(d.reservas)}</div></td>`;
+  }).join('');
+  const changeCells = cur.map((d, i) => {
+    const diff = d.reservas - prev[i].reservas;
+    const pp = d.pct - prev[i].pct;
+    return `<td class="heatmap-cell" style="background:var(--gray-50);color:var(--color-text-heading)"><div class="heatmap-cell-main">${heatDeltaBadge(diff, (diff > 0 ? '+' : '') + fmtInt(diff))}</div><div class="heatmap-cell-sub" style="color:var(--color-text-muted)">${pp > 0 ? '+' : ''}${pp.toFixed(1)} pp</div></td>`;
+  }).join('');
+
+  return `
+    <div class="heatmap-wrap">
+      <table class="heatmap-table">
+        <thead><tr><th></th>${headerCells}</tr></thead>
+        <tbody>
+          <tr><td class="heatmap-row-label">Actual</td>${heatCells(cur)}</tr>
+          <tr><td class="heatmap-row-label">Anterior</td>${heatCells(prev)}</tr>
+          <tr><td class="heatmap-row-label">Cambio</td>${changeCells}</tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="margin:12px 0 0;font-size:11px;color:var(--color-text-muted)">% de reservas según el día de la semana de la fecha de entrada (llegada), sobre el total de reservas con fecha válida de cada periodo; debajo, el número de reservas. La fila Cambio muestra la diferencia en reservas con una flecha (▲ verde sube, ▼ roja baja) y, en pequeño, la diferencia del peso del día en puntos porcentuales (pp).</p>
   `;
 }
 
@@ -10510,6 +10672,10 @@ function handleAction(action) {
 
     case 'book-mode-single': state.book.mode = 'single'; render(); break;
     case 'book-mode-compare': state.book.mode = 'compare'; render(); break;
+
+    case 'book-compare-download-markets-html':
+      downloadTextFile(buildBookCompareMarketsHtml(), `bookings_mercados_comparativo_${new Date().toISOString().slice(0, 10)}.html`, 'text/html');
+      break;
 
     case 'book-compare-demo': {
       state.book.compare.current.status = 'loading'; state.book.compare.current.error = null; state.book.compare.current.fileName = 'reservas_actual.csv';
