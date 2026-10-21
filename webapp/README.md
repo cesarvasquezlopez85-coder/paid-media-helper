@@ -15,7 +15,8 @@ Luego abre `http://localhost:8642` — te va a pedir iniciar sesión o crear cue
 
 ## Archivos
 
-- `index.html` — estructura y carga de fuentes/íconos (Lucide), `xlsx` para leer Excel, y Chart.js para las gráficas.
+- `index.html` — estructura y carga de fuentes/íconos (Lucide), `xlsx` para leer Excel, y Chart.js para las gráficas. Esas librerías se sirven desde `vendor/` (ver `vendor/LEEME.md`), no desde un CDN externo.
+- `styles-roiback.css` — el rediseño Roiback; solo lo ve un superadmin con el botón del menú lateral (los demás ven siempre `styles.css`).
 - `login.html` / `login.js` — pantalla de inicio de sesión / creación de cuenta.
 - `styles.css` — tokens de diseño (color, tipografía, espaciado) portados del design system del handoff.
 - `engine.js` — lógica de negocio de las funciones que procesan un archivo (CSV/Excel) en el navegador, sin dependencias de UI.
