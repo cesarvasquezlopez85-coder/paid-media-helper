@@ -210,6 +210,12 @@ STATIC_FILES = {
     "/login.html": "login.html",
     "/login.js": "login.js",
     "/styles-roiback.css": "styles-roiback.css",
+    # Librerías de terceros servidas desde aquí (ver webapp/vendor/LEEME.md): así la página no depende
+    # de que unpkg o jsdelivr respondan para poder pintarse.
+    "/vendor/lucide.min.js": "vendor/lucide.min.js",
+    "/vendor/xlsx.full.min.js": "vendor/xlsx.full.min.js",
+    "/vendor/chart.umd.min.js": "vendor/chart.umd.min.js",
+    "/vendor/chartjs-plugin-datalabels.min.js": "vendor/chartjs-plugin-datalabels.min.js",
 }
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -732,7 +738,7 @@ class Handler(SimpleHTTPRequestHandler):
     def _send_security_headers(self):
         csp = (
             "default-src 'self'; "
-            "script-src 'self' https://unpkg.com https://cdn.jsdelivr.net; "
+            "script-src 'self'; "
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "font-src 'self' https://fonts.gstatic.com; "
             "img-src 'self' data:; "
@@ -759,6 +765,9 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
+        if filename.startswith("vendor/"):
+            # Versiones fijas de librerías: el navegador las guarda una semana y no las vuelve a pedir.
+            self.send_header("Cache-Control", "private, max-age=604800")
         self._send_security_headers()
         self.end_headers()
         self.wfile.write(content)
