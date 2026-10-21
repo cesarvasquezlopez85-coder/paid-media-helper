@@ -157,7 +157,7 @@ Con las cuentas reales validadas y la app ya en producción (Railway), esto es l
 - ~~Probar la escritura real de presupuesto diario por campaña (Función 13, Ritmo de consumo) contra una cuenta real~~ — completado (2026-10-08, probado por cesar).
 - ~~Decidir si el registro de usuarios sigue abierto o pasa a altas manuales~~ — resuelto 2026-07-30: registro cerrado por código de invitación (`PMH_REGISTRATION_CODE`), ver "Seguridad — endurecimiento" arriba.
 - **Probar la Función 5 (Comparar periodos) con dos exports reales del mismo cliente** — solo se probó con datos sintéticos hasta ahora.
-- **Probar el modo "Comparar periodos" de la Función 4 (Bookings) con dos exports reales del mismo hotel** — solo se probó con datos sintéticos hasta ahora.
+- ~~Probar el modo "Comparar periodos" de la Función 4 (Bookings) con dos exports reales del mismo hotel~~ — completado 2026-10-19 con dos exports reales de Estelar (reservas del 1 al 18 de octubre de 2026 y de 2025). La prueba mostró que los meses de llegada no coinciden en el calendario entre épocas distintas; ahora la plataforma alinea cada mes con su equivalente del periodo anterior, oculta los meses sin equivalente (siguen en los totales) y el HTML descargable agrupa los mercados menores en "Otros mercados".
 - **Probar la Función 6 (Oportunidad de ingresos) con más cuentas reales** — ya se validó con el archivo real de Estelar (solo entran las campañas Performance Max, que traen Search Impr. Share), pero falta confirmar el cálculo en cuentas con más campañas limitadas por presupuesto y más de un hotel a la vez.
 - **Probar la Función 7 (Proyección de ventas) con histórico real de un hotel** — solo se probó con un dataset sintético hasta ahora; falta ver cómo se comporta el índice de temporada con datos reales (que rara vez son tan limpios como el sintético) y confirmar con cesar si el margen de error (MAPE) es aceptable para planear presupuesto.
 - **Integración directa con la API de Google Ads (v2, en construcción desde 2026-07-22).** Arrancó la parte de desarrollo en paralelo a que cesar inicia la parte administrativa con Google (proyecto en Google Cloud + solicitud de developer token vía el MCC — ver `Propuesta_Integracion_API_Google_Ads.md`). Ya construido, sin depender de credenciales reales todavía:
@@ -184,6 +184,53 @@ Con las cuentas reales validadas y la app ya en producción (Railway), esto es l
   - **Cuadro con los términos seleccionados (2026-07-29):** a pedido de cesar, para poder revisar de un vistazo qué se va a subir antes de la vista previa/confirmación — una tabla chica con scroll, debajo de los botones de selección, que lista término/campaña/costo de cada término marcado, actualizada en vivo con cada clic.
   - **Bug encontrado por cesar (2026-07-29): el botón "Vista previa" no volvía a aparecer al cambiar de campaña.** Después de subir negativos en una campaña, el panel de subida quedaba pegado en el estado `done` al cambiar el filtro a otra campaña — el botón "Vista previa" solo se muestra en los estados `idle`/`error`. Corregido: el listener del filtro de campaña ahora resetea `selected`/`status`/`preview`/`result`/`error` cada vez que cambia la campaña seleccionada.
 - ~~Recomendaciones de Función 1 (Rendimiento) generadas por Claude, en vez de solo reglas de umbral fijo~~ — **construido y en producción, 2026-08-17, como prueba interna solo para administradores.** Idea evaluada 2026-07-14 a pedido de cesar (ver detalle original de la propuesta en `Propuesta_Claude_Optimizaciones_Rendimiento.md`); no reemplazó el cálculo de métricas (`computeMetrics`/`summarize`/`generateRecommendations` en `engine.js` siguen siendo la fuente de verdad) — Claude recibe el resumen de cuenta y hasta 12 hallazgos ya calculados (los de mayor impacto de gasto) y devuelve una lectura priorizada en prosa, no otra tabla de números. Botón "Analizar con IA" en Rendimiento, bajo demanda (nunca automático, para controlar costo). `webapp/claude_client.py` — mismo criterio que `google_ads_client.py`: `urllib` puro en vez del SDK oficial de Anthropic, porque el `Dockerfile` no corre `pip install`. Modelo `claude-opus-5`, endpoint nuevo `POST /api/ai/analizar-rendimiento` (solo admins vía `_require_admin_json`, rate limit 10/hora por usuario — cada llamada cuesta dinero real). Probado de punta a punta contra la API real de Claude: el análisis identificó por su cuenta que el umbral de CTR de Search no aplica a Performance Max/Display (falso positivo ya conocido del motor de reglas) y priorizó correctamente entre los hallazgos reales. **Pendiente decidir:** si se abre a todos los usuarios (hoy es deliberadamente solo-admin como soft launch) — cambio de una línea en `server.py` cuando cesar lo confirme.
+
+## Pendientes consolidados (2026-10-20)
+
+Lista única de lo que falta, agrupada por tipo. Lo construido y validado está en "Ya construido y validado" más arriba.
+
+### Funciones nuevas por construir
+| # | Pendiente | Detalle |
+|---|-----------|---------|
+| 1 | **IA Max: pestaña "Qué creó IA Max"** (agregada 2026-10-20) | Solo lectura, verificada contra una cuenta real (Estelar Yopal) con tres tablas: (a) recursos creados automáticamente por IA Max (`ad_group_ad_asset_view` con `asset.source = AUTOMATICALLY_CREATED`, trae impresiones y clics por anuncio; Google no da etiqueta de rendimiento); (b) combinaciones término de búsqueda + página + titular dinámico (`ai_max_search_term_ad_combination_view`, **hay que incluir `segments.date`** o devuelve 0 filas; trae impresiones, clics, costo y conversiones); (c) páginas a las que IA Max mandó el tráfico (`expanded_landing_page_view`, con métricas; las URL traen parámetros de seguimiento, hay que agrupar por ruta). También se pueden leer los ajustes de textos automáticos y expansión de URL por campaña (`campaign.asset_automation_settings`) |
+| 2 | IA Max: controles con vista previa | Textos automáticos y expansión de URL por campaña (la expansión exige IA Max y textos automáticos prendidos); `disable_search_term_matching` por grupo de anuncios; pautas de texto (`text_guidelines`: hasta 25 términos prohibidos y 40 restricciones); lista de páginas permitidas (criterios `webpage`); ubicación de interés (con `matched_location_interest_view`); aplicar en bloque a varias campañas o cuentas |
+| 3 | IA Max: comparativos y reglas | IA Max contra palabras clave (CPA, conversiones y costo por origen de coincidencia); antes y después de prenderla (con el historial de cambios); campañas migradas solas (`aca_migration_date_time`, `broad_match_migration_date_time`); reglas en la auditoría (IA Max con expansión de URL en campañas de marca, términos con gasto y cero conversiones). Listas de marcas (`brand_list`): falta investigar cómo se crean |
+| 4 | Historial de cambios de Google Ads | Sección con quién cambió qué (`change_event`: fecha, usuario, origen, campaña, valor anterior y nuevo), con filtros y descarga en CSV y HTML. Esperando el visto bueno de cesar |
+| 5 | Rendimiento por audiencia | Siguiente paso de la línea de audiencias, después de las reglas U1 a U5 de la auditoría |
+| 6 | Descarga del historial del puntaje de la auditoría | Hoy "Ver historial de la cuenta" solo se ve en pantalla (el HTML de la auditoría ya incluye la gráfica); ofrecido, sin pedir |
+| 7 | Recordar el hotel elegido en Ritmo de consumo | El selector de hoteles no guarda la elección al recargar |
+| 8 | Otras ideas de datos de la API | La lista de ideas de funciones sacadas de la API de Google Ads está en la conversación del 2026-10-16, sin priorizar |
+
+### Auditoría
+- Reglas aún sin construir: A11, C8 y D7; P4 y P8 no se pueden construir con la API; P11 por magnitud; F1 "aplicadas".
+- Puntaje ponderado por área y metas por campaña (decisión pendiente).
+- Probar con 3 o 4 hoteles que cesar conozca bien y ajustar umbrales.
+- Regenerar `ejemplo_informe_auditoria.html` y `.pdf`: son de una versión vieja (sin Audiencias, historial ni tablas de países) y no están en git. `reglas_auditoria.html` (copia de la página con diseño Roiback) tampoco.
+
+### Diseño y presentación
+- Rediseño Roiback (rama `rediseno-roiback`, sin publicar): decidir si se publica tal cual o con un interruptor de tema.
+- Presentación del equipo: sigue en azul marino y dorado; falta pasarla a colores y fuentes de Roiback y volver a tomar las capturas cuando se publique el rediseño.
+- Documentos del repositorio: `Resumen_Proyecto.md`, README y roadmap no recogen del todo los cambios del 2026-10-19 (Ritmo de consumo y Bookings) y hablan de 27 diapositivas; hoy son 29.
+
+### Infraestructura y conexiones
+- **Dominio propio:** comprarlo (se sugirió `paidmediahelper.com`), conectarlo con `railway domain`, apuntar el DNS, verificar HTTPS, login y cookies, y actualizar enlaces y documentos.
+- **BigQuery:** correr `get_bigquery_refresh_token.py`, configurar `BIGQUERY_PROJECT_ID` y `BIGQUERY_REFRESH_TOKEN`, y dar el dataset y la tabla de reservas; después, traer reservas reales para cruzarlas con la inversión.
+- **Otras conexiones por API:** Google Analytics, Meta y Google Tag Manager, y más.
+- **API v26:** falta una escritura real aplicada en una cuenta propia para confirmar que aplica cambios (solo se validó con vista previa). Tampoco están probados de punta a punta con v26: aplicar y descartar recomendaciones, el pronóstico de palabras clave y el guardado del historial con una cuenta real.
+- Revisar Railway, la cuota de Google Ads y los accesos ahora que la plataforma tiene más usuarios (el recordatorio del 2026-10-16 ya pasó).
+
+### Pruebas con datos reales
+- Función 5 (Comparar periodos de campañas) con dos exports reales del mismo cliente.
+- Función 6 (Oportunidad de ingresos) con más cuentas, sobre todo con campañas limitadas por presupuesto y más de un hotel a la vez.
+- Función 7 (Proyección de ventas) con el histórico real de un hotel y confirmar si el margen de error es aceptable.
+- Negativización: revisar a mano los términos "revisar" y los que solo contienen "estelar" antes de negativizar en Estelar Playa Manzanillo; probar la escritura de negativos con más volumen.
+- Repetir la carga de Click Clack Bogotá y anotar si las recomendaciones coinciden con el criterio de cesar.
+- Confirmar con cesar si la tolerancia del semáforo de Ritmo de consumo (±10%) es la que quiere.
+
+### Decisiones abiertas
+- Abrir el análisis con IA de Rendimiento a todo el equipo (hoy solo administradores, con tope de 10 por hora por usuario por el costo).
+- Generador de copys (Función 3, oculto desde 2026-07-13): decidir si se retoma con generación real vía Claude API y validar las políticas de contenido de Google en el copy.
+- Fase 2: guardar el historial de cada análisis, validar que el archivo subido sea reciente y de la cuenta correcta, y guardar términos núcleo y excepciones por cuenta.
 
 ## Siguiente paso
 La Fase 1 ya tiene spec (`spec.md`). Repetir la carga de Click Clack Bogotá ahora que el bug de encabezado está corregido, anotar si las recomendaciones coinciden con el criterio de cesar, y seguir con el resto de las 3-5 cuentas objetivo — usando `webapp/`, ya en producción en `https://paid-media-helper.up.railway.app` (o local con `python3 webapp/server.py`), no el prototipo de Streamlit. En paralelo: revisar a mano la lista "revisar" de la Función 2 antes de negativizar nada en la cuenta de Estelar Playa Manzanillo, seguir validando la Función 4 (Bookings) — modo único y modo Comparar periodos — con más cuentas de hotel reales, probar la Función 5 (Comparar periodos) con dos exports reales, y seguir probando la Función 6 (Oportunidad de ingresos) con más cuentas reales además de Estelar. La Función 3 queda en pausa (oculta del menú) hasta decidir el enfoque de v2. Pendiente aparte: comprar y conectar un dominio propio.
