@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Paid Media Helper — Plataforma de Google Ads</title>
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles.css" id="app-theme-css">
 <script src="https://unpkg.com/lucide@1.28.0/dist/umd/lucide.min.js" integrity="sha384-VrnzGPiSyQxm3mI2VhlssyR85zugSHtxMkgO42qV3wUAbNk1oRdZkCWjXKOhuVu6" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" integrity="sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw" crossorigin="anonymous"></script>
 <!-- Piloto de gráficas "más lindas" (Rendimiento) — ver mountRendCharts() en app.js.
@@ -90,6 +90,9 @@
     <div class="sidebar-session" id="sidebar-session">
       <div class="sidebar-session-user" id="sidebar-username"></div>
       <button class="sidebar-logout" id="sidebar-logout">Cerrar sesión</button>
+    </div>
+    <div class="sidebar-session" id="sidebar-theme-row" style="display:none;border-top:none;padding-top:6px">
+      <button class="sidebar-logout" id="sidebar-theme" title="Solo lo ves como superadmin"></button>
     </div>
     <div class="sidebar-credit">
       <div>Desarrollado por Cesar Vasquez</div>

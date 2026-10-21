@@ -396,7 +396,19 @@ const pwChangeState = { status: 'idle', error: null }; // idle | saving | error
 
 // Se completa con la respuesta de /api/me al cargar la página — controla
 // si se muestra el botón "Administración" del sidebar.
-const currentUser = { username: null, isAdmin: false };
+const currentUser = { username: null, isAdmin: false, isSuperAdmin: false };
+
+// Diseño de la interfaz: "current" es el de siempre y "roiback" el rediseño. Solo un superadmin puede
+// cambiarlo (botón al pie del menú lateral); los demás usuarios siempre ven el actual. El rediseño es
+// otra hoja de estilos (styles-roiback.css) más los colores que este archivo escribe a mano, que pasan
+// por themed() y por las constantes AUDIT_* según el diseño elegido.
+const THEME_KEY = 'pmh_theme';
+let APP_THEME = 'current';
+function themed(current, roiback) { return APP_THEME === 'roiback' ? roiback : current; }
+function themedFontsLink(legacyHref) {
+  return `<link rel="preconnect" href="https://fonts.googleapis.com"><link href="${themed(legacyHref, 'https://fonts.googleapis.com/css2?family=Montserrat:wght@600;700;800&family=Lato:wght@400;700&display=swap')}" rel="stylesheet">`;
+}
+const PLUS_JAKARTA_HREF = 'https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;700;800&display=swap';
 
 const PAGE_META = {
   rendimiento: {
@@ -668,7 +680,23 @@ function submitPasswordChange() {
     });
 }
 
+// Las gráficas de Chart.js dibujan en un canvas y no heredan la tipografía de la página: con el diseño
+// nuevo se les da la fuente de la página; con el actual se dejan los valores originales de Chart.js.
+function applyChartDefaults() {
+  if (typeof Chart === 'undefined' || Chart.__pmhTheme === APP_THEME) return;
+  if (!Chart.__pmhOrig) Chart.__pmhOrig = { family: Chart.defaults.font.family, color: Chart.defaults.color };
+  if (APP_THEME === 'roiback') {
+    Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+    Chart.defaults.color = cssVar('--color-text-body') || '#10222f';
+  } else {
+    Chart.defaults.font.family = Chart.__pmhOrig.family;
+    Chart.defaults.color = Chart.__pmhOrig.color;
+  }
+  Chart.__pmhTheme = APP_THEME;
+}
+
 function render() {
+  applyChartDefaults();
   // Los <canvas> de Chart.js (ver mountHorizontalBarChart) quedan huérfanos
   // en cuanto root.innerHTML se reemplace abajo — hay que destruir las
   // instancias viejas ANTES, si no Chart.js sigue dibujando sobre un canvas
@@ -1085,7 +1113,7 @@ function buildIsRows(rows) {
       value: (budget + rank) * 100,
       valueLabel: `Presup. ${(budget * 100).toFixed(0)}% · Rank ${(rank * 100).toFixed(0)}%`,
       width: pctWidth(budget + rank, maxVal),
-      color: 'var(--gold-600)',
+      color: 'var(--accent-600)',
     };
   });
 }
@@ -1346,7 +1374,7 @@ function mountRoasComparisonChart(canvasId, rows) {
   const gridColor = cssVar('--color-border') || '#e5e7eb';
   const textColor = cssVar('--color-text-body') || '#333';
   const navy = cssVar('--navy-800') || '#14213d';
-  const gold = cssVar('--gold-600') || '#daa802';
+  const gold = cssVar('--accent-600') || '#daa802';
   const fontFamily = getComputedStyle(document.body).fontFamily || 'sans-serif';
   const fmtPct = (v) => Math.round(v) + '%';
   const achieved = rows.map((r) => (r.roas ?? 0) * 100);
@@ -2615,7 +2643,7 @@ function buildOpportunityHtml() {
   return `<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Oportunidad de ingresos</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;700;800&display=swap" rel="stylesheet">
+${themedFontsLink(PLUS_JAKARTA_HREF)}
 <style>body{margin:0;padding:40px 20px;background:#f4f5f8}@media print{body{background:#fff;padding:0}@page{margin:14mm}}${AUDIT_REPORT_CSS}.ar-compact th,.ar-compact td{padding:7px 6px;font-size:12.5px}</style>
 </head><body>${opportunityReportBodyHtml()}</body></html>`;
 }
@@ -2780,11 +2808,11 @@ function renderOpportunityFunnel(f) {
         ${funnelConnector(18)}
       </div>
       <div style="display:flex;gap:16px;justify-content:center;flex-wrap:wrap">
-        <div style="background:var(--gold-500);color:var(--navy-900);padding:14px 22px;border-radius:10px;text-align:center;min-width:190px">
+        <div style="background:var(--accent-500);color:var(--navy-900);padding:14px 22px;border-radius:10px;text-align:center;min-width:190px">
           <div style="font-size:11px;text-transform:uppercase;font-weight:600">Conversiones perdidas por presupuesto</div>
           <div style="font-size:24px;font-weight:700;margin-top:4px">${fmtInt(f.conversionsLost)}</div>
         </div>
-        <div style="background:var(--gold-600);color:#fff;padding:14px 22px;border-radius:10px;text-align:center;min-width:190px">
+        <div style="background:var(--accent-600);color:#fff;padding:14px 22px;border-radius:10px;text-align:center;min-width:190px">
           <div style="font-size:11px;text-transform:uppercase;font-weight:600">Ingresos perdidos por presupuesto</div>
           <div style="font-size:24px;font-weight:700;margin-top:4px">${fmtMoney(f.revenueLost)}</div>
         </div>
@@ -2813,7 +2841,7 @@ function renderImpressionShareTrendChart(dailyRows) {
 
   const series = [
     { key: 'lost_is_budget', label: 'Perdido por presupuesto', color: 'var(--danger)' },
-    { key: 'lost_is_rank', label: 'Perdido por ranking', color: '#3b82f6' },
+    { key: 'lost_is_rank', label: 'Perdido por ranking', color: themed('#3b82f6', '#ff9800') },
     { key: 'impr_share', label: 'Impr. Share', color: 'var(--gray-500)' },
   ];
 
@@ -2884,7 +2912,7 @@ function renderImprShareChart(rows) {
   const groups = sorted.map((r) => {
     const bars = [
       { label: 'Impr. Share', value: r.impr_share || 0, color: 'var(--gray-300)' },
-      { label: 'Perdido por ranking', value: r.lost_is_rank || 0, color: '#3b82f6' },
+      { label: 'Perdido por ranking', value: r.lost_is_rank || 0, color: themed('#3b82f6', '#ff9800') },
       { label: 'Perdido por presupuesto', value: r.lost_is_budget || 0, color: 'var(--danger)' },
     ];
     const barsHtml = bars.map((b) => `
@@ -3309,8 +3337,8 @@ function renderForecastReady() {
       <p style="margin:10px 0 0;font-size:11.5px;color:var(--color-text-muted)">
         <span style="color:var(--navy-800)">■</span> real &nbsp;
         <span style="color:var(--color-text-muted)">┄</span> ajuste del modelo (tendencia × temporada) &nbsp;
-        <span style="color:var(--gold-600)">■</span> proyección &nbsp;
-        <span style="color:var(--gold-600);opacity:.4">■</span> rango estimado
+        <span style="color:var(--accent-600)">■</span> proyección &nbsp;
+        <span style="color:var(--accent-600);opacity:.4">■</span> rango estimado
         ${goal ? `&nbsp; <span style="color:var(--ok-text)">┄</span> meta` : ''}
       </p>
     </div>
@@ -3427,9 +3455,9 @@ function renderForecastChart(history, forecast, goalByPeriod, investmentByPeriod
     <div style="position:relative">
       <svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;max-height:260px;display:block" xmlns="http://www.w3.org/2000/svg">
         ${gridLines}
-        <path d="${bandPath}" fill="var(--gold-600)" fill-opacity="0.15" stroke="none" />
+        <path d="${bandPath}" fill="var(--accent-600)" fill-opacity="0.15" stroke="none" />
         <path d="${fittedPath}" fill="none" stroke="var(--color-text-muted)" stroke-width="1.5" stroke-dasharray="4 3" />
-        <path d="${forecastPath}" fill="none" stroke="var(--gold-600)" stroke-width="2.5" />
+        <path d="${forecastPath}" fill="none" stroke="var(--accent-600)" stroke-width="2.5" />
         <path d="${actualPath}" fill="none" stroke="var(--navy-800)" stroke-width="2.5" />
         ${goalPath ? `<path d="${goalPath}" fill="none" stroke="var(--ok-text)" stroke-width="2" stroke-dasharray="1 4" stroke-linecap="round" />` : ''}
         <line x1="${x(lastHist.t).toFixed(1)}" y1="${MT}" x2="${x(lastHist.t).toFixed(1)}" y2="${H - MB}" stroke="var(--color-border)" stroke-width="1" stroke-dasharray="2 3" />
@@ -3823,7 +3851,7 @@ function renderNegReady() {
 
   const chartRows = [
     { campaign: 'Mantener', valueLabel: fmtMoney(summary.mantener.costo), width: pctWidth(summary.mantener.costo, maxCost), color: 'var(--navy-800)' },
-    { campaign: 'Revisar', valueLabel: fmtMoney(summary.revisar.costo), width: pctWidth(summary.revisar.costo, maxCost), color: 'var(--gold-600)' },
+    { campaign: 'Revisar', valueLabel: fmtMoney(summary.revisar.costo), width: pctWidth(summary.revisar.costo, maxCost), color: 'var(--warn-strong)' },
     { campaign: 'Negativizar', valueLabel: fmtMoney(summary.negativizar.costo), width: pctWidth(summary.negativizar.costo, maxCost), color: 'var(--danger)' },
   ];
 
@@ -4499,7 +4527,7 @@ function renderBookReady() {
     campaign: b.label,
     valueLabel: `${fmtInt(b.reservas)} reservas`,
     width: pctWidth(b.reservas, maxLead),
-    color: 'var(--gold-600)',
+    color: 'var(--accent-600)',
   }));
 
   const dateOrderLabel = s.dateOrder === 'MDY' ? 'MM/DD/AAAA (mes primero)' : 'DD/MM/AAAA (día primero)';
@@ -4583,8 +4611,8 @@ function renderBookReady() {
 }
 
 function heatColor(value, max) {
-  const light = [244, 245, 248]; // --gray-50
-  const dark = [20, 33, 61]; // --navy-800
+  const light = themed([244, 245, 248], [248, 248, 248]); // --gray-50
+  const dark = themed([20, 33, 61], [16, 34, 47]); // --navy-800 / tinta
   const ratio = max > 0 ? Math.min(1, value / max) : 0;
   const rgb = light.map((c, i) => Math.round(c + (dark[i] - c) * ratio));
   return { bg: `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`, fg: ratio > 0.55 ? '#ffffff' : 'var(--color-text-heading)' };
@@ -4771,16 +4799,15 @@ function buildBookCompareMarketsHtml() {
   return `<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Reservas por mercado — periodo actual vs. anterior</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+${themedFontsLink('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap')}
 <style>
-:root{--gray-50:#f4f5f8;--gray-100:#eceef2;--color-text-heading:#14213d;--color-text-muted:#6b7280;--color-border:#d7dae1;--ok-bg:#eef6f1;--ok-text:#256a45;--danger:#b3352b;--danger-bg:#fbeceb}
+${themed(':root{--gray-50:#f4f5f8;--gray-100:#eceef2;--color-text-heading:#14213d;--color-text-muted:#6b7280;--color-border:#d7dae1;--ok-bg:#eef6f1;--ok-text:#256a45;--danger:#b3352b;--danger-bg:#fbeceb}', ':root{--gray-50:#f8f8f8;--gray-100:#f2f2f2;--color-text-heading:#10222f;--color-text-muted:#5f5c5d;--color-border:#e4e4e4;--ok-bg:#dcf6e6;--ok-text:#15733d;--danger:#d5455f;--danger-bg:#fbe4e8}')}
 *{box-sizing:border-box}
-body{margin:0;padding:16px 20px;font-family:Inter,system-ui,-apple-system,sans-serif;color:var(--color-text-heading);background:#fff}
-h1{font-size:clamp(15px,1.6vw,22px);margin:0 0 4px}
+${themed("body{margin:0;padding:16px 20px;font-family:Inter,system-ui,-apple-system,sans-serif;color:var(--color-text-heading);background:#fff}\nh1{font-size:clamp(15px,1.6vw,22px);margin:0 0 4px}", "body{margin:0;padding:16px 20px;font-family:'Lato','Segoe UI',system-ui,sans-serif;color:var(--color-text-heading);background:#fff;-webkit-print-color-adjust:exact;print-color-adjust:exact}\nh1{font-family:'Montserrat','Lato',system-ui,sans-serif;font-size:clamp(15px,1.6vw,22px);font-weight:800;text-transform:uppercase;margin:0 0 4px}")}
 .meta{font-size:clamp(10px,.85vw,12.5px);color:var(--color-text-muted);margin:0 0 12px}
 .heatmap-wrap{overflow:visible}
 .heatmap-table{border-collapse:separate;border-spacing:2px;width:100%;table-layout:fixed}
-.heatmap-table th{font-size:clamp(8px,.72vw,10.5px);font-weight:600;color:var(--color-text-muted);text-transform:uppercase;letter-spacing:.02em;padding:3px 1px;text-align:center}
+.heatmap-table th{${themed('', "font-family:'Montserrat','Lato',system-ui,sans-serif;")}font-size:clamp(8px,.72vw,10.5px);font-weight:${themed('600', '700')};color:var(--color-text-muted);text-transform:uppercase;letter-spacing:.02em;padding:3px 1px;text-align:center}
 .heatmap-table th:first-child,.heatmap-row-label{width:8%}
 .heatmap-table td{padding:0;text-align:center;white-space:normal;overflow:hidden}
 .heatmap-row-label{text-align:left!important;font-size:clamp(9px,.85vw,12.5px);font-weight:600;padding:0 4px!important}
@@ -8260,7 +8287,7 @@ function buildAuditMarkdown() {
 // de puntaje, barras por área, tarjetas de métricas, barra de distribución y
 // tarjetas de oportunidades con prioridad. Una sola fuente de estilos: se
 // inyecta en la pantalla y se incrusta tal cual en el HTML descargable.
-const AUDIT_REPORT_CSS = `
+const AUDIT_REPORT_CSS_CURRENT = `
 .ar{font-family:'Plus Jakarta Sans','Inter',system-ui,-apple-system,sans-serif;color:#14213d;max-width:820px;margin:0 auto;-webkit-print-color-adjust:exact;print-color-adjust:exact}
 .ar *{box-sizing:border-box}
 .ar-eyebrow{color:#d9a400;font-weight:700;font-size:13px;letter-spacing:.08em;text-transform:uppercase}
@@ -8317,13 +8344,86 @@ const AUDIT_REPORT_CSS = `
 @media print{.ar{max-width:none;padding:0 3px}}
 `;
 
-const AUDIT_PRIORITY = {
+const AUDIT_REPORT_CSS_ROIBACK = `
+.ar{--ar-ink:#10222f;--ar-muted:#5f5c5d;--ar-soft:#7d797a;--ar-line:#e4e4e4;--ar-subtle:#f8f8f8;--ar-track:#f2f2f2;--ar-accent:#03a694;--ar-accent-strong:#098e7f;--ar-warn:#e6a219;--ar-danger:#d5455f;font-family:'Lato','Segoe UI',system-ui,sans-serif;color:var(--ar-ink);max-width:820px;margin:0 auto;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.ar *{box-sizing:border-box}
+.ar-eyebrow{color:var(--ar-accent-strong);font-weight:700;font-size:13px;letter-spacing:.08em;text-transform:uppercase}
+.ar-title{font-size:34px;font-weight:800;line-height:1.1;margin:6px 0 4px;text-transform:uppercase;color:var(--ar-ink)}
+.ar-sub{color:var(--ar-muted);font-size:14px;margin-bottom:22px}
+.ar-card{background:#fff;border:1px solid var(--ar-line);border-radius:24px;padding:26px 28px}
+.ar-score{display:flex;gap:30px;align-items:center;flex-wrap:wrap}
+.ar-donut{position:relative;width:180px;height:180px;flex:none}
+.ar-donut-c{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.ar-donut-n{font-size:56px;font-weight:800;line-height:1}
+.ar-donut-d{font-size:14px;color:var(--ar-soft);margin-top:2px}
+.ar-verdict{flex:1;min-width:240px}
+.ar-verdict-k{display:flex;align-items:center;gap:8px;color:var(--ar-accent-strong);font-weight:700;font-size:13px;letter-spacing:.08em;text-transform:uppercase}
+.ar-verdict-i{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;border:2px solid currentColor;font-size:11px;line-height:1}
+.ar-verdict-t{font-size:20px;font-weight:700;line-height:1.35;margin-top:8px}
+.ar-verdict-s{font-size:14px;color:var(--ar-muted);margin-top:8px}
+.ar-bars{margin-top:26px;display:grid;gap:14px}
+.ar-bar-row{display:flex;justify-content:space-between;font-size:14px;color:var(--ar-muted)}
+.ar-bar-row strong{color:var(--ar-ink)}
+.ar-track{height:6px;border-radius:99px;background:var(--ar-track);margin-top:6px;overflow:hidden}
+.ar-fill{height:100%;border-radius:99px;background:var(--ar-ink)}
+.ar-h2{font-size:22px;font-weight:800;margin:34px 0 14px;color:var(--ar-ink);break-after:avoid;page-break-after:avoid}
+.ar-block{break-inside:avoid;page-break-inside:avoid}
+.ar-h2 small{font-size:14px;font-weight:500;color:var(--ar-muted);margin-left:8px}
+.ar-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.ar-metric{background:#fff;border:1px solid var(--ar-line);border-radius:16px;padding:20px 22px}
+.ar-metric-l{font-size:14px;color:var(--ar-muted)}
+.ar-metric-v{font-size:34px;font-weight:800;margin-top:6px;line-height:1.1}
+.ar-metric-v.warn{color:#b87300}
+.ar-stack{display:flex;gap:3px;height:16px}
+.ar-seg{border-radius:99px;min-width:6px}
+.ar-legend{display:flex;gap:6px 20px;flex-wrap:wrap;margin-top:14px;font-size:14px;color:var(--ar-muted)}
+.ar-legend strong{color:var(--ar-ink);margin-left:4px}
+.ar-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
+.ar-opp{background:#fff;border:1px solid var(--ar-line);border-left:5px solid var(--c);border-radius:16px;padding:22px 24px;margin-bottom:14px;break-inside:avoid;page-break-inside:avoid}
+.ar-pill{display:inline-block;padding:5px 12px;border-radius:8px;font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}
+.ar-opp-id{font-size:12px;color:var(--ar-soft);margin-left:10px}
+.ar-opp h3{font-size:20px;font-weight:800;margin:14px 0 6px;color:var(--ar-ink)}
+.ar-opp-d{color:var(--ar-muted);font-size:16px;line-height:1.5;margin:0}
+.ar-rec{background:var(--ar-subtle);border-radius:12px;padding:14px 16px;margin-top:14px;font-size:16px;line-height:1.5}
+.ar-ev{margin:10px 0 0 18px;padding:0;color:var(--ar-muted);font-size:14px;line-height:1.5}
+.ar-tw{margin-top:12px;overflow-x:auto}
+.ar-tbl{width:100%;border-collapse:collapse;font-size:14px;line-height:1.4}
+.ar-tbl th{text-align:right;color:var(--ar-muted);font-weight:700;padding:7px 10px;border-bottom:2px solid var(--ar-line);white-space:nowrap}
+.ar-tbl td{text-align:right;padding:7px 10px;border-bottom:1px solid var(--ar-track);color:var(--ar-ink);white-space:nowrap}
+.ar-tbl th:first-child,.ar-tbl td:first-child{text-align:left;white-space:normal}
+.ar-tbl td:first-child{font-weight:600}
+.ar-tbl tr:last-child td{border-bottom:none}
+.ar-ai{white-space:pre-wrap;font-size:16px;line-height:1.65}
+.ar-nv{margin:0 0 0 18px;padding:0;color:var(--ar-muted);font-size:14px;line-height:1.6}
+.ar-note{background:#fdf1d8;border:1px solid var(--ar-warn);border-radius:12px;padding:12px 16px;margin-bottom:18px;font-size:14px}
+.ar-title,.ar-h2,.ar-opp h3,.ar-metric-v,.ar-donut-n,.ar-verdict-t,.ar-pill,.ar-eyebrow,.ar-verdict-k{font-family:'Montserrat','Segoe UI',sans-serif}
+.ar-foot{text-align:center;color:var(--ar-soft);font-size:13px;margin:34px 0 8px}
+@media (max-width:640px){.ar-grid{grid-template-columns:1fr}.ar-title{font-size:30px}}
+@media print{.ar{max-width:none;padding:0 3px}}
+`;
+
+let AUDIT_REPORT_CSS = AUDIT_REPORT_CSS_CURRENT;
+
+const AUDIT_PRIORITY_THEMES = {
+  current: {
   critico: { label: 'Prioridad alta', color: '#d23c3c', bg: '#fbe3e1', fg: '#a8231f' },
   advertencia: { label: 'Prioridad media', color: '#f2c419', bg: '#f6e8bd', fg: '#a77a00' },
   info: { label: 'Informativo', color: '#9fb0cf', bg: '#e8edf5', fg: '#31456b' },
   oportunidad: { label: 'Oportunidad', color: '#2e9b5f', bg: '#dff3e8', fg: '#1d6b41' },
+},
+  roiback: {
+  critico: { label: 'Prioridad alta', color: '#d5455f', bg: '#fbe4e8', fg: '#a82a42' },
+  advertencia: { label: 'Prioridad media', color: '#e6a219', bg: '#fdf1d8', fg: '#8a5d00' },
+  info: { label: 'Informativo', color: '#7f93b3', bg: '#eef1f6', fg: '#1f3155' },
+  oportunidad: { label: 'Oportunidad', color: '#03a694', bg: '#dff5f2', fg: '#02665b' },
+},
 };
-const AUDIT_STACK_COLORS = ['#14213d', '#f2c419', '#5f7aa8', '#c5c9d3', '#2e9b5f', '#d23c3c'];
+const AUDIT_STACK_COLORS_THEMES = {
+  current: ['#14213d', '#f2c419', '#5f7aa8', '#c5c9d3', '#2e9b5f', '#d23c3c'],
+  roiback: ['#10222f', '#03a694', '#ff9800', '#7ad2c7', '#d18da3', '#9b9b9b'],
+};
+let AUDIT_PRIORITY = AUDIT_PRIORITY_THEMES.current;
+let AUDIT_STACK_COLORS = AUDIT_STACK_COLORS_THEMES.current;
 
 // Evolución del puntaje de una cuenta: `rows` viene del servidor, de la auditoría más vieja a la más
 // nueva (la última es la actual). Se usa dentro del informe (pantalla, HTML y Markdown) y en la vista
@@ -8425,14 +8525,14 @@ function auditReportBodyHtml() {
   const cur = r.summary.currency;
   const m = r.meta;
   const sc = r.score;
-  const ring = sc.label === 'Sana' ? '#2e9b5f' : sc.label === 'Mejorable' ? '#e0a800' : '#d23c3c';
+  const ring = themed(sc.label === 'Sana' ? '#2e9b5f' : sc.label === 'Mejorable' ? '#e0a800' : '#d23c3c', sc.label === 'Sana' ? '#1f9d55' : sc.label === 'Mejorable' ? '#e6a219' : '#d5455f');
   const R = 82;
   const C = 2 * Math.PI * R;
   const dash = (C * sc.total) / 100;
   const donut = `
     <div class="ar-donut">
       <svg viewBox="0 0 200 200" width="180" height="180" aria-hidden="true">
-        <circle cx="100" cy="100" r="${R}" fill="none" stroke="#e8eaf0" stroke-width="22"></circle>
+        <circle cx="100" cy="100" r="${R}" fill="none" stroke="${themed('#e8eaf0', '#e4e4e4')}" stroke-width="22"></circle>
         <circle cx="100" cy="100" r="${R}" fill="none" stroke="${ring}" stroke-width="22" stroke-dasharray="${dash.toFixed(1)} ${(C - dash).toFixed(1)}" transform="rotate(-90 100 100)"></circle>
       </svg>
       <div class="ar-donut-c"><div class="ar-donut-n">${sc.total}</div><div class="ar-donut-d">/ 100</div></div>
@@ -8524,7 +8624,7 @@ function buildAuditHtml() {
   return `<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Auditoría de cuenta — ${escapeHtml(auditReportTitle())}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;700;800&display=swap" rel="stylesheet">
+${themedFontsLink(PLUS_JAKARTA_HREF)}
 <style>body{margin:0;padding:40px 20px;background:#f4f5f8}@media print{body{background:#fff;padding:0}@page{margin:14mm}}${AUDIT_REPORT_CSS}</style>
 </head><body>${auditReportBodyHtml()}</body></html>`;
 }
@@ -8912,7 +9012,7 @@ function pacingDeviationLabel(deviationPct) {
 // "Estado" al lado.
 function pacingSemaforoColor(deviationPct) {
   if (deviationPct > PACING_TOLERANCE) return 'var(--danger)';
-  if (deviationPct < -PACING_TOLERANCE) return 'var(--gold-700)';
+  if (deviationPct < -PACING_TOLERANCE) return 'var(--warn-strong)';
   return 'var(--ok-text)';
 }
 
@@ -9285,7 +9385,7 @@ function renderPacingCampaignsModal() {
         const key = r.budget_resource_name || `c${r.campaign_id}`;
         if (r.daily_budget != null && !seenBudgets.has(key)) { seenBudgets.add(key); tot.budget += r.daily_budget; }
       });
-      const totalHtml = `<tr class="pacing-total-row" style="font-weight:700;border-top:2px solid currentColor">
+      const totalHtml = `<tr class="pacing-total-row" style="font-weight:700;border-top:2px solid var(--color-text-heading);background:var(--gray-50)">
         <td>Total (${cm.rows.length} campaña${cm.rows.length === 1 ? '' : 's'})</td>
         <td></td>
         <td>${fmtInt(tot.impressions)}</td>
@@ -10759,12 +10859,53 @@ fetch('/api/me').then((r) => r.json()).then((data) => {
   if (el) el.textContent = data.username;
   currentUser.username = data.username;
   currentUser.isAdmin = !!data.is_admin;
+  currentUser.isSuperAdmin = !!data.is_super_admin;
+  if (currentUser.isSuperAdmin) {
+    let saved = null;
+    try { saved = localStorage.getItem(THEME_KEY); } catch (e) { /* sin almacenamiento: se queda el diseño actual */ }
+    if (saved === 'roiback') applyTheme('roiback'); else updateThemeButton();
+  }
   const navAdmin = document.getElementById('nav-admin');
   if (navAdmin && currentUser.isAdmin) navAdmin.style.display = '';
   if (data.must_change_password) {
     forcePasswordChange = true;
     render();
   }
+});
+
+// Cambio de diseño (solo superadmin): actual <-> Roiback. Cambia la hoja de estilos y los colores que el
+// código escribe a mano, y vuelve a pintar la pantalla cuando la hoja nueva termina de cargar.
+function updateThemeButton() {
+  const row = document.getElementById('sidebar-theme-row');
+  const btn = document.getElementById('sidebar-theme');
+  if (!row || !btn) return;
+  row.style.display = currentUser.isSuperAdmin ? '' : 'none';
+  btn.textContent = APP_THEME === 'roiback' ? 'Ver diseño actual' : 'Ver diseño nuevo (Roiback)';
+}
+
+function applyTheme(theme) {
+  APP_THEME = theme === 'roiback' && currentUser.isSuperAdmin ? 'roiback' : 'current';
+  document.documentElement.dataset.theme = APP_THEME;
+  AUDIT_PRIORITY = AUDIT_PRIORITY_THEMES[APP_THEME];
+  AUDIT_STACK_COLORS = AUDIT_STACK_COLORS_THEMES[APP_THEME];
+  AUDIT_REPORT_CSS = APP_THEME === 'roiback' ? AUDIT_REPORT_CSS_ROIBACK : AUDIT_REPORT_CSS_CURRENT;
+  updateThemeButton();
+  const link = document.getElementById('app-theme-css');
+  const href = APP_THEME === 'roiback' ? 'styles-roiback.css' : 'styles.css';
+  if (link && link.getAttribute('href') !== href) {
+    link.addEventListener('load', () => render(), { once: true });
+    // Si la hoja nueva no carga, se vuelve al diseño actual en vez de dejar la pantalla sin estilos.
+    link.addEventListener('error', () => { if (APP_THEME === 'roiback') applyTheme('current'); }, { once: true });
+    link.setAttribute('href', href);
+  } else {
+    render();
+  }
+}
+
+document.getElementById('sidebar-theme')?.addEventListener('click', () => {
+  const next = APP_THEME === 'roiback' ? 'current' : 'roiback';
+  try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* solo se pierde el recuerdo de la elección */ }
+  applyTheme(next);
 });
 
 document.getElementById('sidebar-logout')?.addEventListener('click', () => {

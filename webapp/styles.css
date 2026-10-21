@@ -12,6 +12,11 @@
   --gold-500: #f2c419;
   --gold-600: #daa802;
   --gold-700: #b98d00;
+  /* Alias de color de acento: el diseño nuevo (styles-roiback.css) los redefine; aquí apuntan al dorado de siempre. */
+  --accent-500: var(--gold-500);
+  --accent-600: var(--gold-600);
+  --accent-700: var(--gold-700);
+  --warn-strong: var(--gold-700);
 
   --white: #ffffff;
   --gray-50: #f4f5f8;

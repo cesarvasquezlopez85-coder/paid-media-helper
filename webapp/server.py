@@ -209,6 +209,7 @@ STATIC_FILES = {
     "/login": "login.html",
     "/login.html": "login.html",
     "/login.js": "login.js",
+    "/styles-roiback.css": "styles-roiback.css",
 }
 CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -885,6 +886,7 @@ class Handler(SimpleHTTPRequestHandler):
         if user:
             self._send_json(200, {
                 "authenticated": True, "username": user["username"], "is_admin": user["is_admin"],
+                "is_super_admin": user["username"].lower() in SUPER_ADMIN_USERNAMES,
                 "must_change_password": user["must_change_password"],
             })
         else:
