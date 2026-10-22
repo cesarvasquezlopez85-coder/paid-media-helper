@@ -212,7 +212,7 @@ const state = {
   // cuenta (Función 9/Negativización). Sin rango de fechas — todo acá es
   // configuración o estado actual, no una métrica de un periodo.
   iamax: {
-    tab: 'estado', // 'estado' | 'servido' | 'creado' | 'cruce'
+    tab: 'estado', // 'estado' | 'servido' | 'creado' | 'excluir' | 'cruce'
     status: 'idle', error: null, rows: null,
     api: {
       statusChecked: false, configured: false,
@@ -241,6 +241,14 @@ const state = {
     created: {
       status: 'idle', error: null, data: null, sub: 'assets', campaignFilter: 'all', days: 30,
       sort: { assets: null, combinations: null, pages: null }, // { key, dir } por vista; null = orden de Google (por costo)
+      selected: {}, // páginas marcadas en la tabla para excluir: clave campaña|página -> { campaign_id, campaign_name, page }
+    },
+    // Exclusiones de página (WEBPAGE negativo por campaña): lista actual, lista de trabajo y flujo vista previa -> aplicar.
+    urlx: {
+      status: 'idle', error: null, rows: null, campaigns: null,
+      draft: [], pasteText: '', pasteCampaign: '', pasteNote: null,
+      flow: { status: 'idle', preview: null, result: null, error: null, invalid: null }, // idle | previewing | preview_ready | applying | done | error
+      remove: { pending: null, status: 'idle', error: null },
     },
   },
 
@@ -5784,7 +5792,8 @@ function resetIaMaxAccountData() {
   s.status = 'idle'; s.error = null; s.rows = null;
   s.toggle = { campaignId: null, status: 'idle', newEnable: null, preview: null, result: null, error: null };
   s.served = { status: 'idle', error: null, rows: null, negatives: null, campaignFilter: 'all' };
-  s.created = { status: 'idle', error: null, data: null, sub: s.created ? s.created.sub : 'assets', campaignFilter: 'all', days: s.created ? s.created.days : 30, sort: { assets: null, combinations: null, pages: null } };
+  s.created = { status: 'idle', error: null, data: null, sub: s.created ? s.created.sub : 'assets', campaignFilter: 'all', days: s.created ? s.created.days : 30, sort: { assets: null, combinations: null, pages: null }, selected: {} };
+  s.urlx = { status: 'idle', error: null, rows: null, campaigns: null, draft: [], pasteText: '', pasteCampaign: '', pasteNote: null, flow: { status: 'idle', preview: null, result: null, error: null, invalid: null }, remove: { pending: null, status: 'idle', error: null } };
 }
 
 function ensureIaMaxGoogleAdsStatusLoaded() {
@@ -6409,8 +6418,8 @@ function renderIaMaxCreadoTab() {
       <tbody>${rows.map((r) => `<tr class="${flag(r)}"><td>${escapeHtml(r.campaign_name)}</td><td>${escapeHtml(r.search_term)}</td><td>${escapeHtml(r.headline)}</td><td>${urlCell(r.landing_page)}</td>${metricCells(r)}</tr>`).join('')}</tbody>`;
     note = `Para cada búsqueda, el titular dinámico y la página que armó AI Max. Ordenado por costo${counts.combinations > (data.combinations || []).length ? `; se muestran ${(data.combinations || []).length} de ${counts.combinations} combinaciones` : ''}.`;
   } else {
-    table = `<thead><tr>${iaMaxSortTh('Campaña', 'campaign_name')}${iaMaxSortTh('Página', 'page')}${metricHead}</tr></thead>
-      <tbody>${rows.map((r) => `<tr class="${flag(r)}"><td>${escapeHtml(r.campaign_name)}</td><td>${urlCell(r.page)}</td>${metricCells(r)}</tr>`).join('')}</tbody>`;
+    table = `<thead><tr><th style="width:34px"></th>${iaMaxSortTh('Campaña', 'campaign_name')}${iaMaxSortTh('Página', 'page')}${metricHead}</tr></thead>
+      <tbody>${rows.map((r) => { const key = `${r.campaign_id}|${r.page}`; return `<tr class="${flag(r)}"><td><input type="checkbox" data-iamax-page-check="${escapeHtml(key)}" ${cr.selected[key] ? 'checked' : ''} aria-label="Marcar para excluir" /></td><td>${escapeHtml(r.campaign_name)}</td><td>${urlCell(r.page)}</td>${metricCells(r)}</tr>`; }).join('')}</tbody>`;
     note = `A qué páginas mandó el tráfico la expansión de URL. Se agrupa por página (sin los parámetros de seguimiento). Ordenado por costo${counts.pages > (data.pages || []).length ? `; se muestran ${(data.pages || []).length} de ${counts.pages}` : ''}. Si ves páginas que no son para reservar (fotos, contacto, políticas), la expansión de URL se está llevando tráfico que no convierte.`;
   }
 
@@ -6421,12 +6430,282 @@ function renderIaMaxCreadoTab() {
     <div class="card table-panel">
       <div class="table-panel-head">
         <h3>${({ assets: 'Recursos creados por Google', combinations: 'Búsqueda + titular + página', pages: 'Páginas a las que mandó tráfico' })[cr.sub]}, últimos ${cr.days} días (${rows.length})</h3>
-        <button class="btn-outline sm" data-action="iamax-created-csv">Descargar CSV</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          ${cr.sub === 'pages' ? `<button class="btn-accent sm" id="iamax-pages-exclude-btn" data-action="iamax-pages-exclude" ${Object.keys(cr.selected).length ? '' : 'disabled'}>Excluir las seleccionadas (${Object.keys(cr.selected).length})</button>` : ''}
+          <button class="btn-outline sm" data-action="iamax-created-csv">Descargar CSV</button>
+        </div>
       </div>
       <p class="footnote" style="margin:0 0 12px"><span class="legend-swatch-warn"></span><strong>Fila en ámbar:</strong> gastó dinero sin generar conversiones en el periodo${rows.some((r) => r.cost > 0 && !r.conversions) ? ` (${rows.filter((r) => r.cost > 0 && !r.conversions).length} de ${rows.length})` : ' (ninguna en esta vista)'}. Es una señal para revisar, no un error: con pocos clics todavía puede no haber conversiones.</p>
       <div class="table-scroll"><table>${table}</table></div>
       <p class="footnote" style="margin-top:14px">${note}</p>
     </div>`}`;
+}
+
+function resetIaMaxUrlxFlow() {
+  state.iamax.urlx.flow = { status: 'idle', preview: null, result: null, error: null, invalid: null };
+}
+
+function openIaMaxExcluirTab() {
+  state.iamax.tab = 'excluir';
+  if (state.iamax.urlx.status === 'idle') loadIaMaxUrlExclusions(); else render();
+}
+
+function loadIaMaxUrlExclusions() {
+  const s = state.iamax;
+  const a = s.api;
+  const ux = s.urlx;
+  const customerId = iaMaxCustomerId();
+  if (!customerId && !a.simulated) { a.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
+  a.error = null;
+  ux.status = 'loading'; ux.error = null;
+  render();
+  fetch(`/api/google-ads/ai-max-url-exclusions?customer_id=${encodeURIComponent(customerId || '')}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.simulated = !!data.simulated;
+      ux.rows = data.rows || [];
+      ux.campaigns = data.campaigns || [];
+      if (!ux.pasteCampaign || !ux.campaigns.some((c) => c.campaign_id === ux.pasteCampaign && c.eligible)) {
+        const first = ux.campaigns.find((c) => c.eligible);
+        ux.pasteCampaign = first ? first.campaign_id : '';
+      }
+      ux.status = 'ready';
+      render();
+    })
+    .catch((err) => { ux.error = err.message || String(err); ux.status = 'error'; render(); });
+}
+
+function addIaMaxDraftItems(items) {
+  const ux = state.iamax.urlx;
+  let added = 0;
+  items.forEach((it) => {
+    if (!ux.draft.some((d) => d.campaign_id === it.campaign_id && d.mode === it.mode && d.value === it.value)) { ux.draft.push(it); added += 1; }
+  });
+  resetIaMaxUrlxFlow();
+  return added;
+}
+
+function addIaMaxPasteToDraft() {
+  const ux = state.iamax.urlx;
+  const campaign = (ux.campaigns || []).find((c) => c.campaign_id === ux.pasteCampaign);
+  if (!campaign) { ux.pasteNote = 'Elige primero la campaña donde aplicar.'; render(); return; }
+  const lines = ux.pasteText.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+  if (!lines.length) { ux.pasteNote = 'Pega al menos una página.'; render(); return; }
+  const added = addIaMaxDraftItems(lines.map((value) => ({
+    campaign_id: campaign.campaign_id, campaign_name: campaign.campaign_name,
+    mode: /^https?:\/\//i.test(value) ? 'equals' : 'contains', value,
+  })));
+  ux.pasteText = '';
+  ux.pasteNote = `Se agregaron ${added} página${added === 1 ? '' : 's'} a la lista${added < lines.length ? ` (${lines.length - added} ya estaban)` : ''}.`;
+  render();
+}
+
+// Archivo con direcciones: .txt/.csv (una por línea, o primera columna) o Excel (primera columna). Se pasan al cuadro de texto para revisarlas.
+function loadIaMaxUrlxFile(file) {
+  const ux = state.iamax.urlx;
+  const done = (values) => {
+    const header = /^(url|urls|pagina|página|paginas|páginas|page|pages|direccion|dirección|enlace|link)$/i;
+    const clean = values.map((v) => String(v == null ? '' : v).trim()).filter((v) => v && !header.test(v));
+    ux.pasteText = [ux.pasteText.trim(), ...clean].filter(Boolean).join('\n');
+    ux.pasteNote = `Se leyeron ${clean.length} línea${clean.length === 1 ? '' : 's'} del archivo "${file.name}". Revísalas y pulsa "Agregar a la lista".`;
+    render();
+  };
+  if (/\.(xlsx|xls)$/i.test(file.name)) {
+    file.arrayBuffer().then((buf) => {
+      const wb = XLSX.read(buf, { type: 'array' });
+      const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1 });
+      done(rows.map((r) => (r || [])[0]));
+    }).catch(() => { ux.pasteNote = 'No se pudo leer el archivo de Excel.'; render(); });
+  } else {
+    file.text().then((text) => done(text.split(/\r?\n/).map((l) => l.split(',')[0].replace(/^"|"$/g, '')))).catch(() => { ux.pasteNote = 'No se pudo leer el archivo.'; render(); });
+  }
+}
+
+function sendSelectedPagesToExclude() {
+  const s = state.iamax;
+  const picked = Object.values(s.created.selected);
+  if (!picked.length) return;
+  addIaMaxDraftItems(picked.map((p) => ({ campaign_id: p.campaign_id, campaign_name: p.campaign_name, mode: 'equals', value: p.page })));
+  s.created.selected = {};
+  openIaMaxExcluirTab();
+}
+
+function submitIaMaxUrlExclusions(validateOnly) {
+  const s = state.iamax;
+  const ux = s.urlx;
+  const a = s.api;
+  const customerId = iaMaxCustomerId();
+  if (!ux.draft.length) return;
+  ux.flow = { status: validateOnly ? 'previewing' : 'applying', preview: ux.flow.preview, result: null, error: null, invalid: null };
+  render();
+  fetch('/api/google-ads/ai-max-url-exclusions/apply', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ customer_id: customerId || '', validate_only: validateOnly, items: ux.draft }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) { ux.flow = { status: 'error', preview: null, result: null, error: data.error || 'Error desconocido.', invalid: data.invalid || null }; render(); return; }
+      a.simulated = !!data.simulated;
+      if (validateOnly) { ux.flow = { status: 'preview_ready', preview: data, result: null, error: null, invalid: null }; render(); return; }
+      ux.flow = { status: 'done', preview: null, result: data, error: null, invalid: null };
+      ux.draft = [];
+      loadIaMaxUrlExclusions();
+    })
+    .catch((err) => { ux.flow = { status: 'error', preview: null, result: null, error: err.message || String(err), invalid: null }; render(); });
+}
+
+function confirmIaMaxUrlxRemove() {
+  const s = state.iamax;
+  const ux = s.urlx;
+  const customerId = iaMaxCustomerId();
+  const rn = ux.remove.pending;
+  if (!rn) return;
+  ux.remove = { pending: rn, status: 'removing', error: null };
+  render();
+  fetch('/api/google-ads/ai-max-url-exclusions/remove', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ customer_id: customerId || '', validate_only: false, resource_names: [rn] }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok || (data.failed && data.failed.length)) throw new Error((data.failed && data.failed[0]) || data.error || 'Error desconocido.');
+      ux.remove = { pending: null, status: 'idle', error: null };
+      loadIaMaxUrlExclusions();
+    })
+    .catch((err) => { ux.remove = { pending: rn, status: 'error', error: err.message || String(err) }; render(); });
+}
+
+const URLX_MODE_LABELS = { equals: 'Página exacta', contains: 'URL contiene', other: 'Otra regla' };
+
+function renderIaMaxExcluirTab() {
+  const s = state.iamax;
+  const ux = s.urlx;
+  const e = escapeHtml;
+
+  if (ux.status === 'loading' || ux.status === 'idle') {
+    return `<div class="card state-panel loading"><div class="spinner"></div><p>Trayendo las exclusiones de página de la cuenta…</p></div>`;
+  }
+  if (ux.status === 'error') {
+    return `<div class="error-panel"><strong>No se pudieron traer las exclusiones.</strong> ${e(ux.error)}</div>
+      <button class="btn-outline" data-action="iamax-urlx-reload" style="margin-top:10px">Reintentar</button>`;
+  }
+
+  const eligible = (ux.campaigns || []).filter((c) => c.eligible);
+  const notEligible = (ux.campaigns || []).filter((c) => !c.eligible);
+  const flow = ux.flow;
+  const busy = flow.status === 'previewing' || flow.status === 'applying';
+
+  const intro = `
+    <div class="card" style="padding:18px 22px;margin-bottom:18px">
+      <h3 class="section-title" style="margin:0 0 8px">Excluir páginas que AI Max no debe usar</h3>
+      <p class="footnote" style="margin:0">Con la expansión de URL, Google puede mandar el tráfico a otras páginas de tu sitio. Aquí marcas las que no quieres (fotos, contacto, políticas…) y se envían a Google Ads como <strong>exclusión de página</strong> de esa campaña. Antes de aplicar hay siempre una <strong>vista previa</strong> que Google valida sin escribir nada.
+      Solo funciona en campañas con AI Max, textos automáticos y expansión de URL prendidos. Google <strong>no deja excluir la página de destino del anuncio</strong>, y puede tardar unas horas en aplicarse. Una exclusión no se edita: se quita y se vuelve a crear.</p>
+    </div>`;
+
+  const eligibilityNote = !eligible.length
+    ? `<div class="error-panel" style="margin-bottom:18px"><strong>Ninguna campaña de esta cuenta acepta exclusiones de página todavía.</strong> ${notEligible.length ? notEligible.slice(0, 5).map((c) => `${e(c.campaign_name)}: ${e(c.reason)}`).join('; ') + (notEligible.length > 5 ? '…' : '') : 'No hay campañas Search activas.'} Prende AI Max, los textos automáticos y la expansión de URL en Google Ads para poder usarlas.</div>`
+    : '';
+
+  const addPanel = `
+    <div class="card control-panel align-end" style="flex-wrap:wrap;gap:14px 20px;margin-bottom:18px">
+      <div class="field">
+        <label>Campaña donde aplicar</label>
+        <select id="iamax-urlx-campaign" style="width:340px" ${eligible.length ? '' : 'disabled'}>
+          ${eligible.map((c) => `<option value="${e(c.campaign_id)}" ${ux.pasteCampaign === c.campaign_id ? 'selected' : ''}>${e(c.campaign_name)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field">
+        <label>Páginas (una por línea)</label>
+        <textarea id="iamax-urlx-paste" rows="4" style="width:420px" placeholder="https://www.mihotel.com/es/fotos/&#10;/contacto/&#10;politica-de-cookies" ${eligible.length ? '' : 'disabled'}>${e(ux.pasteText)}</textarea>
+        <span class="field-hint">Con http:// o https:// se excluye esa página exacta. Sin dirección completa se excluye todo lo que <em>contenga</em> ese texto (por ejemplo /fotos/). Puedes cambiarlo en cada fila.</span>
+      </div>
+      <div class="field">
+        <label>…o sube un archivo (txt, csv o Excel)</label>
+        <input type="file" id="iamax-urlx-file" accept=".txt,.csv,.xlsx,.xls" ${eligible.length ? '' : 'disabled'} />
+      </div>
+      <button class="btn-accent" data-action="iamax-urlx-add-paste" ${eligible.length ? '' : 'disabled'}>Agregar a la lista</button>
+      ${ux.pasteNote ? `<p class="footnote" style="width:100%;margin:0">${e(ux.pasteNote)}</p>` : ''}
+    </div>`;
+
+  let draftPanel = '';
+  if (ux.draft.length) {
+    const rowsHtml = ux.draft.map((d, i) => `
+      <tr>
+        <td>${e(d.campaign_name)}</td>
+        <td><select data-iamax-draft-mode="${i}" ${busy ? 'disabled' : ''}>
+          <option value="equals" ${d.mode === 'equals' ? 'selected' : ''}>Página exacta</option>
+          <option value="contains" ${d.mode === 'contains' ? 'selected' : ''}>URL contiene</option>
+        </select></td>
+        <td style="word-break:break-all">${e(d.value)}</td>
+        <td><button class="btn-link" data-iamax-draft-remove="${i}" ${busy ? 'disabled' : ''}>Quitar de la lista</button></td>
+      </tr>`).join('');
+
+    let flowHtml = '';
+    if (flow.status === 'error') {
+      flowHtml = `<div class="error-panel" style="margin-top:14px"><strong>No se pudo continuar.</strong> ${e(flow.error)}${(flow.invalid || []).length ? `<ul style="margin:8px 0 0 18px">${flow.invalid.map((x) => `<li><code>${e(x.value)}</code>: ${e(x.error)}</li>`).join('')}</ul>` : ''}</div>`;
+    } else if (flow.status === 'preview_ready' && flow.preview) {
+      const pv = flow.preview;
+      flowHtml = `
+        <div class="ok-panel" style="margin-top:14px">
+          <strong>Vista previa validada por Google, sin cambios en la cuenta${pv.simulated ? ' (modo simulado)' : ''}:</strong>
+          se crearían <strong>${pv.created}</strong> ${pv.created === 1 ? 'exclusión' : 'exclusiones'}${(pv.skipped_duplicates || []).length ? `; ${pv.skipped_duplicates.length} ya existía${pv.skipped_duplicates.length === 1 ? '' : 'n'} y se omiten` : ''}${(pv.failed || []).length ? `; <strong>${pv.failed.length} con problema</strong>` : ''}.
+          ${(pv.failed || []).length ? `<ul style="margin:8px 0 0 18px">${pv.failed.map((f) => `<li>${e(f)}</li>`).join('')}</ul>` : ''}
+          <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn-accent" data-action="iamax-urlx-apply">Confirmar y aplicar en Google Ads</button>
+            <button class="btn-outline" data-action="iamax-urlx-flow-reset">Cancelar</button>
+          </div>
+          <p class="footnote" style="margin:8px 0 0">Aplicar escribe de verdad en la cuenta: AI Max dejará de mandar tráfico a esas páginas desde esa campaña.</p>
+        </div>`;
+    } else if (flow.status === 'previewing' || flow.status === 'applying') {
+      flowHtml = `<div class="card state-panel loading" style="margin-top:14px"><div class="spinner"></div><p>${flow.status === 'previewing' ? 'Pidiéndole a Google que valide la lista…' : 'Aplicando las exclusiones en Google Ads…'}</p></div>`;
+    }
+
+    draftPanel = `
+      <div class="card table-panel" style="margin-bottom:18px">
+        <div class="table-panel-head"><h3>Lista para excluir (${ux.draft.length})</h3>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="btn-accent sm" data-action="iamax-urlx-preview" ${busy ? 'disabled' : ''}>Vista previa</button>
+            <button class="btn-outline sm" data-action="iamax-urlx-clear-draft" ${busy ? 'disabled' : ''}>Vaciar lista</button>
+          </div>
+        </div>
+        <div class="table-scroll"><table>
+          <thead><tr><th>Campaña</th><th>Tipo</th><th>Página o texto</th><th></th></tr></thead>
+          <tbody>${rowsHtml}</tbody>
+        </table></div>
+        ${flowHtml}
+      </div>`;
+  } else if (flow.status === 'done' && flow.result) {
+    const r = flow.result;
+    draftPanel = `<div class="ok-panel" style="margin-bottom:18px"><strong>Listo: se aplicaron ${r.created} ${r.created === 1 ? 'exclusión' : 'exclusiones'} en Google Ads${r.simulated ? ' (modo simulado)' : ''}.</strong>${(r.skipped_duplicates || []).length ? ` ${r.skipped_duplicates.length} ya existía${r.skipped_duplicates.length === 1 ? '' : 'n'}.` : ''}${(r.failed || []).length ? `<ul style="margin:8px 0 0 18px">${r.failed.map((f) => `<li>${e(f)}</li>`).join('')}</ul>` : ''} Pueden tardar unas horas en notarse; abajo aparecen en la lista de exclusiones de la cuenta.</div>`;
+  }
+
+  const existing = ux.rows || [];
+  const rm = ux.remove;
+  const existingRows = existing.map((r) => {
+    const pending = rm.pending === r.resource_name;
+    return `<tr>
+      <td>${e(r.campaign_name)}</td>
+      <td>${e(URLX_MODE_LABELS[r.mode] || r.mode)}</td>
+      <td style="word-break:break-all">${e(r.value || r.name)}</td>
+      <td>${pending
+        ? (rm.status === 'removing'
+            ? '<span class="footnote">Quitando…</span>'
+            : `<button class="btn-accent xs" data-action="iamax-urlx-remove-confirm">Confirmar: quitar</button> <button class="btn-link" data-action="iamax-urlx-remove-cancel">Cancelar</button>${rm.error ? `<div class="footnote" style="color:var(--danger)">${e(rm.error)}</div>` : ''}`)
+        : `<button class="btn-outline xs" data-iamax-urlx-remove="${e(r.resource_name)}">Quitar</button>`}</td>
+    </tr>`;
+  }).join('');
+  const existingPanel = `
+    <div class="card table-panel">
+      <div class="table-panel-head"><h3>Exclusiones de página que ya tiene la cuenta (${existing.length})</h3>
+        <button class="btn-outline sm" data-action="iamax-urlx-reload">Actualizar</button></div>
+      ${existing.length ? `<div class="table-scroll"><table>
+        <thead><tr><th>Campaña</th><th>Tipo</th><th>Página o texto</th><th></th></tr></thead>
+        <tbody>${existingRows}</tbody></table></div>` : '<p class="footnote" style="margin:0">Esta cuenta todavía no tiene exclusiones de página.</p>'}
+      <p class="footnote" style="margin-top:14px">Incluye todas las reglas de página negativas de la cuenta, también las que se crearon en Google Ads o con otras herramientas. Quitar una exclusión escribe en la cuenta y deja que AI Max vuelva a usar esa página.</p>
+    </div>`;
+
+  return `${intro}${eligibilityNote}${addPanel}${draftPanel}${existingPanel}`;
 }
 
 function renderIaMaxCruceTab() {
@@ -6488,6 +6767,7 @@ function renderIaMaxPage() {
       <button class="seg-btn ${s.tab === 'estado' ? 'active' : ''}" data-action="iamax-tab-estado">Estado</button>
       <button class="seg-btn ${s.tab === 'servido' ? 'active' : ''}" data-action="iamax-tab-servido">Qué sirvió</button>
       <button class="seg-btn ${s.tab === 'creado' ? 'active' : ''}" data-action="iamax-tab-creado">Qué creó IA Max</button>
+      <button class="seg-btn ${s.tab === 'excluir' ? 'active' : ''}" data-action="iamax-tab-excluir">Excluir páginas${s.urlx.draft.length ? ` (${s.urlx.draft.length})` : ''}</button>
       <button class="seg-btn ${s.tab === 'cruce' ? 'active' : ''}" data-action="iamax-tab-cruce">Cruce con negativos${conflictCount ? ` (${conflictCount})` : ''}</button>
     </div>`;
 
@@ -6495,6 +6775,7 @@ function renderIaMaxPage() {
   if (s.tab === 'estado') body = renderIaMaxEstadoTab();
   else if (s.tab === 'servido') body = renderIaMaxServidoTab();
   else if (s.tab === 'creado') body = renderIaMaxCreadoTab();
+  else if (s.tab === 'excluir') body = renderIaMaxExcluirTab();
   else body = renderIaMaxCruceTab();
 
   return `${controlPanel}${tabs}${body}`;
@@ -10152,6 +10433,48 @@ function bindEvents() {
     state.iamax.served.campaignFilter = e.target.value;
     render();
   });
+  // Casillas de la tabla de páginas: se actualiza solo el contador del botón, sin repintar toda la tabla.
+  document.querySelectorAll('[data-iamax-page-check]').forEach((box) => {
+    box.addEventListener('change', () => {
+      const cr = state.iamax.created;
+      const key = box.dataset.iamaxPageCheck;
+      if (box.checked) {
+        const [campaignId, ...rest] = key.split('|');
+        const row = ((cr.data || {}).pages || []).find((r) => r.campaign_id === campaignId && r.page === rest.join('|'));
+        if (row) cr.selected[key] = { campaign_id: row.campaign_id, campaign_name: row.campaign_name, page: row.page };
+      } else {
+        delete cr.selected[key];
+      }
+      const btn = document.getElementById('iamax-pages-exclude-btn');
+      const n = Object.keys(cr.selected).length;
+      if (btn) { btn.disabled = n === 0; btn.textContent = `Excluir las seleccionadas (${n})`; }
+    });
+  });
+  document.querySelectorAll('[data-iamax-draft-mode]').forEach((sel) => {
+    sel.addEventListener('change', () => {
+      const ux = state.iamax.urlx;
+      const item = ux.draft[Number(sel.dataset.iamaxDraftMode)];
+      if (item) { item.mode = sel.value; resetIaMaxUrlxFlow(); render(); }
+    });
+  });
+  document.querySelectorAll('[data-iamax-draft-remove]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.iamax.urlx.draft.splice(Number(btn.dataset.iamaxDraftRemove), 1);
+      resetIaMaxUrlxFlow(); render();
+    });
+  });
+  document.querySelectorAll('[data-iamax-urlx-remove]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.iamax.urlx.remove = { pending: btn.dataset.iamaxUrlxRemove, status: 'idle', error: null };
+      render();
+    });
+  });
+  const iamaxUrlxText = document.getElementById('iamax-urlx-paste');
+  if (iamaxUrlxText) iamaxUrlxText.addEventListener('input', (e) => { state.iamax.urlx.pasteText = e.target.value; });
+  const iamaxUrlxCampaign = document.getElementById('iamax-urlx-campaign');
+  if (iamaxUrlxCampaign) iamaxUrlxCampaign.addEventListener('change', (e) => { state.iamax.urlx.pasteCampaign = e.target.value; });
+  const iamaxUrlxFile = document.getElementById('iamax-urlx-file');
+  if (iamaxUrlxFile) iamaxUrlxFile.addEventListener('change', (e) => { if (e.target.files[0]) loadIaMaxUrlxFile(e.target.files[0]); });
   document.querySelectorAll('[data-iamax-sort]').forEach((th) => {
     th.addEventListener('click', () => {
       const cr = state.iamax.created;
@@ -10774,6 +11097,16 @@ function handleAction(action) {
     case 'iamax-tab-estado': state.iamax.tab = 'estado'; render(); break;
     case 'iamax-tab-servido': state.iamax.tab = 'servido'; render(); break;
     case 'iamax-tab-creado': state.iamax.tab = 'creado'; render(); break;
+    case 'iamax-tab-excluir': openIaMaxExcluirTab(); break;
+    case 'iamax-urlx-reload': loadIaMaxUrlExclusions(); break;
+    case 'iamax-urlx-add-paste': addIaMaxPasteToDraft(); break;
+    case 'iamax-urlx-clear-draft': state.iamax.urlx.draft = []; resetIaMaxUrlxFlow(); render(); break;
+    case 'iamax-urlx-preview': submitIaMaxUrlExclusions(true); break;
+    case 'iamax-urlx-apply': submitIaMaxUrlExclusions(false); break;
+    case 'iamax-urlx-flow-reset': resetIaMaxUrlxFlow(); render(); break;
+    case 'iamax-urlx-remove-confirm': confirmIaMaxUrlxRemove(); break;
+    case 'iamax-urlx-remove-cancel': state.iamax.urlx.remove = { pending: null, status: 'idle', error: null }; render(); break;
+    case 'iamax-pages-exclude': sendSelectedPagesToExclude(); break;
     case 'iamax-created-fetch': fetchIaMaxCreated(); break;
     case 'iamax-created-sub-assets': state.iamax.created.sub = 'assets'; render(); break;
     case 'iamax-created-sub-combinations': state.iamax.created.sub = 'combinations'; render(); break;

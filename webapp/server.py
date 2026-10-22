@@ -559,6 +559,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_ai_max_created(parse_qs(parsed.query))
             return
 
+        if path == "/api/google-ads/ai-max-url-exclusions":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_ai_max_url_exclusions(parse_qs(parsed.query))
+            return
+
         if path == "/api/google-ads/content-exclusions":
             if not self._require_auth_json():
                 return
@@ -652,6 +658,14 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_google_ads_ai_max_toggle(payload)
+        elif path == "/api/google-ads/ai-max-url-exclusions/apply":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_ai_max_url_exclusions_apply(payload)
+        elif path == "/api/google-ads/ai-max-url-exclusions/remove":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_ai_max_url_exclusions_remove(payload)
         elif path == "/api/google-ads/content-exclusions/add-labels":
             if not self._require_auth_json():
                 return
@@ -2329,6 +2343,141 @@ class Handler(SimpleHTTPRequestHandler):
         for name, exc in failures:
             out["errors"][name] = str(exc)[:300]
         self._send_json(200, out)
+
+    @staticmethod
+    def _ai_max_campaign_eligibility(status_rows):
+        """Qué campañas aceptan exclusiones de página: necesitan AI Max, textos automáticos y expansión de URL prendidos."""
+        out = []
+        for r in status_rows:
+            if not r.get("enabled"):
+                reason = "AI Max está apagado"
+            elif r.get("text_customization") != "OPTED_IN":
+                reason = "los textos automáticos están apagados"
+            elif r.get("final_url_expansion") != "OPTED_IN":
+                reason = "la expansión de URL está apagada"
+            else:
+                reason = None
+            out.append({"campaign_id": r["campaign_id"], "campaign_name": r["campaign_name"], "eligible": reason is None, "reason": reason})
+        return out
+
+    def _handle_google_ads_ai_max_url_exclusions(self, query):
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        if not google_ads_client.is_configured():
+            self._send_json(200, {
+                "rows": google_ads_client.simulated_ai_max_url_exclusions(),
+                "campaigns": self._ai_max_campaign_eligibility(google_ads_client.simulated_ai_max_status(True)),
+                "simulated": True,
+            })
+            return
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+        try:
+            rows = google_ads_client.fetch_ai_max_url_exclusions(customer_id)
+            campaigns = self._ai_max_campaign_eligibility(google_ads_client.fetch_ai_max_status(customer_id, only_active=True))
+            self._send_json(200, {"rows": rows, "campaigns": campaigns, "simulated": False})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    def _handle_google_ads_ai_max_url_exclusions_apply(self, payload):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not _write_limiter.allow(f"user:{user['id']}", *WRITE_RATE_LIMIT):
+            self._send_json(429, {"error": "Demasiadas escrituras seguidas. Espera un minuto y vuelve a intentar."})
+            return
+        customer_id = str(payload.get("customer_id") or "").strip()
+        validate_only = payload.get("validate_only", True) is not False
+        raw_items = payload.get("items")
+        if not isinstance(raw_items, list) or not raw_items:
+            self._send_json(400, {"error": "No hay páginas para excluir."})
+            return
+        if len(raw_items) > 100:
+            self._send_json(400, {"error": "Máximo 100 páginas por envío."})
+            return
+
+        items, invalid = [], []
+        for i, it in enumerate(raw_items):
+            campaign_id = str((it or {}).get("campaign_id") or "").strip()
+            try:
+                if not campaign_id.isdigit():
+                    raise ValueError("Falta la campaña.")
+                mode, value = google_ads_client.normalize_url_exclusion((it or {}).get("mode"), (it or {}).get("value"))
+                items.append({"campaign_id": campaign_id, "campaign_name": str((it or {}).get("campaign_name") or ""), "mode": mode, "value": value})
+            except ValueError as e:
+                invalid.append({"index": i, "value": str((it or {}).get("value") or "")[:120], "error": str(e)})
+        if invalid:
+            self._send_json(400, {"error": f"{len(invalid)} página(s) no son válidas; corrígelas o quítalas de la lista.", "invalid": invalid})
+            return
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, google_ads_client.simulated_push_ai_max_url_exclusions(items, validate_only))
+            return
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            eligibility = {c["campaign_id"]: c for c in self._ai_max_campaign_eligibility(google_ads_client.fetch_ai_max_status(customer_id, only_active=True))}
+            blocked = sorted({f"{eligibility[it['campaign_id']]['campaign_name']} ({eligibility[it['campaign_id']]['reason']})" if it["campaign_id"] in eligibility and not eligibility[it["campaign_id"]]["eligible"] else f"campaña {it['campaign_id']} (no es una campaña Search activa)" for it in items if it["campaign_id"] not in eligibility or not eligibility[it["campaign_id"]]["eligible"]})
+            if blocked:
+                self._send_json(400, {"error": "Estas campañas no aceptan exclusiones de página: " + "; ".join(blocked) + ". Las exclusiones solo funcionan con AI Max, textos automáticos y expansión de URL prendidos."})
+                return
+            existing = {(r["campaign_id"], r["mode"], r["value"]) for r in google_ads_client.fetch_ai_max_url_exclusions(customer_id)}
+            fresh, skipped, seen = [], [], set()
+            for it in items:
+                key = (it["campaign_id"], it["mode"], it["value"])
+                if key in existing or key in seen:
+                    skipped.append(it["value"])
+                else:
+                    seen.add(key)
+                    fresh.append(it)
+            result = google_ads_client.push_ai_max_url_exclusions(customer_id, fresh, validate_only)
+            result["skipped_duplicates"] = skipped
+            self._send_json(200, result)
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    def _handle_google_ads_ai_max_url_exclusions_remove(self, payload):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not _write_limiter.allow(f"user:{user['id']}", *WRITE_RATE_LIMIT):
+            self._send_json(429, {"error": "Demasiadas escrituras seguidas. Espera un minuto y vuelve a intentar."})
+            return
+        customer_id = str(payload.get("customer_id") or "").strip()
+        validate_only = payload.get("validate_only", False) is not False
+        resource_names = payload.get("resource_names")
+        if not isinstance(resource_names, list) or not resource_names or len(resource_names) > 100:
+            self._send_json(400, {"error": "Indica entre 1 y 100 exclusiones para quitar."})
+            return
+        if not google_ads_client.is_configured():
+            self._send_json(200, google_ads_client.simulated_remove_ai_max_url_exclusions(resource_names, validate_only))
+            return
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+        try:
+            self._send_json(200, google_ads_client.remove_ai_max_url_exclusions(customer_id, resource_names, validate_only))
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
 
     def _handle_google_ads_content_exclusions(self, query):
         customer_id = (query.get("customer_id") or [""])[0].strip()

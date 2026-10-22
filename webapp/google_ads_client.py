@@ -1183,6 +1183,149 @@ def fetch_ai_max_landing_pages(customer_id, campaign_id=None, days=30, limit=200
     return rows[:limit], len(rows)
 
 
+# ---------------------------------------------------------------------------
+# Exclusiones de páginas para AI Max (URL exclusions) — criterios WEBPAGE negativos a nivel de campaña.
+# Verificado con Google (validateOnly, campaña real con AI Max, 2026-10-22): acepta "URL igual a una
+# dirección completa" y "URL contiene un texto"; rechaza una ruta sin dominio. Solo tienen efecto con AI Max,
+# textos automáticos y expansión de URL prendidos, y Google no deja excluir la página de destino del anuncio.
+# Las condiciones no se editan: para cambiar una exclusión se quita y se vuelve a crear.
+# ---------------------------------------------------------------------------
+
+URL_EXCLUSION_MAX_LEN = 500
+
+
+def normalize_url_exclusion(mode, value):
+    """Devuelve (mode, value) limpio o lanza ValueError con un mensaje en español. mode: 'equals' | 'contains'.
+    Rechaza reglas tan amplias que sacarían casi todo el sitio ("/", "es", el dominio solo...)."""
+    mode = (mode or "").strip().lower()
+    if mode not in ("equals", "contains"):
+        raise ValueError("El tipo debe ser 'exacta' o 'contiene'.")
+    value = (value or "").strip().strip("\"'").strip()
+    if "#" in value:
+        value = value.split("#", 1)[0]
+    if not value:
+        raise ValueError("La página está vacía.")
+    if any(ch.isspace() for ch in value):
+        raise ValueError("La dirección no puede tener espacios.")
+    if len(value) > URL_EXCLUSION_MAX_LEN:
+        raise ValueError(f"La dirección supera los {URL_EXCLUSION_MAX_LEN} caracteres.")
+    if mode == "equals":
+        parts = urllib.parse.urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.netloc or "." not in parts.netloc:
+            raise ValueError("Para una página exacta usa la dirección completa, con http:// o https:// y el dominio.")
+        return mode, value
+    # contiene
+    bare = value.split("://", 1)[-1]
+    core = bare.strip("/")
+    if len(core) < 4:
+        raise ValueError("El texto es demasiado corto: excluiría casi todo el sitio. Usa al menos 4 caracteres, por ejemplo /fotos/.")
+    if "/" not in core and "." in core:
+        raise ValueError("Eso es solo el dominio: excluiría todo el sitio. Agrega la parte de la página, por ejemplo /fotos/.")
+    first = core.split("/", 1)[0]
+    path = core.split("/", 1)[1] if "." in first and "/" in core else core
+    if len(path.strip("/")) < 4:
+        raise ValueError("Esa ruta es demasiado corta (por ejemplo /es/): excluiría casi todo el sitio. Usa una página concreta, como /fotos/.")
+    return mode, value
+
+
+def fetch_ai_max_url_exclusions(customer_id):
+    """Exclusiones de página (WEBPAGE negativo) que ya existen en las campañas de la cuenta."""
+    query = """
+        SELECT campaign.id, campaign.name,
+               campaign_criterion.resource_name, campaign_criterion.criterion_id,
+               campaign_criterion.webpage.criterion_name, campaign_criterion.webpage.conditions
+        FROM campaign_criterion
+        WHERE campaign_criterion.type = 'WEBPAGE' AND campaign_criterion.negative = TRUE
+    """
+    rows = []
+    for r in _search(customer_id, query):
+        campaign = r.get("campaign", {})
+        crit = r.get("campaignCriterion", {})
+        webpage = crit.get("webpage", {})
+        conds = webpage.get("conditions") or []
+        url_conds = [c for c in conds if c.get("operand") == "URL"]
+        first = (url_conds or conds or [{}])[0]
+        operator = first.get("operator")
+        rows.append({
+            "campaign_id": str(campaign.get("id")) if campaign.get("id") is not None else None,
+            "campaign_name": campaign.get("name") or "(sin nombre)",
+            "resource_name": crit.get("resourceName"),
+            "criterion_id": str(crit.get("criterionId")) if crit.get("criterionId") is not None else None,
+            "name": webpage.get("criterionName") or "",
+            "mode": "equals" if operator == "EQUALS" else "contains" if operator == "CONTAINS" else "other",
+            "value": first.get("argument") or "",
+            "conditions": len(conds),
+        })
+    return sorted(rows, key=lambda x: (x["campaign_name"], x["value"]))
+
+
+def push_ai_max_url_exclusions(customer_id, items, validate_only=True):
+    """Crea exclusiones de página. items: [{campaign_id, mode, value}], ya normalizados.
+    validate_only=True: Google valida sin escribir. Usa partialFailure: una regla inválida no tumba las demás."""
+    if not items:
+        return {"created": 0, "failed": [], "validate_only": validate_only}
+    operations = []
+    for item in items:
+        operator = "EQUALS" if item["mode"] == "equals" else "CONTAINS"
+        operations.append({"create": {
+            "campaign": f"customers/{customer_id}/campaigns/{item['campaign_id']}",
+            "negative": True,
+            "webpage": {
+                "criterionName": f"Excluir ({'exacta' if item['mode'] == 'equals' else 'contiene'}): {item['value']}"[:250],
+                "conditions": [{"operand": "URL", "operator": operator, "argument": item["value"]}],
+            },
+        }})
+    payload = _mutate_with_partial_failure(f"{BASE_URL}/customers/{customer_id}/campaignCriteria:mutate", operations, validate_only)
+    failed_indices, failed_messages = _partial_failures(payload, items, lambda it: f"\"{it['value']}\"")
+    return {"created": len(items) - len(failed_indices), "failed": failed_messages, "validate_only": validate_only}
+
+
+def remove_ai_max_url_exclusions(customer_id, resource_names, validate_only=True):
+    """Quita exclusiones de página por su resource_name (customers/ID/campaignCriteria/CAMPAÑA~CRITERIO)."""
+    import re as _re
+    pattern = _re.compile(rf"^customers/{_re.escape(str(customer_id))}/campaignCriteria/\d+~\d+$")
+    clean = [rn for rn in resource_names if isinstance(rn, str) and pattern.match(rn)]
+    if len(clean) != len(resource_names):
+        raise ValueError("Alguna exclusión a quitar no es válida para esta cuenta.")
+    if not clean:
+        return {"removed": 0, "validate_only": validate_only}
+    payload = _mutate_with_partial_failure(f"{BASE_URL}/customers/{customer_id}/campaignCriteria:mutate", [{"remove": rn} for rn in clean], validate_only)
+    failed_indices, failed_messages = _partial_failures(payload, clean, lambda rn: rn.rsplit("/", 1)[-1])
+    return {"removed": len(clean) - len(failed_indices), "failed": failed_messages, "validate_only": validate_only}
+
+
+def _mutate_with_partial_failure(url, operations, validate_only):
+    body = {"operations": operations, "partialFailure": True, "validateOnly": validate_only}
+    req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Google Ads API respondió {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"No se pudo conectar a la API de Google Ads: {e.reason}") from e
+
+
+def _partial_failures(payload, items, label):
+    failed_indices, messages = set(), []
+    partial_error = payload.get("partialFailureError")
+    if partial_error:
+        for detail in partial_error.get("details", []):
+            for err in detail.get("errors", []):
+                message = err.get("message", "Error desconocido.")
+                idx = None
+                for el in err.get("location", {}).get("fieldPathElements", []):
+                    if el.get("fieldName") == "operations" and el.get("index") is not None:
+                        idx = el["index"]
+                if idx is not None and idx < len(items):
+                    failed_indices.add(idx)
+                    messages.append(f"{label(items[idx])}: {message}")
+                else:
+                    messages.append(message)
+    return failed_indices, messages
+
+
 def fetch_account_negative_keywords(customer_id):
     """Negativos de concordancia exacta que YA están escritos de verdad en
     la cuenta (campaign_criterion con negative=true) — distinto de la
@@ -2284,6 +2427,23 @@ def simulated_impression_share_daily(date_from, date_to):
         day += datetime.timedelta(days=1)
         i += 1
     return rows
+
+
+SIMULATED_AI_MAX_URL_EXCLUSIONS = [
+    {"campaign_id": "1111111102", "campaign_name": "Estelar Hoteles - CO:es - Search Marca", "resource_name": "customers/1111111111/campaignCriteria/1111111102~9001", "criterion_id": "9001", "name": "Excluir (contiene): /fotos/", "mode": "contains", "value": "/fotos/", "conditions": 1},
+]
+
+
+def simulated_ai_max_url_exclusions():
+    return list(SIMULATED_AI_MAX_URL_EXCLUSIONS)
+
+
+def simulated_push_ai_max_url_exclusions(items, validate_only=True):
+    return {"created": len(items), "failed": [], "validate_only": validate_only, "simulated": True}
+
+
+def simulated_remove_ai_max_url_exclusions(resource_names, validate_only=True):
+    return {"removed": len(resource_names), "failed": [], "validate_only": validate_only, "simulated": True}
 
 
 def simulated_push_negative_keywords(items, validate_only=True):
