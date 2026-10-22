@@ -6393,7 +6393,7 @@ function renderIaMaxCreadoTab() {
     </div>`;
 
   const rows = getIaMaxCreatedRows();
-  const flag = (r) => (r.cost > 0 && !r.conversions ? 'row-flag' : '');
+  const flag = (r) => (r.cost > 0 && !r.conversions ? 'row-warn' : '');
   const cpa = (r) => (r.conversions ? fmtMoney(r.cost / r.conversions) : 'N/D');
   const metricCells = (r) => `<td>${fmtInt(r.impressions)}</td><td>${fmtInt(r.clicks)}</td><td>${fmtMoney(r.cost)}</td><td>${Number(r.conversions || 0).toFixed(1)}</td><td>${cpa(r)}</td>`;
   const metricHead = [['Impr.', 'impressions'], ['Clics', 'clicks'], ['Costo', 'cost'], ['Conv.', 'conversions'], ['Costo/conv', 'cpa']].map(([l, k]) => iaMaxSortTh(l, k)).join('');
@@ -6423,8 +6423,9 @@ function renderIaMaxCreadoTab() {
         <h3>${({ assets: 'Recursos creados por Google', combinations: 'Búsqueda + titular + página', pages: 'Páginas a las que mandó tráfico' })[cr.sub]}, últimos ${cr.days} días (${rows.length})</h3>
         <button class="btn-outline sm" data-action="iamax-created-csv">Descargar CSV</button>
       </div>
+      <p class="footnote" style="margin:0 0 12px"><span class="legend-swatch-warn"></span><strong>Fila en ámbar:</strong> gastó dinero sin generar conversiones en el periodo${rows.some((r) => r.cost > 0 && !r.conversions) ? ` (${rows.filter((r) => r.cost > 0 && !r.conversions).length} de ${rows.length})` : ' (ninguna en esta vista)'}. Es una señal para revisar, no un error: con pocos clics todavía puede no haber conversiones.</p>
       <div class="table-scroll"><table>${table}</table></div>
-      <p class="footnote" style="margin-top:14px">${note} Las filas resaltadas gastaron sin conversiones en el periodo.</p>
+      <p class="footnote" style="margin-top:14px">${note}</p>
     </div>`}`;
 }
 

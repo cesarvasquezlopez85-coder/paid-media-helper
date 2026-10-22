@@ -462,6 +462,9 @@ main.content { flex: 1; overflow-y: auto; height: 100%; }
 .ai-narrativa { margin: 0 0 10px; font-size: 13.5px; color: var(--color-text-body); line-height: 1.6; }
 
 .row-flag td { background: var(--danger-bg); }
+/* Fila a revisar (ámbar): p. ej. gastó sin conversiones. El cuadrito de la leyenda usa el mismo color. */
+.row-warn td { background: #fdf3d9; }
+.legend-swatch-warn { display: inline-block; width: 12px; height: 12px; border-radius: 3px; background: #fdf3d9; border: 1px solid #e2c36b; vertical-align: -1px; margin-right: 6px; }
 
 /* dense layout (Vista B) */
 .dense-grid { display: grid; grid-template-columns: 300px 1fr; gap: 20px; align-items: start; }
