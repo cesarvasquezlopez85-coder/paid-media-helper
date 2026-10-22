@@ -553,6 +553,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_ai_max_served(parse_qs(parsed.query))
             return
 
+        if path == "/api/google-ads/ai-max-created":
+            if not self._require_auth_json():
+                return
+            self._handle_google_ads_ai_max_created(parse_qs(parsed.query))
+            return
+
         if path == "/api/google-ads/content-exclusions":
             if not self._require_auth_json():
                 return
@@ -2270,6 +2276,59 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(200, {"rows": rows, "negatives": negatives, "simulated": False})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)
+
+    def _handle_google_ads_ai_max_created(self, query):
+        """Lo que creó IA Max: recursos automáticos, combinaciones término + página + titular, y páginas a las
+        que mandó el tráfico. Solo lectura; cada reporte falla por separado para que uno caído no tumbe los otros."""
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        campaign_id = (query.get("campaign_id") or [""])[0].strip()
+        try:
+            days = int((query.get("days") or ["30"])[0])
+        except ValueError:
+            days = 30
+        if days not in (7, 14, 30):
+            days = 30
+
+        if not google_ads_client.is_configured():
+            data = google_ads_client.simulated_ai_max_created(campaign_id or None)
+            data.update({"simulated": True, "days": days, "errors": {}})
+            self._send_json(200, data)
+            return
+
+        if not customer_id.isdigit() or (campaign_id and not campaign_id.isdigit()):
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        out = {"assets": [], "combinations": [], "combinations_total": 0, "pages": [], "pages_total": 0,
+               "simulated": False, "days": days, "errors": {}}
+        failures = []
+        try:
+            out["assets"] = google_ads_client.fetch_ai_max_created_assets(customer_id, campaign_id or None, days)
+        except Exception as e:  # noqa: BLE001
+            failures.append(("assets", e))
+        try:
+            out["combinations"], out["combinations_total"] = google_ads_client.fetch_ai_max_combinations(customer_id, campaign_id or None, days)
+        except Exception as e:  # noqa: BLE001
+            failures.append(("combinations", e))
+        try:
+            out["pages"], out["pages_total"] = google_ads_client.fetch_ai_max_landing_pages(customer_id, campaign_id or None, days)
+        except Exception as e:  # noqa: BLE001
+            failures.append(("pages", e))
+        if len(failures) == 3:
+            # Si fallaron los tres, es un problema general de la API: se responde igual que el resto de reportes.
+            self._send_google_ads_error(failures[0][1])
+            return
+        for name, exc in failures:
+            out["errors"][name] = str(exc)[:300]
+        self._send_json(200, out)
 
     def _handle_google_ads_content_exclusions(self, query):
         customer_id = (query.get("customer_id") or [""])[0].strip()

@@ -918,7 +918,8 @@ def fetch_ai_max_status(customer_id, only_active=False):
     query = f"""
         SELECT campaign.id, campaign.name, campaign.status,
                campaign.ai_max_setting.enable_ai_max,
-               campaign.ai_max_setting.bundling_required
+               campaign.ai_max_setting.bundling_required,
+               campaign.asset_automation_settings
         FROM campaign
         WHERE campaign.advertising_channel_type = 'SEARCH'
           AND {status_filter}
@@ -934,8 +935,19 @@ def fetch_ai_max_status(customer_id, only_active=False):
             "status": campaign.get("status") or "UNKNOWN",
             "enabled": bool(ai_max.get("enableAiMax", False)),
             "bundling_required": ai_max.get("bundlingRequired") or "UNSPECIFIED",
+            # Textos automáticos y expansión de URL: Google los deja apagados (OPTED_OUT) en Search
+            # salvo que alguien los prenda. None = la API no devolvió el ajuste.
+            "text_customization": _asset_automation_status(campaign, "TEXT_ASSET_AUTOMATION"),
+            "final_url_expansion": _asset_automation_status(campaign, "FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION"),
         })
     return rows
+
+
+def _asset_automation_status(campaign, automation_type):
+    for item in campaign.get("assetAutomationSettings") or []:
+        if item.get("assetAutomationType") == automation_type:
+            return item.get("assetAutomationStatus") or None
+    return None
 
 
 def update_campaign_ai_max(customer_id, campaign_id, enable, validate_only=True):
@@ -1033,6 +1045,142 @@ def fetch_ai_max_served_combinations(customer_id, campaign_id=None, date_from=No
             "conversions": _float_or_none(metrics.get("conversions")) or 0,
         })
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Lo que creó IA Max — tres reportes de solo lectura, verificados contra una cuenta real con IA Max
+# activo (Estelar Yopal, 2026-10-20): recursos creados automáticamente, combinaciones término + página
+# + titular, y páginas a las que mandó el tráfico (expansión de URL).
+# ---------------------------------------------------------------------------
+
+def _ai_max_date_range(days):
+    days = days if days in (7, 14, 30) else 30
+    today = datetime.date.today()
+    return (today - datetime.timedelta(days=days)).isoformat(), today.isoformat()
+
+
+def _clean_landing_url(url):
+    """Quita parámetros de seguimiento (gclid, gad_*, utm_*...) y el fragmento para que la misma página no
+    salga repetida cien veces: queda esquema + dominio + ruta."""
+    if not url:
+        return ""
+    parts = urllib.parse.urlsplit(url)
+    host = (parts.netloc or "").lower()
+    path = parts.path or "/"
+    return f"{parts.scheme}://{host}{path}" if host else url.split("?")[0]
+
+
+def fetch_ai_max_created_assets(customer_id, campaign_id=None, days=30):
+    """Recursos que Google creó automáticamente en campañas con IA Max (asset.source = AUTOMATICALLY_CREATED),
+    con su rendimiento del periodo. Un recurso puede estar en varios anuncios: se suma por campaña + recurso."""
+    date_from, date_to = _ai_max_date_range(days)
+    campaign_filter = f"AND campaign.id = {int(campaign_id)}" if campaign_id else ""
+    query = f"""
+        SELECT campaign.id, campaign.name,
+               ad_group_ad_asset_view.field_type, ad_group_ad_asset_view.performance_label,
+               asset.id, asset.type, asset.text_asset.text,
+               metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions
+        FROM ad_group_ad_asset_view
+        WHERE asset.source = 'AUTOMATICALLY_CREATED'
+          AND campaign.ai_max_setting.enable_ai_max = TRUE
+          AND segments.date BETWEEN '{date_from}' AND '{date_to}'
+          {campaign_filter}
+    """
+    grouped = {}
+    for r in _search(customer_id, query):
+        campaign = r.get("campaign", {})
+        asset = r.get("asset", {})
+        view = r.get("adGroupAdAssetView", {})
+        metrics = r.get("metrics", {})
+        key = (str(campaign.get("id")), str(asset.get("id")), view.get("fieldType"))
+        row = grouped.setdefault(key, {
+            "campaign_id": str(campaign.get("id")) if campaign.get("id") is not None else None,
+            "campaign_name": campaign.get("name") or "(sin nombre)",
+            "asset_id": str(asset.get("id")) if asset.get("id") is not None else None,
+            "asset_type": asset.get("type") or "UNKNOWN",
+            "field_type": view.get("fieldType") or "UNKNOWN",
+            "text": (asset.get("textAsset") or {}).get("text"),
+            "performance_label": view.get("performanceLabel") or "UNSPECIFIED",
+            "impressions": 0, "clicks": 0, "cost": 0.0, "conversions": 0.0,
+        })
+        row["impressions"] += _int_or_none(metrics.get("impressions")) or 0
+        row["clicks"] += _int_or_none(metrics.get("clicks")) or 0
+        row["cost"] += _micros_to_units(_int_or_none(metrics.get("costMicros"))) or 0
+        row["conversions"] += _float_or_none(metrics.get("conversions")) or 0
+    return sorted(grouped.values(), key=lambda x: (x["impressions"], x["clicks"]), reverse=True)
+
+
+def fetch_ai_max_combinations(customer_id, campaign_id=None, days=30, limit=500):
+    """Qué titular dinámico y qué página usó IA Max para cada búsqueda
+    (ai_max_search_term_ad_combination_view). OJO: sin `segments.date` esta vista devuelve 0 filas, y es la
+    única segmentación que acepta. Se suma por (campaña, término, página, titular)."""
+    date_from, date_to = _ai_max_date_range(days)
+    campaign_filter = f"AND campaign.id = {int(campaign_id)}" if campaign_id else ""
+    query = f"""
+        SELECT campaign.id, campaign.name, segments.date,
+               ai_max_search_term_ad_combination_view.search_term,
+               ai_max_search_term_ad_combination_view.landing_page,
+               ai_max_search_term_ad_combination_view.headline,
+               metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions
+        FROM ai_max_search_term_ad_combination_view
+        WHERE segments.date BETWEEN '{date_from}' AND '{date_to}'
+          {campaign_filter}
+    """
+    grouped = {}
+    for r in _search(customer_id, query):
+        campaign = r.get("campaign", {})
+        view = r.get("aiMaxSearchTermAdCombinationView", {})
+        metrics = r.get("metrics", {})
+        landing = _clean_landing_url(view.get("landingPage"))
+        key = (str(campaign.get("id")), view.get("searchTerm"), landing, view.get("headline"))
+        row = grouped.setdefault(key, {
+            "campaign_id": str(campaign.get("id")) if campaign.get("id") is not None else None,
+            "campaign_name": campaign.get("name") or "(sin nombre)",
+            "search_term": view.get("searchTerm") or "",
+            "landing_page": landing,
+            "headline": view.get("headline") or "",
+            "impressions": 0, "clicks": 0, "cost": 0.0, "conversions": 0.0,
+        })
+        row["impressions"] += _int_or_none(metrics.get("impressions")) or 0
+        row["clicks"] += _int_or_none(metrics.get("clicks")) or 0
+        row["cost"] += _micros_to_units(_int_or_none(metrics.get("costMicros"))) or 0
+        row["conversions"] += _float_or_none(metrics.get("conversions")) or 0
+    rows = sorted(grouped.values(), key=lambda x: (x["cost"], x["impressions"]), reverse=True)
+    return rows[:limit], len(rows)
+
+
+def fetch_ai_max_landing_pages(customer_id, campaign_id=None, days=30, limit=200):
+    """Páginas a las que IA Max mandó el tráfico con la expansión de URL (expanded_landing_page_view).
+    Las URL traen parámetros de seguimiento distintos en cada clic: se agrupan por esquema + dominio + ruta."""
+    date_from, date_to = _ai_max_date_range(days)
+    campaign_filter = f"AND campaign.id = {int(campaign_id)}" if campaign_id else ""
+    query = f"""
+        SELECT campaign.id, campaign.name, campaign.ai_max_setting.enable_ai_max,
+               expanded_landing_page_view.expanded_final_url,
+               metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions
+        FROM expanded_landing_page_view
+        WHERE campaign.ai_max_setting.enable_ai_max = TRUE
+          AND segments.date BETWEEN '{date_from}' AND '{date_to}'
+          {campaign_filter}
+    """
+    grouped = {}
+    for r in _search(customer_id, query):
+        campaign = r.get("campaign", {})
+        metrics = r.get("metrics", {})
+        page = _clean_landing_url((r.get("expandedLandingPageView") or {}).get("expandedFinalUrl"))
+        key = (str(campaign.get("id")), page)
+        row = grouped.setdefault(key, {
+            "campaign_id": str(campaign.get("id")) if campaign.get("id") is not None else None,
+            "campaign_name": campaign.get("name") or "(sin nombre)",
+            "page": page,
+            "impressions": 0, "clicks": 0, "cost": 0.0, "conversions": 0.0,
+        })
+        row["impressions"] += _int_or_none(metrics.get("impressions")) or 0
+        row["clicks"] += _int_or_none(metrics.get("clicks")) or 0
+        row["cost"] += _micros_to_units(_int_or_none(metrics.get("costMicros"))) or 0
+        row["conversions"] += _float_or_none(metrics.get("conversions")) or 0
+    rows = sorted(grouped.values(), key=lambda x: (x["cost"], x["impressions"]), reverse=True)
+    return rows[:limit], len(rows)
 
 
 def fetch_account_negative_keywords(customer_id):
@@ -1926,12 +2074,41 @@ def simulated_ai_max_status(only_active=False):
             "status": c["status"],
             "enabled": entry["enabled"],
             "bundling_required": "NOT_REQUIRED",
+            "text_customization": "OPTED_IN" if entry["enabled"] else "OPTED_OUT",
+            "final_url_expansion": "OPTED_IN" if entry["enabled"] else "OPTED_OUT",
         })
     return out
 
 
 def simulated_update_campaign_ai_max(campaign_id, enable, validate_only=True):
     return {"validate_only": validate_only, "applied": not validate_only, "enabled": bool(enable), "simulated": True}
+
+
+SIMULATED_AI_MAX_CREATED_ASSETS = [
+    {"campaign_id": "1111111102", "campaign_name": "Estelar Hoteles - CO:es - Search Marca", "asset_id": "9001", "asset_type": "TEXT", "field_type": "HEADLINE", "text": "Reserva al mejor precio garantizado", "performance_label": "NOT_APPLICABLE", "impressions": 120, "clicks": 9, "cost": 6.3, "conversions": 1},
+    {"campaign_id": "1111111102", "campaign_name": "Estelar Hoteles - CO:es - Search Marca", "asset_id": "9002", "asset_type": "TEXT", "field_type": "DESCRIPTION", "text": "Hoteles Estelar: reserva directa con beneficios exclusivos", "performance_label": "NOT_APPLICABLE", "impressions": 64, "clicks": 3, "cost": 2.1, "conversions": 0},
+]
+
+SIMULATED_AI_MAX_COMBINATIONS = [
+    {"campaign_id": "1111111102", "campaign_name": "Estelar Hoteles - CO:es - Search Marca", "search_term": "estelar hoteles reservas oficiales", "landing_page": "https://www.estelar.example/es/ofertas/", "headline": "Ofertas Hoteles Estelar | Web Oficial", "impressions": 340, "clicks": 28, "cost": 19.6, "conversions": 3},
+    {"campaign_id": "1111111102", "campaign_name": "Estelar Hoteles - CO:es - Search Marca", "search_term": "hotel estelar cartagena", "landing_page": "https://www.estelar.example/es/", "headline": "Hotel Estelar Cartagena, Web Oficial", "impressions": 210, "clicks": 17, "cost": 11.4, "conversions": 1},
+    {"campaign_id": "1111111102", "campaign_name": "Estelar Hoteles - CO:es - Search Marca", "search_term": "hotel estelar cartagena", "landing_page": "https://www.estelar.example/es/servicios/", "headline": "Servicios Hotel Estelar Cartagena", "impressions": 41, "clicks": 1, "cost": 0.7, "conversions": 0},
+]
+
+SIMULATED_AI_MAX_LANDING_PAGES = [
+    {"campaign_id": "1111111102", "campaign_name": "Estelar Hoteles - CO:es - Search Marca", "page": "https://www.estelar.example/es/", "impressions": 520, "clicks": 41, "cost": 28.4, "conversions": 2},
+    {"campaign_id": "1111111102", "campaign_name": "Estelar Hoteles - CO:es - Search Marca", "page": "https://www.estelar.example/es/ofertas/", "impressions": 340, "clicks": 28, "cost": 19.6, "conversions": 3},
+    {"campaign_id": "1111111102", "campaign_name": "Estelar Hoteles - CO:es - Search Marca", "page": "https://www.estelar.example/es/fotos/", "impressions": 38, "clicks": 0, "cost": 0, "conversions": 0},
+]
+
+
+def simulated_ai_max_created(campaign_id=None):
+    def pick(rows):
+        return [r for r in rows if not campaign_id or r["campaign_id"] == str(campaign_id)]
+    combos = pick(SIMULATED_AI_MAX_COMBINATIONS)
+    pages = pick(SIMULATED_AI_MAX_LANDING_PAGES)
+    return {"assets": pick(SIMULATED_AI_MAX_CREATED_ASSETS), "combinations": combos, "combinations_total": len(combos),
+            "pages": pages, "pages_total": len(pages)}
 
 
 def simulated_ai_max_served(campaign_id=None):

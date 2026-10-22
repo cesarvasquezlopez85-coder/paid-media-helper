@@ -212,7 +212,7 @@ const state = {
   // cuenta (Función 9/Negativización). Sin rango de fechas — todo acá es
   // configuración o estado actual, no una métrica de un periodo.
   iamax: {
-    tab: 'estado', // 'estado' | 'servido' | 'cruce'
+    tab: 'estado', // 'estado' | 'servido' | 'creado' | 'cruce'
     status: 'idle', error: null, rows: null,
     api: {
       statusChecked: false, configured: false,
@@ -235,6 +235,12 @@ const state = {
     served: {
       status: 'idle', error: null, rows: null, negatives: null,
       campaignFilter: 'all',
+    },
+    // Lo que creó IA Max (solo lectura): recursos automáticos, combinaciones término + página + titular y
+    // páginas a las que mandó el tráfico. `sub` = qué tabla se ve; `days` = periodo (7, 14 o 30).
+    created: {
+      status: 'idle', error: null, data: null, sub: 'assets', campaignFilter: 'all', days: 30,
+      sort: { assets: null, combinations: null, pages: null }, // { key, dir } por vista; null = orden de Google (por costo)
     },
   },
 
@@ -5778,6 +5784,7 @@ function resetIaMaxAccountData() {
   s.status = 'idle'; s.error = null; s.rows = null;
   s.toggle = { campaignId: null, status: 'idle', newEnable: null, preview: null, result: null, error: null };
   s.served = { status: 'idle', error: null, rows: null, negatives: null, campaignFilter: 'all' };
+  s.created = { status: 'idle', error: null, data: null, sub: s.created ? s.created.sub : 'assets', campaignFilter: 'all', days: s.created ? s.created.days : 30, sort: { assets: null, combinations: null, pages: null } };
 }
 
 function ensureIaMaxGoogleAdsStatusLoaded() {
@@ -6116,6 +6123,13 @@ function renderIaMaxToggleCell(row) {
   return '';
 }
 
+function iaMaxAutomationBadge(row, status) {
+  if (!row.enabled) return '<span class="footnote">—</span>';
+  if (status === 'OPTED_IN') return '<span class="delta-badge warn">Prendido</span>';
+  if (status === 'OPTED_OUT') return '<span class="delta-badge neutral">Apagado</span>';
+  return '<span class="footnote">N/D</span>';
+}
+
 function renderIaMaxEstadoTab() {
   const s = state.iamax;
   if (s.status === 'idle') {
@@ -6139,6 +6153,8 @@ function renderIaMaxEstadoTab() {
     <tr>
       <td>${escapeHtml(r.campaign_name)}</td>
       <td>${r.enabled ? '<span class="delta-badge good">Activo</span>' : '<span class="delta-badge neutral">Inactivo</span>'}</td>
+      <td>${iaMaxAutomationBadge(r, r.text_customization)}</td>
+      <td>${iaMaxAutomationBadge(r, r.final_url_expansion)}</td>
       <td>${renderIaMaxToggleCell(r)}</td>
     </tr>`).join('');
   return `
@@ -6146,11 +6162,12 @@ function renderIaMaxEstadoTab() {
       <div class="table-panel-head"><h3>Campañas Search (${rows.length})</h3></div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Campaña</th><th>AI Max</th><th>Acción</th></tr></thead>
+          <thead><tr><th>Campaña</th><th>AI Max</th><th>Textos automáticos</th><th>Expansión de URL</th><th>Acción</th></tr></thead>
           <tbody>${rowsHtml}</tbody>
         </table>
       </div>
       <p class="footnote" style="margin-top:14px">
+        "Textos automáticos" deja que Google cree titulares y descripciones propios; "Expansión de URL" deja que mande el tráfico a páginas de tu sitio distintas a la que pusiste en el anuncio. Los dos vienen apagados por defecto y solo funcionan con AI Max activo; aquí solo se leen (lo que crearon se ve en la pestaña "Qué creó IA Max").<br>
         Prender/apagar AI Max cambia de verdad cómo Google sirve esta campaña en producción — la vista previa (validateOnly) valida el cambio sin aplicarlo, igual que en ROAS.
       </p>
     </div>`;
@@ -6232,6 +6249,185 @@ function renderIaMaxServidoTab() {
     </div>`;
 }
 
+function fetchIaMaxCreated() {
+  const s = state.iamax;
+  const a = s.api;
+  const cr = s.created;
+  const customerId = iaMaxCustomerId();
+  if (!customerId && !a.simulated) { a.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
+
+  a.error = null;
+  cr.status = 'loading'; cr.error = null;
+  render();
+
+  const params = new URLSearchParams({ customer_id: customerId || '', days: String(cr.days) });
+  fetch(`/api/google-ads/ai-max-created?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.simulated = !!data.simulated;
+      cr.data = data;
+      cr.campaignFilter = 'all';
+      cr.status = 'ready';
+      render();
+    })
+    .catch((err) => {
+      cr.error = err.message || String(err);
+      cr.status = 'error';
+      render();
+    });
+}
+
+// Filas de la tabla activa de "Qué creó IA Max", ya filtradas por campaña.
+function getIaMaxCreatedRows() {
+  const cr = state.iamax.created;
+  const data = cr.data || {};
+  const rows = (cr.sub === 'assets' ? data.assets : cr.sub === 'combinations' ? data.combinations : data.pages) || [];
+  const filtered = cr.campaignFilter === 'all' ? rows : rows.filter((r) => r.campaign_name === cr.campaignFilter);
+  const sort = cr.sort[cr.sub];
+  if (!sort) return filtered;
+  const dir = sort.dir === 'asc' ? 1 : -1;
+  const value = (r) => {
+    if (sort.key === 'cpa') return r.conversions ? r.cost / r.conversions : null; // sin conversiones: siempre al final
+    if (sort.key === 'field_type') return AI_MAX_FIELD_TYPE_LABELS[r.field_type] || r.field_type || '';
+    return r[sort.key];
+  };
+  return [...filtered].sort((a, b) => {
+    const va = value(a); const vb = value(b);
+    if (va === null || va === undefined) return (vb === null || vb === undefined) ? 0 : 1;
+    if (vb === null || vb === undefined) return -1;
+    if (typeof va === 'string' || typeof vb === 'string') return dir * String(va).localeCompare(String(vb), 'es', { numeric: true, sensitivity: 'base' });
+    return dir * (va - vb);
+  });
+}
+
+const IAMAX_TEXT_SORT_KEYS = new Set(['campaign_name', 'field_type', 'text', 'search_term', 'headline', 'landing_page', 'page']);
+// Encabezado ordenable: ▲ de menor a mayor, ▼ de mayor a menor; ↕ en las columnas que todavía no se usan.
+function iaMaxSortTh(label, key) {
+  const cur = state.iamax.created.sort[state.iamax.created.sub];
+  const active = cur && cur.key === key;
+  const arrow = active ? (cur.dir === 'asc' ? ' ▲' : ' ▼') : ' <span style="opacity:.35">↕</span>';
+  return `<th data-iamax-sort="${key}" style="cursor:pointer;user-select:none${active ? ';color:var(--color-text-heading)' : ''}" title="Ordenar por ${escapeHtml(label)}">${escapeHtml(label)}${arrow}</th>`;
+}
+
+const AI_MAX_FIELD_TYPE_LABELS = {
+  HEADLINE: 'Titular', DESCRIPTION: 'Descripción', SITELINK: 'Enlace de sitio', CALLOUT: 'Texto destacado',
+  STRUCTURED_SNIPPET: 'Fragmento', LONG_HEADLINE: 'Titular largo', BUSINESS_NAME: 'Nombre del negocio',
+  MARKETING_IMAGE: 'Imagen', SQUARE_MARKETING_IMAGE: 'Imagen cuadrada',
+};
+
+function downloadIaMaxCreatedCsv() {
+  const cr = state.iamax.created;
+  const rows = getIaMaxCreatedRows();
+  const money = (n) => Number(n || 0).toFixed(2);
+  const metrics = (r) => [r.impressions, r.clicks, money(r.cost), Number(r.conversions || 0).toFixed(1)];
+  let header; let body; let name;
+  if (cr.sub === 'assets') {
+    name = 'ia_max_recursos_creados';
+    header = ['Campaña', 'Tipo', 'Texto', 'Etiqueta de rendimiento', 'Impresiones', 'Clics', 'Costo', 'Conversiones'];
+    body = rows.map((r) => [r.campaign_name, AI_MAX_FIELD_TYPE_LABELS[r.field_type] || r.field_type, r.text || `(${r.asset_type})`, r.performance_label, ...metrics(r)]);
+  } else if (cr.sub === 'combinations') {
+    name = 'ia_max_combinaciones';
+    header = ['Campaña', 'Término de búsqueda', 'Página', 'Titular que usó IA Max', 'Impresiones', 'Clics', 'Costo', 'Conversiones'];
+    body = rows.map((r) => [r.campaign_name, r.search_term, r.landing_page, r.headline, ...metrics(r)]);
+  } else {
+    name = 'ia_max_paginas';
+    header = ['Campaña', 'Página', 'Impresiones', 'Clics', 'Costo', 'Conversiones'];
+    body = rows.map((r) => [r.campaign_name, r.page, ...metrics(r)]);
+  }
+  engine.downloadCsv(`${name}_${cr.data.days || 30}d_${new Date().toISOString().slice(0, 10)}.csv`, [header, ...body]);
+}
+
+function renderIaMaxCreadoTab() {
+  const s = state.iamax;
+  const cr = s.created;
+
+  if (cr.status === 'idle') {
+    return `
+      <div class="card state-panel idle">
+        ${icon('sparkles', 30)}
+        <p>Trae lo que Google creó por su cuenta con AI Max y cómo le fue: los titulares y recursos automáticos, qué titular y qué página usó para cada búsqueda, y a qué páginas de tu sitio mandó el tráfico.</p>
+        <button class="btn-accent" data-action="iamax-created-fetch">Traer lo que creó IA Max</button>
+      </div>`;
+  }
+  if (cr.status === 'loading') {
+    return `<div class="card state-panel loading"><div class="spinner"></div><p>Trayendo lo que creó IA Max (puede tardar unos segundos)…</p></div>`;
+  }
+  if (cr.status === 'error') {
+    return `<div class="error-panel"><strong>No se pudo traer el reporte.</strong> ${escapeHtml(cr.error)}</div>`;
+  }
+
+  const data = cr.data || {};
+  const campaigns = [...new Set([...(data.assets || []), ...(data.combinations || []), ...(data.pages || [])].map((r) => r.campaign_name))].sort();
+  const errs = Object.entries(data.errors || {});
+  const errorsHtml = errs.length ? `<div class="error-panel" style="margin-bottom:14px"><strong>Una parte del reporte no se pudo traer:</strong> ${errs.map(([k, v]) => `${({ assets: 'recursos creados', combinations: 'combinaciones', pages: 'páginas' })[k] || k} (${escapeHtml(v)})`).join('; ')}.</div>` : '';
+
+  const controls = `
+    <div class="card control-panel align-end" style="margin-bottom:20px">
+      <div class="field">
+        <label>Periodo</label>
+        <select id="iamax-created-days" style="width:160px">
+          ${[7, 14, 30].map((d) => `<option value="${d}" ${cr.days === d ? 'selected' : ''}>Últimos ${d} días</option>`).join('')}
+        </select>
+      </div>
+      <div class="field">
+        <label>Ver solo esta campaña</label>
+        <select id="iamax-created-campaign" style="width:320px">
+          <option value="all" ${cr.campaignFilter === 'all' ? 'selected' : ''}>Todas las campañas</option>
+          ${campaigns.map((c) => `<option value="${escapeHtml(c)}" ${cr.campaignFilter === c ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}
+        </select>
+      </div>
+      <button class="btn-outline" data-action="iamax-created-fetch">Volver a traer</button>
+    </div>`;
+
+  const counts = {
+    assets: (data.assets || []).length,
+    combinations: data.combinations_total || (data.combinations || []).length,
+    pages: data.pages_total || (data.pages || []).length,
+  };
+  const subTabs = `
+    <div class="seg-control" style="margin-bottom:16px">
+      <button class="seg-btn ${cr.sub === 'assets' ? 'active' : ''}" data-action="iamax-created-sub-assets">Recursos creados (${counts.assets})</button>
+      <button class="seg-btn ${cr.sub === 'combinations' ? 'active' : ''}" data-action="iamax-created-sub-combinations">Búsqueda + titular + página (${counts.combinations})</button>
+      <button class="seg-btn ${cr.sub === 'pages' ? 'active' : ''}" data-action="iamax-created-sub-pages">Páginas a las que mandó tráfico (${counts.pages})</button>
+    </div>`;
+
+  const rows = getIaMaxCreatedRows();
+  const flag = (r) => (r.cost > 0 && !r.conversions ? 'row-flag' : '');
+  const cpa = (r) => (r.conversions ? fmtMoney(r.cost / r.conversions) : 'N/D');
+  const metricCells = (r) => `<td>${fmtInt(r.impressions)}</td><td>${fmtInt(r.clicks)}</td><td>${fmtMoney(r.cost)}</td><td>${Number(r.conversions || 0).toFixed(1)}</td><td>${cpa(r)}</td>`;
+  const metricHead = [['Impr.', 'impressions'], ['Clics', 'clicks'], ['Costo', 'cost'], ['Conv.', 'conversions'], ['Costo/conv', 'cpa']].map(([l, k]) => iaMaxSortTh(l, k)).join('');
+  const urlCell = (u) => (u ? `<a href="${escapeHtml(u)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(u)}">${escapeHtml(u.replace(/^https?:\/\//, '').slice(0, 70))}</a>` : '—');
+
+  let table = ''; let note = '';
+  if (cr.sub === 'assets') {
+    table = `<thead><tr>${iaMaxSortTh('Campaña', 'campaign_name')}${iaMaxSortTh('Tipo', 'field_type')}${iaMaxSortTh('Texto creado por Google', 'text')}${metricHead}</tr></thead>
+      <tbody>${rows.map((r) => `<tr class="${flag(r)}"><td>${escapeHtml(r.campaign_name)}</td><td>${escapeHtml(AI_MAX_FIELD_TYPE_LABELS[r.field_type] || r.field_type)}</td><td>${escapeHtml(r.text || `(${r.asset_type})`)}</td>${metricCells(r)}</tr>`).join('')}</tbody>`;
+    note = 'Son los recursos que Google creó por su cuenta (textos automáticos). Google no da una etiqueta de rendimiento para ellos; el rendimiento es el de los anuncios donde se mostraron. No se pueden crear ni editar desde la API, solo se pueden pausar o quitar en Google Ads. Suelen ser pocos: es normal ver 1 o 2.';
+  } else if (cr.sub === 'combinations') {
+    table = `<thead><tr>${iaMaxSortTh('Campaña', 'campaign_name')}${iaMaxSortTh('Búsqueda', 'search_term')}${iaMaxSortTh('Titular que usó IA Max', 'headline')}${iaMaxSortTh('Página', 'landing_page')}${metricHead}</tr></thead>
+      <tbody>${rows.map((r) => `<tr class="${flag(r)}"><td>${escapeHtml(r.campaign_name)}</td><td>${escapeHtml(r.search_term)}</td><td>${escapeHtml(r.headline)}</td><td>${urlCell(r.landing_page)}</td>${metricCells(r)}</tr>`).join('')}</tbody>`;
+    note = `Para cada búsqueda, el titular dinámico y la página que armó AI Max. Ordenado por costo${counts.combinations > (data.combinations || []).length ? `; se muestran ${(data.combinations || []).length} de ${counts.combinations} combinaciones` : ''}.`;
+  } else {
+    table = `<thead><tr>${iaMaxSortTh('Campaña', 'campaign_name')}${iaMaxSortTh('Página', 'page')}${metricHead}</tr></thead>
+      <tbody>${rows.map((r) => `<tr class="${flag(r)}"><td>${escapeHtml(r.campaign_name)}</td><td>${urlCell(r.page)}</td>${metricCells(r)}</tr>`).join('')}</tbody>`;
+    note = `A qué páginas mandó el tráfico la expansión de URL. Se agrupa por página (sin los parámetros de seguimiento). Ordenado por costo${counts.pages > (data.pages || []).length ? `; se muestran ${(data.pages || []).length} de ${counts.pages}` : ''}. Si ves páginas que no son para reservar (fotos, contacto, políticas), la expansión de URL se está llevando tráfico que no convierte.`;
+  }
+
+  const empty = !rows.length;
+  return `
+    ${errorsHtml}${controls}${subTabs}
+    ${empty ? `<div class="ok-panel">No hay datos de este reporte en los últimos ${cr.days} días para ${cr.campaignFilter === 'all' ? 'esta cuenta' : 'esta campaña'}. Si AI Max se activó hace poco, puede que todavía no haya suficiente tráfico, o que la campaña no tenga activados los textos automáticos o la expansión de URL.</div>` : `
+    <div class="card table-panel">
+      <div class="table-panel-head">
+        <h3>${({ assets: 'Recursos creados por Google', combinations: 'Búsqueda + titular + página', pages: 'Páginas a las que mandó tráfico' })[cr.sub]}, últimos ${cr.days} días (${rows.length})</h3>
+        <button class="btn-outline sm" data-action="iamax-created-csv">Descargar CSV</button>
+      </div>
+      <div class="table-scroll"><table>${table}</table></div>
+      <p class="footnote" style="margin-top:14px">${note} Las filas resaltadas gastaron sin conversiones en el periodo.</p>
+    </div>`}`;
+}
+
 function renderIaMaxCruceTab() {
   const s = state.iamax;
   const sv = s.served;
@@ -6290,12 +6486,14 @@ function renderIaMaxPage() {
     <div class="seg-control" style="margin-bottom:20px">
       <button class="seg-btn ${s.tab === 'estado' ? 'active' : ''}" data-action="iamax-tab-estado">Estado</button>
       <button class="seg-btn ${s.tab === 'servido' ? 'active' : ''}" data-action="iamax-tab-servido">Qué sirvió</button>
+      <button class="seg-btn ${s.tab === 'creado' ? 'active' : ''}" data-action="iamax-tab-creado">Qué creó IA Max</button>
       <button class="seg-btn ${s.tab === 'cruce' ? 'active' : ''}" data-action="iamax-tab-cruce">Cruce con negativos${conflictCount ? ` (${conflictCount})` : ''}</button>
     </div>`;
 
   let body = '';
   if (s.tab === 'estado') body = renderIaMaxEstadoTab();
   else if (s.tab === 'servido') body = renderIaMaxServidoTab();
+  else if (s.tab === 'creado') body = renderIaMaxCreadoTab();
   else body = renderIaMaxCruceTab();
 
   return `${controlPanel}${tabs}${body}`;
@@ -9953,6 +10151,26 @@ function bindEvents() {
     state.iamax.served.campaignFilter = e.target.value;
     render();
   });
+  document.querySelectorAll('[data-iamax-sort]').forEach((th) => {
+    th.addEventListener('click', () => {
+      const cr = state.iamax.created;
+      const key = th.dataset.iamaxSort;
+      const cur = cr.sort[cr.sub];
+      if (cur && cur.key === key) cr.sort[cr.sub] = { key, dir: cur.dir === 'desc' ? 'asc' : 'desc' };
+      else cr.sort[cr.sub] = { key, dir: IAMAX_TEXT_SORT_KEYS.has(key) ? 'asc' : 'desc' };
+      render();
+    });
+  });
+  const iamaxCreatedDays = document.getElementById('iamax-created-days');
+  if (iamaxCreatedDays) iamaxCreatedDays.addEventListener('change', (e) => {
+    state.iamax.created.days = Number(e.target.value) || 30;
+    fetchIaMaxCreated();
+  });
+  const iamaxCreatedCampaign = document.getElementById('iamax-created-campaign');
+  if (iamaxCreatedCampaign) iamaxCreatedCampaign.addEventListener('change', (e) => {
+    state.iamax.created.campaignFilter = e.target.value;
+    render();
+  });
   document.querySelectorAll('[data-action="iamax-toggle-start"]').forEach((btn) => {
     btn.addEventListener('click', () => {
       state.iamax.toggle = {
@@ -10554,6 +10772,12 @@ function handleAction(action) {
     case 'iamax-served-fetch': fetchIaMaxServed(); break;
     case 'iamax-tab-estado': state.iamax.tab = 'estado'; render(); break;
     case 'iamax-tab-servido': state.iamax.tab = 'servido'; render(); break;
+    case 'iamax-tab-creado': state.iamax.tab = 'creado'; render(); break;
+    case 'iamax-created-fetch': fetchIaMaxCreated(); break;
+    case 'iamax-created-sub-assets': state.iamax.created.sub = 'assets'; render(); break;
+    case 'iamax-created-sub-combinations': state.iamax.created.sub = 'combinations'; render(); break;
+    case 'iamax-created-sub-pages': state.iamax.created.sub = 'pages'; render(); break;
+    case 'iamax-created-csv': downloadIaMaxCreatedCsv(); break;
     case 'iamax-tab-cruce': state.iamax.tab = 'cruce'; render(); break;
 
     case 'exclusiones-api-load-accounts': loadContentExclusionsGoogleAdsAccounts(); break;
