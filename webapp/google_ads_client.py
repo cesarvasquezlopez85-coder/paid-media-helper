@@ -1149,10 +1149,12 @@ def fetch_ai_max_combinations(customer_id, campaign_id=None, days=30, limit=500)
     return rows[:limit], len(rows)
 
 
-def fetch_ai_max_landing_pages(customer_id, campaign_id=None, days=30, limit=200):
+def fetch_ai_max_landing_pages(customer_id, campaign_id=None, days=30, limit=200, date_from=None, date_to=None):
     """Páginas a las que IA Max mandó el tráfico con la expansión de URL (expanded_landing_page_view).
-    Las URL traen parámetros de seguimiento distintos en cada clic: se agrupan por esquema + dominio + ruta."""
-    date_from, date_to = _ai_max_date_range(days)
+    Las URL traen parámetros de seguimiento distintos en cada clic: se agrupan por esquema + dominio + ruta.
+    date_from/date_to (la auditoría) mandan sobre `days`."""
+    if not (date_from and date_to):
+        date_from, date_to = _ai_max_date_range(days)
     campaign_filter = f"AND campaign.id = {int(campaign_id)}" if campaign_id else ""
     query = f"""
         SELECT campaign.id, campaign.name, campaign.ai_max_setting.enable_ai_max,
@@ -3071,6 +3073,63 @@ def fetch_audit_data(customer_id, date_from, date_to):
                      "fields": r.get("changeEvent", {}).get("changedFields") or ""} for r in rows]
         block("pmax_changes", pmax_changes)
 
+    # ---- IA Max (reglas M1 a M8) ----
+    # Solo se consulta el resto si hay campañas Search activas con IA Max prendido; si no, el área no aparece.
+    def ai_max_campaigns():
+        rows = _search(customer_id, """
+            SELECT campaign.id, campaign.name, campaign.asset_automation_settings,
+                   campaign.aca_migration_date_time, campaign.broad_match_migration_date_time
+            FROM campaign
+            WHERE campaign.status = 'ENABLED' AND campaign.advertising_channel_type = 'SEARCH'
+              AND campaign.ai_max_setting.enable_ai_max = TRUE
+        """)
+        out = []
+        for r in rows:
+            c = r.get("campaign", {})
+            text_auto = _asset_automation_status(c, "TEXT_ASSET_AUTOMATION")
+            url_auto = _asset_automation_status(c, "FINAL_URL_EXPANSION_TEXT_ASSET_AUTOMATION")
+            out.append({
+                "id": str(c.get("id")), "name": c.get("name") or "(sin nombre)",
+                # True / False, o None si la API no devolvió el ajuste
+                "text_customization": None if text_auto is None else text_auto == "OPTED_IN",
+                "final_url_expansion": None if url_auto is None else url_auto == "OPTED_IN",
+                "aca_migrated": (c.get("acaMigrationDateTime") or "")[:10] or None,
+                "broad_match_migrated": (c.get("broadMatchMigrationDateTime") or "")[:10] or None,
+            })
+        return out
+    block("ai_max_campaigns", ai_max_campaigns)
+
+    if data.get("ai_max_campaigns"):
+        ai_ids = ", ".join(str(int(c["id"])) for c in data["ai_max_campaigns"])
+
+        def ai_max_terms():
+            # Términos con su origen de coincidencia (palabra clave del anunciante o IA Max), sumados por término.
+            rows = _search(customer_id, f"""
+                SELECT campaign.id, segments.search_term_match_source, search_term_view.search_term,
+                       metrics.clicks, metrics.cost_micros, metrics.conversions
+                FROM search_term_view
+                WHERE {between} AND campaign.id IN ({ai_ids})
+                ORDER BY metrics.cost_micros DESC LIMIT 5000
+            """)
+            grouped = {}
+            for r in rows:
+                key = (str(r.get("campaign", {}).get("id")), r.get("segments", {}).get("searchTermMatchSource") or "UNKNOWN",
+                       (r.get("searchTermView", {}).get("searchTerm") or "").strip())
+                m = r.get("metrics", {})
+                g = grouped.setdefault(key, {"campaign_id": key[0], "source": key[1], "term": key[2], "clicks": 0, "cost": 0.0, "conversions": 0.0})
+                g["clicks"] += _int_or_none(m.get("clicks")) or 0
+                g["cost"] += _micros_to_units(_int_or_none(m.get("costMicros"))) or 0
+                g["conversions"] += _float_or_none(m.get("conversions")) or 0
+            return list(grouped.values())
+        block("ai_max_terms", ai_max_terms)
+
+        def ai_max_pages():
+            rows, _total = fetch_ai_max_landing_pages(customer_id, limit=1000, date_from=date_from, date_to=date_to)
+            return rows
+        block("ai_max_pages", ai_max_pages)
+        block("ai_max_url_exclusions", lambda: fetch_ai_max_url_exclusions(customer_id))
+        block("ai_max_negatives", lambda: fetch_account_negative_keywords(customer_id))
+
     return data
 
 
@@ -3177,6 +3236,24 @@ def simulated_audit_data():
             {"level": "ad_group", "campaign_id": "2", "campaign": "Hotel Demo - CO:es - Search Todo Incluido", "channel": "SEARCH", "ad_group_id": "20", "ad_group": "Remarketing", "negative": False, "list": "customers/1/userLists/1"},
         ],
         "audience_modes": {"20": "targeting"},
+        "ai_max_campaigns": [
+            {"id": "1", "name": "Hotel Demo - CO:es - Search Genérica", "text_customization": True, "final_url_expansion": True, "aca_migrated": None, "broad_match_migrated": None},
+            {"id": "6", "name": "Hotel Demo - CO:es - Search Marca", "text_customization": True, "final_url_expansion": False, "aca_migrated": "2026-09-12", "broad_match_migrated": None},
+        ],
+        "ai_max_terms": [
+            {"campaign_id": "1", "source": "ADVERTISER_PROVIDED_KEYWORD", "term": "hotel demo cartagena", "clicks": 600, "cost": 2400.0, "conversions": 30.0},
+            {"campaign_id": "1", "source": "AI_MAX_BROAD_MATCH", "term": "hoteles baratos", "clicks": 260, "cost": 2200.0, "conversions": 0.0},
+            {"campaign_id": "1", "source": "AI_MAX_KEYWORDLESS", "term": "empleo en hoteles de cartagena", "clicks": 120, "cost": 900.0, "conversions": 0.0},
+            {"campaign_id": "1", "source": "AI_MAX_KEYWORDLESS", "term": "hotel con piscina centro historico", "clicks": 90, "cost": 700.0, "conversions": 4.0},
+            {"campaign_id": "6", "source": "ADVERTISER_PROVIDED_KEYWORD", "term": "hotel demo", "clicks": 400, "cost": 700.0, "conversions": 30.0},
+            {"campaign_id": "6", "source": "AI_MAX_BROAD_MATCH", "term": "hotel demo reservas", "clicks": 80, "cost": 300.0, "conversions": 9.0},
+        ],
+        "ai_max_pages": [
+            {"campaign_id": "1", "campaign_name": "Hotel Demo - CO:es - Search Genérica", "page": "https://www.hoteldemo.com/blog/que-hacer-en-cartagena", "impressions": 9000, "clicks": 140, "cost": 820.0, "conversions": 0.0},
+            {"campaign_id": "1", "campaign_name": "Hotel Demo - CO:es - Search Genérica", "page": "https://www.hoteldemo.com/habitaciones", "impressions": 40000, "clicks": 900, "cost": 3900.0, "conversions": 34.0},
+        ],
+        "ai_max_url_exclusions": [],
+        "ai_max_negatives": [{"campaign_id": "1", "campaign_name": "Hotel Demo - CO:es - Search Genérica", "text": "empleo", "match_type": "EXACT"}],
         "pmax_signal_lists": {"g2": [], "g3": ["customers/1/userLists/1"]},
         "pmax_lost_is": [{"campaign_id": "3", "budget_lost": 0.22}, {"campaign_id": "7", "budget_lost": 0.02}],
         "pmax_brand_lists": [],

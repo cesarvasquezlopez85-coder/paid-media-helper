@@ -17,7 +17,7 @@ import re
 
 # Se sube cuando cambian las reglas o el puntaje: el historial lo guarda para avisar que dos auditorías
 # hechas con reglas distintas no son del todo comparables.
-RULES_VERSION = 3  # 3: se suma el área Audiencias (U1 a U5); 2: vuelve A9, leída desde la API v26
+RULES_VERSION = 4  # 4: se suma el área IA Max (M1 a M8); 3: se suma el área Audiencias (U1 a U5); 2: vuelve A9, leída desde la API v26
 
 SEVERITIES = ("critico", "advertencia", "info")
 SEVERITY_POINTS = {"critico": 5, "advertencia": 2, "info": 0}
@@ -60,6 +60,12 @@ THRESHOLDS = {
     "pmax_changes_14d": 3,             # P11: más de N cambios en 14 días
     "list_min_search": 1000,           # U2: usuarios mínimos de una lista para usarla en Search
     "list_min_display": 100,           # U2: y en Display, Demand Gen y demás redes
+    "ai_max_waste_share": 0.20,        # M5: términos de IA Max sin conversión >= 20% del gasto de la campaña
+    "ai_max_min_clicks": 30,           # M5 y M6: muestra mínima de clics de IA Max
+    "ai_max_cpa_ratio": 1.5,           # M6: CPA de IA Max > 1,5x el de las palabras clave (o <= 1/1,5 = oportunidad)
+    "ai_max_cpa_min_conv": 3,          # M6: conversiones mínimas de cada lado para comparar
+    "ai_max_page_cost_share": 0.05,    # M7: página con >= 5% del gasto de su campaña y 0 conversiones
+    "ai_max_page_min_clicks": 20,      # M7
     "roas_goal_tolerance": 0.90,       # G1
     "cpa_goal_tolerance": 1.10,        # G1 (meta de CPA)
 }
@@ -117,7 +123,7 @@ NEGATIVE_THEMES = {
 }
 
 DEFAULT_BRAND_CAMPAIGN_WORDS = ("marca", "brand", "branded", "brnd")
-AREAS = ["Conversiones", "Redes y segmentación", "Estructura y puja", "Palabras clave y términos", "Activos", "Automatización", "Performance Max", "Audiencias", "Rendimiento contra la meta"]
+AREAS = ["Conversiones", "Redes y segmentación", "Estructura y puja", "Palabras clave y términos", "Activos", "Automatización", "Performance Max", "IA Max", "Audiencias", "Rendimiento contra la meta"]
 
 
 # Listas que Google arma solo (optimizadas, parecidas): no son listas propias del hotel.
@@ -881,6 +887,150 @@ def run_audit(data, ctx, days):
                        [[lab, _money(t[0], cur), f"{t[1]:,.1f}", _money(t[0] / t[1], cur) if t[1] else "—", f"{t[2] / t[0] * 100:.0f}%" if t[2] and t[0] else "—"]
                         for lab, t in (("Performance Max", pm_c), ("Search genérico", sg_c))])))
 
+    # ---- M. IA Max ------------------------------------------------------------
+    # Campañas Search con IA Max prendido: dónde está, qué automatizaciones tiene y si lo que sirve rinde.
+    # Los términos se separan por origen de coincidencia: AI_MAX_* los eligió IA Max; ADVERTISER_PROVIDED_KEYWORD, las palabras clave.
+    AREA_M = "IA Max"
+    AI_SOURCES = ("AI_MAX_KEYWORDLESS", "AI_MAX_BROAD_MATCH")
+    ai_camps = data.get("ai_max_campaigns")
+    ai_max_present = bool(ai_camps)
+    M_RULES = (("M1", "IA Max en campaña de marca"), ("M2", "Expansión de URL sin páginas excluidas"), ("M3", "Textos automáticos"),
+               ("M4", "Campañas migradas a IA Max"), ("M5", "Términos de IA Max sin conversión"), ("M6", "CPA de IA Max contra el de las palabras clave"),
+               ("M7", "Páginas de la expansión de URL sin conversión"), ("M8", "Términos de IA Max que ya están negativizados"))
+    if ai_camps is None:
+        for fid, t in M_RULES:
+            nv(fid, t, "No se pudo leer qué campañas tienen IA Max: " + unavailable.get("ai_max_campaigns", "sin detalle"))
+    elif ai_camps:
+        ai_by_id = {c["id"]: c for c in ai_camps}
+        spend = lambda cid: _num((by_id.get(cid) or {}).get("cost"))
+
+        # M1 — IA Max en una campaña de marca
+        brand_ai = [c for c in ai_camps if _is_brand_name(c["name"], brand_words)]
+        if brand_ai:
+            findings.append(_finding("M1", AREA_M, "advertencia", "IA Max está prendido en una campaña de marca",
+                "En una campaña de marca el objetivo es cuidar las búsquedas del propio hotel. IA Max amplía a términos que no están en las palabras clave y puede abrirla a búsquedas que no son de marca, con la puja de marca.",
+                "Apagar IA Max en la campaña de marca, o mantenerlo solo si se decide a propósito y se revisan los términos que sirve.",
+                [f"{c['name']}: {_money(spend(c['id']), cur)} de gasto" for c in brand_ai]))
+
+        # M2 — expansión de URL prendida y ninguna página excluida en esa campaña
+        excl = data.get("ai_max_url_exclusions")
+        if excl is None:
+            nv("M2", "Expansión de URL sin páginas excluidas", "No se pudieron leer las exclusiones de página: " + unavailable.get("ai_max_url_exclusions", "sin detalle"))
+        else:
+            with_excl = {e.get("campaign_id") for e in excl}
+            open_exp = [c for c in ai_camps if c.get("final_url_expansion") and c["id"] not in with_excl]
+            if open_exp:
+                findings.append(_finding("M2", AREA_M, "advertencia", "La expansión de URL está prendida y no hay ninguna página excluida",
+                    "Con la expansión de URL, Google puede mandar el tráfico a cualquier página del sitio (blog, política de privacidad, trabaje con nosotros...). Sin exclusiones, esas páginas reciben clics pagados.",
+                    "Revisar a qué páginas manda el tráfico y excluir las que no deban recibirlo (IA Max > Excluir páginas).",
+                    [f"{c['name']}: {_money(spend(c['id']), cur)} de gasto" for c in open_exp]))
+
+        # M3 — textos automáticos prendidos (informativa)
+        txt_on = [c for c in ai_camps if c.get("text_customization")]
+        if txt_on:
+            findings.append(_finding("M3", AREA_M, "info", "IA Max tiene los textos automáticos prendidos",
+                "Google puede escribir títulos y descripciones propios a partir del sitio. Si el hotel tiene tono de marca, tarifas o promociones que no se pueden contradecir, conviene revisar lo que crea. Solo informativo.",
+                "Revisar los recursos creados por IA Max (IA Max > Qué creó IA Max) y, si algo no sirve, apagar los textos automáticos o ajustar las pautas.",
+                [c["name"] for c in txt_on]))
+
+        # M4 — campañas migradas solas a IA Max (informativa)
+        migrated = [c for c in ai_camps if c.get("aca_migrated") or c.get("broad_match_migrated")]
+        if migrated:
+            findings.append(_finding("M4", AREA_M, "info", "Campañas que Google migró a IA Max o a concordancia amplia",
+                "Estas campañas tuvieron una migración automática (o por una recomendación aplicada). Conviene comparar su rendimiento antes y después. Solo informativo.",
+                "Revisar el rendimiento desde la fecha de migración y confirmar que se quiere mantener.",
+                [f"{c['name']}: " + " · ".join(x for x in (f"IA Max migrado el {c['aca_migrated']}" if c.get("aca_migrated") else "",
+                                                          f"concordancia amplia migrada el {c['broad_match_migrated']}" if c.get("broad_match_migrated") else "") if x)
+                 for c in migrated]))
+
+        terms = data.get("ai_max_terms")
+        if terms is None:
+            for fid, t in (("M5", "Términos de IA Max sin conversión"), ("M6", "CPA de IA Max contra el de las palabras clave"), ("M8", "Términos de IA Max que ya están negativizados")):
+                nv(fid, t, "No se pudieron leer los términos por origen de coincidencia: " + unavailable.get("ai_max_terms", "sin detalle"))
+        else:
+            # M5 — gasto de IA Max sin conversión como parte del gasto de la campaña
+            waste_lines, waste_rows = [], []
+            for c in ai_camps:
+                mine = [t for t in terms if t["campaign_id"] == c["id"] and t["source"] in AI_SOURCES]
+                lost = [t for t in mine if _num(t["conversions"]) == 0 and _num(t["cost"]) > 0]
+                lost_cost, lost_clicks = sum(_num(t["cost"]) for t in lost), sum(int(t["clicks"] or 0) for t in lost)
+                if spend(c["id"]) > 0 and lost_cost / spend(c["id"]) >= T["ai_max_waste_share"] and lost_clicks >= T["ai_max_min_clicks"]:
+                    waste_lines.append(f"{c['name']}: {_money(lost_cost, cur)} ({lost_cost / spend(c['id']):.0%} del gasto de la campaña) en términos de IA Max sin conversión, {lost_clicks:,} clics")
+                    waste_rows += [[c["name"], t["term"], "IA Max amplio" if t["source"] == "AI_MAX_BROAD_MATCH" else "IA Max sin palabra clave", _money(_num(t["cost"]), cur), f"{int(t['clicks'] or 0):,}"]
+                                   for t in sorted(lost, key=lambda x: -_num(x["cost"]))[:5]]
+            if waste_lines:
+                findings.append(_finding("M5", AREA_M, "advertencia", "Los términos que eligió IA Max gastan sin convertir",
+                    f"En estas campañas, los términos que IA Max eligió por su cuenta y no convirtieron suman {T['ai_max_waste_share']:.0%} o más del gasto de la campaña. Es el costo de la expansión que no está dando reservas.",
+                    "Negativizar los términos que no sirven (sección Negativización) o acotar la expansión: apagar la expansión de URL o IA Max en esa campaña.",
+                    waste_lines, table=(["Campaña", "Término", "Origen", "Gasto", "Clics"], waste_rows)))
+
+            # M6 — CPA de lo que sirve IA Max frente al de las palabras clave de la misma campaña
+            slow, fast = [], []
+            for c in ai_camps:
+                def agg(sources):
+                    ts = [t for t in terms if t["campaign_id"] == c["id"] and t["source"] in sources]
+                    return sum(_num(t["cost"]) for t in ts), sum(_num(t["conversions"]) for t in ts), sum(int(t["clicks"] or 0) for t in ts)
+                ai_cost, ai_conv, ai_clk = agg(AI_SOURCES)
+                kw_cost, kw_conv, _kw_clk = agg(("ADVERTISER_PROVIDED_KEYWORD",))
+                if ai_conv < T["ai_max_cpa_min_conv"] or kw_conv < T["ai_max_cpa_min_conv"] or ai_clk < T["ai_max_min_clicks"]:
+                    continue
+                ai_cpa, kw_cpa = ai_cost / ai_conv, kw_cost / kw_conv
+                line = f"{c['name']}: CPA de IA Max {_money(ai_cpa, cur)} ({ai_conv:.0f} conv.) contra {_money(kw_cpa, cur)} de las palabras clave ({kw_conv:.0f} conv.)"
+                if ai_cpa > kw_cpa * T["ai_max_cpa_ratio"]:
+                    slow.append(line)
+                elif ai_cpa <= kw_cpa / T["ai_max_cpa_ratio"]:
+                    fast.append(line)
+            if slow:
+                findings.append(_finding("M6", AREA_M, "advertencia", "IA Max cuesta mucho más por reserva que las palabras clave",
+                    f"El CPA de lo que sirve IA Max supera en {T['ai_max_cpa_ratio']:.1f}x o más al de las palabras clave de la misma campaña: la expansión está comprando reservas más caras.",
+                    "Revisar los términos y las páginas de IA Max; si no se corrige, limitar la expansión o apagar IA Max en esa campaña.", slow))
+            if fast:
+                findings.append(_finding("M6", AREA_M, "info", "IA Max trae reservas bastante más baratas que las palabras clave",
+                    "El CPA de lo que sirve IA Max es mucho menor que el de las palabras clave de la misma campaña. Puede ser una oportunidad de dar más presupuesto o de replicarlo en otras campañas.",
+                    "Validar que los términos tengan intención real de reserva antes de subir el presupuesto.", fast, kind="oportunidad"))
+
+            # M8 — términos de IA Max que ya contienen un negativo de su campaña (mismo criterio que el cruce de IA Max)
+            negs = data.get("ai_max_negatives")
+            if negs is None:
+                nv("M8", "Términos de IA Max que ya están negativizados", "No se pudieron leer las palabras clave negativas: " + unavailable.get("ai_max_negatives", "sin detalle"))
+            else:
+                by_camp = {}
+                for n in negs:
+                    if n.get("campaign_id") and n.get("text"):
+                        by_camp.setdefault(n["campaign_id"], []).append(n["text"].lower())
+                hits = []
+                for t in terms:
+                    if t["source"] not in AI_SOURCES:
+                        continue
+                    low = (t["term"] or "").lower()
+                    neg = next((x for x in by_camp.get(t["campaign_id"], []) if x in low), None)
+                    if neg:
+                        hits.append((t, neg))
+                if hits:
+                    hits.sort(key=lambda h: -_num(h[0]["cost"]))
+                    cost_hit = sum(_num(h[0]["cost"]) for h in hits)
+                    findings.append(_finding("M8", AREA_M, "advertencia", "IA Max sirvió términos que contienen un negativo de la campaña",
+                        f"{len(hits)} términos servidos por IA Max (gasto {_money(cost_hit, cur)}) contienen una palabra negativa de su campaña. Un negativo de concordancia exacta o de frase no bloquea las variantes que IA Max encuentra. Se revisan las negativas a nivel de campaña.",
+                        "Agregar el negativo en concordancia amplia o de frase, o negativizar el término completo (sección IA Max > Cruce con negativos y Negativización).",
+                        [f"{(ai_by_id.get(h[0]['campaign_id']) or {}).get('name', 'campaña')}: \"{h[0]['term']}\" contiene el negativo \"{h[1]}\" ({_money(_num(h[0]['cost']), cur)})" for h in hits[:8]],
+                        table=(["Campaña", "Término", "Negativo", "Gasto"],
+                               [[(ai_by_id.get(h[0]["campaign_id"]) or {}).get("name", ""), h[0]["term"], h[1], _money(_num(h[0]["cost"]), cur)] for h in hits[:12]])))
+
+        # M7 — páginas a las que la expansión de URL manda tráfico que no convierte
+        pages = data.get("ai_max_pages")
+        if pages is None:
+            nv("M7", "Páginas de la expansión de URL sin conversión", "No se pudieron leer las páginas de destino: " + unavailable.get("ai_max_pages", "sin detalle"))
+        else:
+            bad = [p for p in pages if _num(p["conversions"]) == 0 and int(p["clicks"] or 0) >= T["ai_max_page_min_clicks"]
+                   and spend(p["campaign_id"]) > 0 and _num(p["cost"]) / spend(p["campaign_id"]) >= T["ai_max_page_cost_share"]]
+            if bad:
+                bad.sort(key=lambda p: -_num(p["cost"]))
+                findings.append(_finding("M7", AREA_M, "advertencia", "La expansión de URL manda tráfico pagado a páginas que no convierten",
+                    f"Estas páginas reciben {T['ai_max_page_cost_share']:.0%} o más del gasto de su campaña y ninguna conversión. Suelen ser páginas de contenido (blog, políticas, contacto) que no son de reserva.",
+                    "Excluirlas desde IA Max > Excluir páginas (Google no deja excluir la página de destino del anuncio).",
+                    [f"{p['page']}: {_money(_num(p['cost']), cur)}, {int(p['clicks']):,} clics, 0 conversiones" for p in bad[:8]],
+                    table=(["Página", "Campaña", "Gasto", "Clics"], [[p["page"], p["campaign_name"], _money(_num(p["cost"]), cur), f"{int(p['clicks']):,}"] for p in bad[:12]])))
+
     # ---- U. Audiencias ------------------------------------------------------
     # Listas propias (visitantes, clientes), dónde se usan y en qué modo. Solo lectura.
     ulists = data.get("user_lists")
@@ -1028,6 +1178,8 @@ def run_audit(data, ctx, days):
     by_area = {}
     for area in AREAS:
         if area == "Performance Max" and not pmax_present:
+            continue
+        if area == "IA Max" and not ai_max_present:
             continue
         if area == "Audiencias" and not audiences_present:
             continue
