@@ -90,6 +90,23 @@ Lista inicial de temas negativos (ajusta según mercado e idioma):
 | G1 | ROAS logrado por debajo de la meta del cuestionario | Advertencia | < 90% de la meta | métricas | Seguro |
 | G2 | CPA % por encima del óptimo por tipo de campaña (mismos valores que Rendimiento: Search marca 11%, PMax 20%, Demand Gen 30%, Display 30%, Search genérica 30%) | Advertencia | > óptimo | métricas | Seguro |
 
+### M. IA Max (agregada el 2026-10-22)
+
+Solo aplica a cuentas con campañas Search activas que tengan IA Max prendido; si no hay ninguna, el área no aparece ni cuenta en el puntaje. Los términos se separan por origen de coincidencia (`search_term_match_source`): `AI_MAX_KEYWORDLESS` y `AI_MAX_BROAD_MATCH` los eligió IA Max; `ADVERTISER_PROVIDED_KEYWORD` viene de las palabras clave.
+
+| # | Regla | Severidad | Umbral (editable) | Fuente | API |
+|---|---|---|---|---|---|
+| M1 | IA Max prendido en una campaña de marca | Advertencia | — | `campaign.ai_max_setting` + nombre de campaña | Seguro |
+| M2 | Expansión de URL prendida y la campaña no tiene ninguna página excluida | Advertencia | — | `asset_automation_settings` + criterios WEBPAGE negativos | Seguro |
+| M3 | Textos automáticos prendidos | Info | — | `asset_automation_settings` | Seguro |
+| M4 | Campañas migradas a IA Max o a concordancia amplia | Info | — | `aca_migration_date_time`, `broad_match_migration_date_time` | Verificado (campo legible; sin campañas migradas en la cuenta de prueba) |
+| M5 | Términos de IA Max sin conversión pesan mucho en el gasto de la campaña | Advertencia | >= 20% del gasto de la campaña y >= 30 clics (se bajó de 30% a 20% el 2026-10-22) | `search_term_view` por origen | Seguro |
+| M6 | CPA de IA Max contra el de las palabras clave de la misma campaña | Advertencia / Oportunidad | > 1,5x (advertencia) o <= 1/1,5 (oportunidad); >= 3 conversiones de cada lado y >= 30 clics de IA Max | `search_term_view` por origen | Seguro |
+| M7 | La expansión de URL manda tráfico pagado a páginas que no convierten | Advertencia | página con >= 5% del gasto de su campaña, 0 conversiones y >= 20 clics | `expanded_landing_page_view` | Seguro |
+| M8 | Términos servidos por IA Max que ya contienen un negativo de su campaña | Advertencia | el término contiene el texto del negativo (solo negativos de campaña) | `search_term_view` + `campaign_criterion` | Seguro |
+
+Decisiones del 2026-10-22: se agregan las 8 reglas; M1 queda como advertencia (no crítico); M5 con umbral de 20%. El puntaje por área de IA Max solo se muestra si hay campañas con IA Max. Probado en solo lectura con Estelar Yopal (salen M1, M2 y M3); M5 a M8 se probaron con datos simulados.
+
 ## 3. Puntaje de salud
 
 Se parte de 100: Crítico resta 5 por hallazgo, Advertencia resta 2, Info no resta (pesos cambiados el 2026-10-12: antes 10 y 5). Mínimo 0. Si hay algún Crítico, el puntaje nunca se muestra como "sano" aunque dé alto. También se muestra el puntaje por área (conversiones, redes, estructura, palabras clave, anuncios, automatización), para ver dónde está el problema. Los pesos son propuestos: ajústalos.
