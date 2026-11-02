@@ -414,12 +414,11 @@ const pwChangeState = { status: 'idle', error: null }; // idle | saving | error
 // si se muestra el botón "Administración" del sidebar.
 const currentUser = { username: null, isAdmin: false, isSuperAdmin: false };
 
-// Diseño de la interfaz: "current" es el de siempre y "roiback" el rediseño. Solo un superadmin puede
-// cambiarlo (botón al pie del menú lateral); los demás usuarios siempre ven el actual. El rediseño es
-// otra hoja de estilos (styles-roiback.css) más los colores que este archivo escribe a mano, que pasan
-// por themed() y por las constantes AUDIT_* según el diseño elegido.
-const THEME_KEY = 'pmh_theme';
-let APP_THEME = 'current';
+// Diseño de la interfaz: desde el 2026-11-01 todos los usuarios ven el rediseño Roiback (hoja de estilos
+// styles-roiback.css más los colores que este archivo escribe a mano). El diseño anterior ("current",
+// styles.css) ya no se ofrece, pero themed() y las constantes AUDIT_*_THEMES conservan sus dos valores
+// por si hay que volver atrás con un solo cambio.
+const APP_THEME = 'roiback';
 function themed(current, roiback) { return APP_THEME === 'roiback' ? roiback : current; }
 function themedFontsLink(legacyHref) {
   return `<link rel="preconnect" href="https://fonts.googleapis.com"><link href="${themed(legacyHref, 'https://fonts.googleapis.com/css2?family=Montserrat:wght@600;700;800&family=Lato:wght@400;700&display=swap')}" rel="stylesheet">`;
@@ -8989,7 +8988,7 @@ const AUDIT_REPORT_CSS_ROIBACK = `
 @media print{.ar{max-width:none;padding:0 3px}}
 `;
 
-let AUDIT_REPORT_CSS = AUDIT_REPORT_CSS_CURRENT;
+let AUDIT_REPORT_CSS = AUDIT_REPORT_CSS_ROIBACK;
 
 const AUDIT_PRIORITY_THEMES = {
   current: {
@@ -9009,8 +9008,8 @@ const AUDIT_STACK_COLORS_THEMES = {
   current: ['#14213d', '#f2c419', '#5f7aa8', '#c5c9d3', '#2e9b5f', '#d23c3c'],
   roiback: ['#10222f', '#03a694', '#ff9800', '#7ad2c7', '#d18da3', '#9b9b9b'],
 };
-let AUDIT_PRIORITY = AUDIT_PRIORITY_THEMES.current;
-let AUDIT_STACK_COLORS = AUDIT_STACK_COLORS_THEMES.current;
+let AUDIT_PRIORITY = AUDIT_PRIORITY_THEMES.roiback;
+let AUDIT_STACK_COLORS = AUDIT_STACK_COLORS_THEMES.roiback;
 
 // Evolución del puntaje de una cuenta: `rows` viene del servidor, de la auditoría más vieja a la más
 // nueva (la última es la actual). Se usa dentro del informe (pantalla, HTML y Markdown) y en la vista
@@ -11536,11 +11535,6 @@ fetch('/api/me').then((r) => r.json()).then((data) => {
   currentUser.username = data.username;
   currentUser.isAdmin = !!data.is_admin;
   currentUser.isSuperAdmin = !!data.is_super_admin;
-  if (currentUser.isSuperAdmin) {
-    let saved = null;
-    try { saved = localStorage.getItem(THEME_KEY); } catch (e) { /* sin almacenamiento: se queda el diseño actual */ }
-    if (saved === 'roiback') applyTheme('roiback'); else updateThemeButton();
-  }
   const navAdmin = document.getElementById('nav-admin');
   if (navAdmin && currentUser.isAdmin) navAdmin.style.display = '';
   const navCopys = document.getElementById('nav-copys');
@@ -11549,41 +11543,6 @@ fetch('/api/me').then((r) => r.json()).then((data) => {
     forcePasswordChange = true;
     render();
   }
-});
-
-// Cambio de diseño (solo superadmin): actual <-> Roiback. Cambia la hoja de estilos y los colores que el
-// código escribe a mano, y vuelve a pintar la pantalla cuando la hoja nueva termina de cargar.
-function updateThemeButton() {
-  const row = document.getElementById('sidebar-theme-row');
-  const btn = document.getElementById('sidebar-theme');
-  if (!row || !btn) return;
-  row.style.display = currentUser.isSuperAdmin ? '' : 'none';
-  btn.textContent = APP_THEME === 'roiback' ? 'Ver diseño actual' : 'Ver diseño nuevo (Roiback)';
-}
-
-function applyTheme(theme) {
-  APP_THEME = theme === 'roiback' && currentUser.isSuperAdmin ? 'roiback' : 'current';
-  document.documentElement.dataset.theme = APP_THEME;
-  AUDIT_PRIORITY = AUDIT_PRIORITY_THEMES[APP_THEME];
-  AUDIT_STACK_COLORS = AUDIT_STACK_COLORS_THEMES[APP_THEME];
-  AUDIT_REPORT_CSS = APP_THEME === 'roiback' ? AUDIT_REPORT_CSS_ROIBACK : AUDIT_REPORT_CSS_CURRENT;
-  updateThemeButton();
-  const link = document.getElementById('app-theme-css');
-  const href = APP_THEME === 'roiback' ? 'styles-roiback.css' : 'styles.css';
-  if (link && link.getAttribute('href') !== href) {
-    link.addEventListener('load', () => render(), { once: true });
-    // Si la hoja nueva no carga, se vuelve al diseño actual en vez de dejar la pantalla sin estilos.
-    link.addEventListener('error', () => { if (APP_THEME === 'roiback') applyTheme('current'); }, { once: true });
-    link.setAttribute('href', href);
-  } else {
-    render();
-  }
-}
-
-document.getElementById('sidebar-theme')?.addEventListener('click', () => {
-  const next = APP_THEME === 'roiback' ? 'current' : 'roiback';
-  try { localStorage.setItem(THEME_KEY, next); } catch (e) { /* solo se pierde el recuerdo de la elección */ }
-  applyTheme(next);
 });
 
 document.getElementById('sidebar-logout')?.addEventListener('click', () => {
