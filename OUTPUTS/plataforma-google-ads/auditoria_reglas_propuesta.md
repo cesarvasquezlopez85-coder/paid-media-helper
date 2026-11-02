@@ -135,7 +135,7 @@ Igual que en Rendimiento: la plataforma calcula los hallazgos y la IA los interp
 
 ## 8. Estado de la construcción (2026-10-11)
 
-Construida la sección **Auditoría de cuenta** (menú, justo debajo de Rendimiento): cuestionario, selector de cuenta con filtro por MCC, resultados con puntaje por área, lectura con IA (solo admins) e informe descargable en HTML y Markdown. Código: `webapp/account_audit.py` (reglas), `fetch_audit_data` en `webapp/google_ads_client.py` (consultas, solo lectura) y la pantalla en `webapp/app.js`.
+Construida la sección **Auditoría de cuenta** (menú, justo debajo de Rendimiento): cuestionario, selector de cuenta con filtro por MCC, resultados con puntaje por área, lectura con IA (abierta a todos los usuarios desde 2026-11-01) e informe descargable en HTML y Markdown. Código: `webapp/account_audit.py` (reglas), `fetch_audit_data` en `webapp/google_ads_client.py` (consultas, solo lectura) y la pantalla en `webapp/app.js`.
 
 Pesos del puntaje aplicados: Crítico resta 5, Advertencia resta 2, Info no resta.
 
