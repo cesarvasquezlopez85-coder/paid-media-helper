@@ -1013,7 +1013,8 @@ export function extractSignals(html, url) {
 
   const { brand, keyword } = guessBrandAndKeyword(title, h1, domain);
 
-  return { title, meta_description: metaDescription, h1, h2s, li_texts: liTexts, cta_texts: ctaTexts, offers: finalOffers, brand, keyword, domain };
+  // offers_detected: solo las ofertas que de verdad aparecen en la página (offers cae a frases genéricas si no hay ninguna).
+  return { title, meta_description: metaDescription, h1, h2s, li_texts: liTexts, cta_texts: ctaTexts, offers: finalOffers, offers_detected: offers.slice(0, 10), brand, keyword, domain };
 }
 
 // Evita duplicar texto cuando la oferta detectada ya forma parte de la

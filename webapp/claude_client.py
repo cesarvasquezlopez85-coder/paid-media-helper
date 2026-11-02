@@ -142,3 +142,228 @@ def analizar_auditoria(resumen, findings, no_verificables, contexto):
     if not text:
         raise RuntimeError("Claude no devolvió texto en la respuesta.")
     return text
+
+
+# ---------------------------------------------------------------------------
+# Generador de copys con IA. Un formato = un conjunto de grupos de texto, cada
+# uno con su cantidad y su límite de caracteres. Los límites salen de la ayuda
+# de Google Ads (consultada el 2026-11-01): Search (RSA) 15 títulos de 30 y 4
+# descripciones de 90; Performance Max 3-15 títulos de 30 (uno de 15 o menos),
+# 1-5 títulos largos de 90 y 2-5 descripciones de 90; Video (acción) 30/90/90 y
+# botón de 10; In-feed 2 líneas de 40 y 2 de 35. Demand Gen (títulos de 40 y
+# descripciones de 90, hasta 5) NO aparece en la página oficial que se pudo
+# leer: está por verificar en el editor de Google Ads.
+# ---------------------------------------------------------------------------
+
+COPY_FORMATS = {
+    "search": {
+        "label": "Search (anuncio de búsqueda responsivo)",
+        "groups": [
+            {"key": "titulares", "label": "Títulos", "count": 15, "limit": 30, "kind": "headline"},
+            {"key": "descripciones", "label": "Descripciones", "count": 4, "limit": 90, "kind": "description"},
+        ],
+    },
+    "pmax": {
+        "label": "Performance Max (grupo de recursos)",
+        "groups": [
+            {"key": "titulares", "label": "Títulos", "count": 15, "limit": 30, "kind": "headline", "need_short": 15},
+            {"key": "titulares_largos", "label": "Títulos largos", "count": 5, "limit": 90, "kind": "headline"},
+            {"key": "descripciones", "label": "Descripciones", "count": 5, "limit": 90, "kind": "description"},
+        ],
+        "note": "El nombre del negocio (máx. 25) debe coincidir con el nombre verificado o el dominio, y el botón de acción se elige en Google Ads: aquí no se generan.",
+    },
+    "dgen": {
+        "label": "Demand Gen",
+        "groups": [
+            {"key": "titulares", "label": "Títulos", "count": 5, "limit": 40, "kind": "headline"},
+            {"key": "descripciones", "label": "Descripciones", "count": 5, "limit": 90, "kind": "description"},
+        ],
+        "note": "Límites de Demand Gen por verificar en el editor de Google Ads: su página oficial de especificaciones no los lista. El nombre del negocio (máx. 25) va aparte.",
+    },
+    "meta": {
+        "label": "Meta (Facebook e Instagram)",
+        "groups": [
+            {"key": "textos_principales", "label": "Texto principal", "count": 5, "limit": 125, "kind": "description"},
+            {"key": "titulares", "label": "Titulares", "count": 5, "limit": 27, "kind": "headline"},
+            {"key": "descripciones", "label": "Descripciones del enlace", "count": 3, "limit": 30, "kind": "headline"},
+        ],
+        "note": "Límites recomendados por Meta para el feed (texto principal de 50 a 150, se corta con \"Ver más\" cerca de 125; titular de 27); verifícalos en el Administrador de anuncios. El botón de acción se elige de una lista de Meta, aquí no se genera.",
+        "extra": "Es publicidad para redes sociales: tono más conversacional y cercano que en buscadores, puede abrir con una pregunta o una imagen mental, pero sin referirte a características personales de quien lo lee (edad, estado civil, salud, etc.) y sin prometer resultados.",
+    },
+    "youtube": {
+        "label": "YouTube (video)",
+        "groups": [
+            {"key": "titulares", "label": "Títulos (video)", "count": 5, "limit": 30, "kind": "headline"},
+            {"key": "titulares_largos", "label": "Títulos largos (video)", "count": 5, "limit": 90, "kind": "headline"},
+            {"key": "descripciones", "label": "Descripciones (video)", "count": 5, "limit": 90, "kind": "description"},
+            {"key": "botones", "label": "Texto del botón", "count": 3, "limit": 10, "kind": "cta"},
+            {"key": "infeed_titulares", "label": "In-feed: líneas de título", "count": 6, "limit": 40, "kind": "headline"},
+            {"key": "infeed_descripciones", "label": "In-feed: líneas de descripción", "count": 6, "limit": 35, "kind": "description"},
+        ],
+        "note": "El anuncio in-feed usa 2 líneas de título (40) y 2 de descripción (35): se dan líneas sueltas para combinar.",
+    },
+}
+
+COPY_LANGUAGES = {"es": "español", "en": "inglés", "pt": "portugués"}
+COPY_MAX_TOKENS = 3000
+COPY_TIMEOUT_SECONDS = 90
+# Afirmaciones que Google suele rechazar o que el hotel no puede respaldar: solo se aceptan si la página ya las dice.
+COPY_RISKY_WORDS = ("mejor", "número 1", "numero 1", "n.º 1", "#1", "garantizad", "único", "unico", "líder", "lider",
+                    "el más", "la más", "best", "number one", "guarantee", "melhor", "garantid")
+COPY_EMOJI_RE = None  # se compila al primer uso (re no está importado arriba)
+
+COPY_SYSTEM_PROMPT = (
+    "Eres un redactor publicitario senior de Google Ads especializado en hoteles. Escribes textos para anuncios a "
+    "partir de lo que dice una página web del hotel.\n\n"
+    "REGLAS ESTRICTAS:\n"
+    "1. Usa SOLO hechos que aparezcan en los datos de la página (nombre, ciudad, servicios, ofertas). No inventes "
+    "precios, descuentos, estrellas, premios, cercanías ni servicios. Si un dato no está, no lo menciones.\n"
+    "2. Prohibido: superlativos y promesas absolutas (mejor, número 1, garantizado, único, líder) salvo que la "
+    "página los diga literalmente. Nada de emojis, nada de TODO EN MAYÚSCULAS, sin signos de exclamación en títulos "
+    "y como máximo uno en una descripción. No nombres a otras marcas.\n"
+    "3. Respeta el límite de caracteres de cada grupo contando espacios; cada texto debe ser distinto de los demás "
+    "y aportar un ángulo diferente (ubicación, servicio, oferta, motivo para reservar, llamada a la acción).\n"
+    "4. Escribe en el idioma pedido (sin mezclar idiomas: nada de \"off\", \"free\" o \"check-in\" si el idioma es español, salvo nombres propios), con ortografía y tildes correctas, en un tono cálido y directo.\n"
+    "5. Responde SOLO con un objeto JSON válido, sin texto antes ni después ni bloques de código, con esta forma: "
+    "{\"grupos\": {\"<clave>\": [\"texto\", ...], ...}}."
+)
+
+
+def _copy_http(system, user_content):
+    body = {
+        "model": MODEL,
+        "max_tokens": COPY_MAX_TOKENS,
+        "output_config": {"effort": "medium"},
+        "system": system,
+        "messages": [{"role": "user", "content": user_content}],
+    }
+    req = urllib.request.Request(
+        API_URL, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=COPY_TIMEOUT_SECONDS) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Claude API respondió {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"No se pudo conectar a la API de Claude: {e.reason}") from e
+    if payload.get("stop_reason") == "refusal":
+        raise RuntimeError("Claude no generó una respuesta para esta página (refusal).")
+    text = "\n".join(b.get("text", "") for b in payload.get("content", []) if b.get("type") == "text").strip()
+    if not text:
+        raise RuntimeError("Claude no devolvió texto en la respuesta.")
+    return text
+
+
+def _parse_copy_json(text):
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise RuntimeError("La respuesta de Claude no trae un JSON válido.")
+    data = json.loads(text[start:end + 1])
+    grupos = data.get("grupos") if isinstance(data, dict) else None
+    if not isinstance(grupos, dict):
+        raise RuntimeError("La respuesta de Claude no trae el campo 'grupos'.")
+    return grupos
+
+
+def _page_corpus(signals):
+    """Todo el texto de la página que se le mostró a Claude, en minúsculas: sirve para comprobar que un
+    número o una afirmación del copy sí sale de la página."""
+    parts = [signals.get("title"), signals.get("meta_description"), signals.get("h1"), signals.get("brand"), signals.get("keyword"), signals.get("domain")]
+    for k in ("h2s", "li_texts", "cta_texts", "offers"):
+        parts += [str(x) for x in (signals.get(k) or [])]
+    return " ".join(str(p) for p in parts if p).lower()
+
+
+def _copy_item_ok(text, group, corpus):
+    import re as _re
+    global COPY_EMOJI_RE
+    if COPY_EMOJI_RE is None:
+        COPY_EMOJI_RE = _re.compile("[\U0001F300-\U0001FAFF☀-➿⭐⬆️]")
+    if not text or len(text) > group["limit"]:
+        return False
+    if COPY_EMOJI_RE.search(text):
+        return False
+    kind = group["kind"]
+    if kind in ("headline", "cta") and "!" in text:
+        return False
+    if text.count("!") > 1:
+        return False
+    letters = [w for w in _re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]{4,}", text)]
+    if letters and sum(1 for w in letters if w.isupper()) >= 2:
+        return False
+    low = text.lower()
+    for num in _re.findall(r"\d+(?:[.,]\d+)?", text):
+        if num not in corpus:
+            return False
+    for word in COPY_RISKY_WORDS:
+        if word in low and word not in corpus:
+            return False
+    return True
+
+
+def generar_copys(formato, signals, idioma="es", keywords=""):
+    """Devuelve {"formato", "label", "note", "groups": [{key,label,limit,count,items:[{text,chars}],short}]}.
+    Pide un poco más de lo necesario, valida largos y afirmaciones, y si falta algo repite una vez solo lo que falta."""
+    spec = COPY_FORMATS.get(formato)
+    if not spec:
+        raise ValueError("Formato no válido.")
+    idioma_txt = COPY_LANGUAGES.get(idioma, "español")
+    sig = {k: signals.get(k) for k in ("title", "meta_description", "h1", "h2s", "li_texts", "cta_texts", "offers", "brand", "keyword", "domain")}
+    corpus = _page_corpus(sig)
+    kw = (keywords or "").strip()[:300]
+    accepted = {g["key"]: [] for g in spec["groups"]}
+
+    def request_missing(groups_needed):
+        lines = []
+        for g, n in groups_needed:
+            extra = f" Incluye al menos 3 de 15 caracteres o menos." if g.get("need_short") and not any(len(t) <= g["need_short"] for t in accepted[g["key"]]) else ""
+            have = accepted[g["key"]]
+            avoid = f" Ya existen (no los repitas): {json.dumps(have, ensure_ascii=False)}." if have else ""
+            lines.append(f"- clave \"{g['key']}\" ({g['label']}): {n} textos de máximo {g['limit']} caracteres.{extra}{avoid}")
+        user_content = (
+            f"Formato: {spec['label']}. Idioma: {idioma_txt}.\n"
+            + (f"Palabras clave que el equipo quiere que aparezcan cuando encajen: {kw}\n" if kw else "")
+            + (f"Indicación del formato: {spec['extra']}\n" if spec.get("extra") else "")
+            + "\nDatos de la página (lo único que puedes afirmar):\n" + json.dumps(sig, ensure_ascii=False)
+            + "\n\nEscribe estos grupos:\n" + "\n".join(lines)
+        )
+        return _parse_copy_json(_copy_http(COPY_SYSTEM_PROMPT, user_content))
+
+    for attempt in range(2):
+        needed = []
+        for g in spec["groups"]:
+            have = accepted[g["key"]]
+            missing = g["count"] - len(have)
+            if g.get("need_short") and not any(len(t) <= g["need_short"] for t in have):
+                missing = max(missing, 3)
+            if missing > 0:
+                # pedir de más la primera vez: algunos textos no pasarán la validación
+                needed.append((g, missing + (4 if attempt == 0 else 3)))
+        if not needed:
+            break
+        grupos = request_missing(needed)
+        for g, _n in needed:
+            seen = {t.lower() for t in accepted[g["key"]]}
+            for raw in grupos.get(g["key"], []) or []:
+                text = " ".join(str(raw).split()).strip().strip('"').strip()
+                if text.lower() in seen or not _copy_item_ok(text, g, corpus):
+                    continue
+                seen.add(text.lower())
+                accepted[g["key"]].append(text)
+
+    out_groups = []
+    for g in spec["groups"]:
+        items = accepted[g["key"]][:g["count"]]
+        if g.get("need_short") and items and not any(len(t) <= g["need_short"] for t in items):
+            short = next((t for t in accepted[g["key"]][g["count"]:] if len(t) <= g["need_short"]), None)
+            if short:
+                items[-1] = short
+        out_groups.append({
+            "key": g["key"], "label": g["label"], "limit": g["limit"], "count": g["count"],
+            "items": [{"text": t, "chars": len(t)} for t in items],
+            "short": len(items) < g["count"],
+            "need_short": g.get("need_short"),
+        })
+    return {"formato": formato, "label": spec["label"], "note": spec.get("note", ""), "groups": out_groups}

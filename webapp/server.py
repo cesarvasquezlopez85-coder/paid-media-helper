@@ -26,10 +26,12 @@ Correr con:
 import datetime
 import hashlib
 import http.cookies
+import ipaddress
 import json
 import os
 import re
 import secrets
+import socket
 import sqlite3
 import threading
 import time
@@ -183,6 +185,9 @@ WRITE_RATE_LIMIT = (30, 60)
 # conservador que el de escritura normal. Por usuario, no por IP.
 _ai_limiter = RateLimiter()
 AI_RATE_LIMIT = (10, 3600)
+# Generador de copys con IA: su propio tope por usuario (hasta 2 llamadas a Claude por generación).
+_copy_limiter = RateLimiter()
+COPY_RATE_LIMIT = (10, 3600)
 # Cada auditoría hace ~12 consultas a Google Ads, que comparten la cuota del
 # developer token de todo el equipo — por eso su propio tope por usuario.
 _audit_limiter = RateLimiter()
@@ -439,6 +444,39 @@ def verify_password(password, salt_hex, expected_hash):
     _, digest = hash_password(password, salt_hex)
     return secrets.compare_digest(digest, expected_hash)
 
+
+
+# /api/fetch descarga páginas a pedido de un usuario: sin este control podría usarse para que el servidor
+# consulte direcciones internas (localhost, la red privada de Railway, el servicio de metadatos de la nube).
+def _url_is_public(url):
+    try:
+        parts = urlparse(url)
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https") or not host or port not in (None, 80, 443):
+        return False
+    try:
+        infos = socket.getaddrinfo(host, port or (443 if parts.scheme == "https" else 80), proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        return False
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if ip.version == 6 and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
+            return False
+    return True
+
+
+class _PublicOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not _url_is_public(newurl):
+            raise urllib.error.URLError("la página redirige a una dirección no permitida")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_PUBLIC_ONLY_OPENER = urllib.request.build_opener(_PublicOnlyRedirect)
 
 class Handler(SimpleHTTPRequestHandler):
     # -------------------------------------------------------------- GET ---
@@ -713,6 +751,11 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_ai_analizar_rendimiento(payload)
+        elif path == "/api/ai/generar-copys":
+            # Solo administradores mientras se afinan los textos (2026-11-01); luego se abre con _require_auth_json.
+            if not self._require_admin_json():
+                return
+            self._handle_ai_generar_copys(payload)
         elif path == "/api/admin/users/delete":
             if not self._require_admin_json():
                 return
@@ -2100,6 +2143,40 @@ class Handler(SimpleHTTPRequestHandler):
             print(f"[claude-error] {e}", flush=True)
             self._send_json(502, {"error": "No se pudo generar el análisis con IA. Intenta de nuevo en unos minutos."})
 
+    def _handle_ai_generar_copys(self, payload):
+        user = self._get_current_user()
+        if not claude_client.is_configured():
+            self._send_json(503, {"error": "La integración con Claude no está configurada en el servidor (falta ANTHROPIC_API_KEY)."})
+            return
+        formato = payload.get("formato")
+        if formato not in claude_client.COPY_FORMATS:
+            self._send_json(400, {"error": "Elige un formato: Search, Performance Max, Demand Gen, YouTube o Meta."})
+            return
+        signals = payload.get("signals")
+        if not isinstance(signals, dict) or not (signals.get("title") or signals.get("h1") or signals.get("meta_description")):
+            self._send_json(400, {"error": "Primero analiza una página: faltan los datos de la página (título, encabezado o descripción)."})
+            return
+        if not _copy_limiter.allow(f"user:{user['id']}", *COPY_RATE_LIMIT):
+            self._send_json(429, {"error": "Alcanzaste el límite de generaciones con IA por esta hora. Intenta más tarde."})
+            return
+        idioma = payload.get("idioma") if payload.get("idioma") in claude_client.COPY_LANGUAGES else "es"
+        keywords = str(payload.get("keywords") or "")[:300]
+        # Recorta lo que se manda a Claude: listas largas del sitio no aportan y cuestan tokens.
+        trimmed = {
+            "title": str(signals.get("title") or "")[:200], "meta_description": str(signals.get("meta_description") or "")[:400],
+            "h1": str(signals.get("h1") or "")[:200], "brand": str(signals.get("brand") or "")[:100],
+            "keyword": str(signals.get("keyword") or "")[:150], "domain": str(signals.get("domain") or "")[:100],
+        }
+        for key, n, width in (("h2s", 10, 150), ("li_texts", 30, 120), ("cta_texts", 15, 60), ("offers", 10, 80)):
+            raw = signals.get(key)
+            trimmed[key] = [str(x)[:width] for x in raw[:n]] if isinstance(raw, list) else []
+        try:
+            result = claude_client.generar_copys(formato, trimmed, idioma, keywords)
+            self._send_json(200, result)
+        except Exception as e:  # noqa: BLE001
+            print(f"[claude-error] copys: {e}", flush=True)
+            self._send_json(502, {"error": "No se pudo generar el copy con IA. Intenta de nuevo en unos minutos."})
+
     # Escritura real sobre la cuenta del cliente — a diferencia de todos los
     # demás endpoints de /api/google-ads/, este modifica Google Ads. Por
     # default (validate_only ausente o true) SIEMPRE valida sin aplicar; el
@@ -2814,6 +2891,10 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(400, {"error": "La URL debe empezar con http:// o https://."})
             return
 
+        if not _url_is_public(url):
+            self._send_json(400, {"error": "Esa dirección no está permitida: solo se pueden analizar páginas públicas de internet."})
+            return
+
         req = urllib.request.Request(
             url,
             headers={
@@ -2825,7 +2906,7 @@ class Handler(SimpleHTTPRequestHandler):
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+            with _PUBLIC_ONLY_OPENER.open(req, timeout=TIMEOUT_SECONDS) as resp:
                 raw = resp.read(MAX_BYTES)
                 charset = resp.headers.get_content_charset() or "utf-8"
                 html = raw.decode(charset, errors="replace")

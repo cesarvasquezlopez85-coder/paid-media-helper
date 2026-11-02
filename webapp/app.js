@@ -63,6 +63,8 @@ const state = {
     url: '', status: 'idle', error: null,
     signals: null, headlines: null, descriptions: null,
     showFallback: false, htmlPaste: '',
+    // Generación con IA: formato elegido, resultado por grupos y opciones.
+    ai: { status: 'idle', format: null, result: null, error: null, lang: 'es', keywords: '' },
   },
 
   book: {
@@ -435,7 +437,7 @@ const PAGE_META = {
   },
   copys: {
     title: 'Generador de copys desde URL',
-    caption: 'Pega la URL de una página y obtén 15 títulos (≤30 caracteres) y 10 descripciones (≤90 caracteres) para un anuncio de búsqueda responsivo.',
+    caption: 'Pega la URL de una página y obtén borradores de copys con IA para Search, Performance Max, Demand Gen, YouTube y Meta, o la versión con plantillas para un anuncio de búsqueda responsivo.',
   },
   bookings: {
     title: 'Bookings',
@@ -4215,6 +4217,9 @@ function renderCopyReady() {
       </div>
     </div>
 
+    ${renderCopyAiPanel()}
+
+    <h3 class="section-title" style="margin:24px 0 8px">Versión con plantillas (sin IA)</h3>
     <div class="two-col">
       <div class="card table-panel">
         <div class="table-panel-head">
@@ -4244,6 +4249,110 @@ function renderCopyReady() {
       que esta plataforma no valida.
     </p>
   `;
+}
+
+const COPY_AI_FORMATS = [
+  { key: 'search', label: 'Search', action: 'copy-ai-search' },
+  { key: 'pmax', label: 'Performance Max', action: 'copy-ai-pmax' },
+  { key: 'dgen', label: 'Demand Gen', action: 'copy-ai-dgen' },
+  { key: 'youtube', label: 'YouTube', action: 'copy-ai-youtube' },
+  { key: 'meta', label: 'Meta', action: 'copy-ai-meta' },
+];
+
+function renderCopyAiPanel() {
+  const ai = state.copy.ai;
+  const loading = ai.status === 'loading';
+  const buttons = COPY_AI_FORMATS.map((f) => `
+    <button class="${ai.format === f.key && ai.status !== 'idle' ? 'btn-accent' : 'btn-outline'}" data-action="${f.action}" ${loading ? 'disabled' : ''}>${icon('sparkles', 16)} ${f.label}</button>`).join('');
+
+  let body = '';
+  if (loading) {
+    body = `<div class="state-panel loading" style="margin-top:14px"><div class="spinner"></div><p>Escribiendo los copys para ${escapeHtml((COPY_AI_FORMATS.find((f) => f.key === ai.format) || {}).label || '')}… puede tardar hasta un minuto.</p></div>`;
+  } else if (ai.status === 'error') {
+    body = `<div class="error-panel" style="margin-top:14px"><strong>No se pudo generar.</strong> ${escapeHtml(ai.error)}</div>`;
+  } else if (ai.status === 'ready' && ai.result) {
+    const r = ai.result;
+    const groups = r.groups.map((g, gi) => {
+      const rows = g.items.map((it, ii) => `
+        <tr><td>${escapeHtml(it.text)}</td>
+        <td style="text-align:right;color:var(--color-text-muted);white-space:nowrap">${it.chars}/${g.limit}</td>
+        <td style="text-align:right"><button class="btn-link" data-copy-ai-copy="${gi}:${ii}">Copiar</button></td></tr>`).join('');
+      const warn = g.short ? `<p class="footnote" style="color:var(--color-warn,#8a5d00)">Solo salieron ${g.items.length} de ${g.count} textos válidos. Vuelve a generar para completar.</p>` : '';
+      return `
+        <div class="card table-panel">
+          <div class="table-panel-head">
+            <h3>${escapeHtml(g.label)} (máx. ${g.limit} caracteres)</h3>
+            <span><button class="btn-outline xs" data-copy-ai-copy="${gi}:all">Copiar todo</button>
+            <button class="btn-outline xs" data-copy-ai-csv="${gi}">Descargar CSV</button></span>
+          </div>
+          <table><thead><tr><th>Texto</th><th style="text-align:right">Caract.</th><th></th></tr></thead><tbody>${rows}</tbody></table>
+          ${warn}
+        </div>`;
+    }).join('');
+    body = `
+      <h3 class="section-title" style="margin:18px 0 6px">${escapeHtml(r.label)}</h3>
+      ${r.note ? `<p class="footnote">${escapeHtml(r.note)}</p>` : ''}
+      <div class="two-col">${groups}</div>
+      <p class="footnote">Borrador generado con IA solo con lo que dice la página. Revísalo antes de publicarlo: no se valida contra las políticas de Google Ads ni contra las condiciones del hotel (tarifas, promociones vigentes).</p>`;
+  }
+
+  return `
+    <div class="card ai-analysis-card" style="margin-top:16px">
+      <div class="rec-head" style="margin-bottom:8px"><span class="rec-cat">Copys con IA · borrador a revisar</span></div>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-bottom:12px">
+        <div class="field"><label>Idioma</label>
+          <select id="copy-ai-lang">
+            <option value="es" ${ai.lang === 'es' ? 'selected' : ''}>Español</option>
+            <option value="en" ${ai.lang === 'en' ? 'selected' : ''}>Inglés</option>
+            <option value="pt" ${ai.lang === 'pt' ? 'selected' : ''}>Portugués</option>
+          </select></div>
+        <div class="field" style="flex:1;min-width:260px"><label>Palabras clave (opcional)</label>
+          <input type="text" id="copy-ai-keywords" placeholder="ej. hotel en Cartagena, todo incluido" value="${escapeHtml(ai.keywords)}" style="width:100%" /></div>
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">${buttons}</div>
+      <p class="field-hint">Elige el tipo de campaña: cada uno usa sus propios formatos y límites de caracteres. Hasta 10 generaciones por hora por persona.</p>
+      ${body}
+    </div>`;
+}
+
+function generateCopyAi(format) {
+  const s = state.copy;
+  const ai = s.ai;
+  if (!s.signals || ai.status === 'loading') return;
+  ai.status = 'loading'; ai.format = format; ai.error = null; ai.result = null;
+  render();
+  const sig = Object.assign({}, s.signals, { offers: s.signals.offers_detected || [] });
+  fetch('/api/ai/generar-copys', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ formato: format, signals: sig, idioma: ai.lang, keywords: ai.keywords }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      ai.status = 'ready'; ai.result = data; render();
+    })
+    .catch((err) => { ai.status = 'error'; ai.error = err.message || String(err); render(); });
+}
+
+function copyAiCopy(ref) {
+  const ai = state.copy.ai;
+  if (!ai.result) return;
+  const [gi, which] = ref.split(':');
+  const g = ai.result.groups[Number(gi)];
+  if (!g) return;
+  const text = which === 'all' ? g.items.map((it) => it.text).join('\n') : (g.items[Number(which)] || {}).text;
+  if (!text) return;
+  const done = () => { /* sin aviso: el botón es de uso rápido */ };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, done);
+}
+
+function copyAiCsv(gi) {
+  const ai = state.copy.ai;
+  const g = ai.result && ai.result.groups[Number(gi)];
+  if (!g) return;
+  const data = [['Texto', 'Caracteres'], ...g.items.map((it) => [it.text, it.chars])];
+  engine.downloadCsv(`copys_${ai.result.formato}_${g.key}.csv`, data);
 }
 
 function finishCopyAnalysis(html, url) {
@@ -10784,6 +10893,12 @@ function bindEvents() {
   if (copyUrlInput) copyUrlInput.addEventListener('input', (e) => { state.copy.url = e.target.value; });
   const copyHtmlPasteInput = document.getElementById('copy-html-paste');
   if (copyHtmlPasteInput) copyHtmlPasteInput.addEventListener('input', (e) => { state.copy.htmlPaste = e.target.value; });
+  const copyAiLang = document.getElementById('copy-ai-lang');
+  if (copyAiLang) copyAiLang.addEventListener('change', (e) => { state.copy.ai.lang = e.target.value; });
+  const copyAiKeywords = document.getElementById('copy-ai-keywords');
+  if (copyAiKeywords) copyAiKeywords.addEventListener('input', (e) => { state.copy.ai.keywords = e.target.value; });
+  document.querySelectorAll('[data-copy-ai-copy]').forEach((b) => b.addEventListener('click', () => copyAiCopy(b.dataset.copyAiCopy)));
+  document.querySelectorAll('[data-copy-ai-csv]').forEach((b) => b.addEventListener('click', () => copyAiCsv(b.dataset.copyAiCsv)));
 
   // Bookings
   const bookFileInput = document.getElementById('book-file');
@@ -11329,6 +11444,11 @@ function handleAction(action) {
     }
 
     case 'copy-analyze-url': onCopyAnalyzeUrl(); break;
+    case 'copy-ai-search': generateCopyAi('search'); break;
+    case 'copy-ai-pmax': generateCopyAi('pmax'); break;
+    case 'copy-ai-dgen': generateCopyAi('dgen'); break;
+    case 'copy-ai-youtube': generateCopyAi('youtube'); break;
+    case 'copy-ai-meta': generateCopyAi('meta'); break;
     case 'copy-toggle-fallback': state.copy.showFallback = !state.copy.showFallback; render(); break;
     case 'copy-analyze-html': {
       const html = state.copy.htmlPaste;
@@ -11423,6 +11543,8 @@ fetch('/api/me').then((r) => r.json()).then((data) => {
   }
   const navAdmin = document.getElementById('nav-admin');
   if (navAdmin && currentUser.isAdmin) navAdmin.style.display = '';
+  const navCopys = document.getElementById('nav-copys');
+  if (navCopys && currentUser.isAdmin) navCopys.style.display = '';
   if (data.must_change_password) {
     forcePasswordChange = true;
     render();
