@@ -1141,12 +1141,10 @@ function barRowsHtml(rows, compact) {
     </div>`).join('');
 }
 
-// Prueba interna: le manda el resumen + hallazgos ya calculados a Claude y
-// muestra una lectura priorizada en prosa. Solo visible para administradores
-// mientras se valida costo/calidad (ver server.py: _handle_ai_analizar_rendimiento
-// exige is_admin).
+// Le manda el resumen + hallazgos ya calculados a Claude y muestra una lectura
+// priorizada en prosa. Disponible para todos los usuarios con sesión; el servidor
+// limita a 10 análisis por hora por usuario (server.py: AI_RATE_LIMIT).
 function renderAiAnalysisPanel() {
-  if (!currentUser.isAdmin) return '';
   const ai = state.rend.ai;
 
   let inner;
@@ -1163,12 +1161,12 @@ function renderAiAnalysisPanel() {
   } else {
     inner = `
       <button class="btn-outline" data-action="rend-ai-analizar">${icon('sparkles', 16)} Analizar con IA</button>
-      <p class="field-hint">Prueba interna (solo administradores) — le pide a Claude una lectura priorizada de estos hallazgos.</p>`;
+      <p class="field-hint">Le pide a Claude una lectura priorizada de estos hallazgos. Hasta 10 análisis por hora por persona.</p>`;
   }
 
   return `
     <div class="card ai-analysis-card">
-      <div class="rec-head" style="margin-bottom:8px"><span class="rec-cat">Análisis con IA · prueba interna</span></div>
+      <div class="rec-head" style="margin-bottom:8px"><span class="rec-cat">Análisis con IA</span></div>
       ${inner}
     </div>`;
 }
@@ -9167,9 +9165,9 @@ function renderAuditForm() {
 
 function renderAuditResults() {
   const s = state.audit;
-  const aiBlock = !currentUser.isAdmin ? '' : `
+  const aiBlock = `
     <div class="card" style="margin:16px 0;max-width:820px;margin-left:auto;margin-right:auto">
-      <h3 class="section-title" style="margin:0 0 8px">Lectura priorizada con IA <span class="footnote" style="font-weight:400">· prueba interna, solo administradores. Si la generas, se incluye en el informe descargable.</span></h3>
+      <h3 class="section-title" style="margin:0 0 8px">Lectura priorizada con IA <span class="footnote" style="font-weight:400">· hasta 10 por hora por persona. Si la generas, se incluye en el informe descargable.</span></h3>
       ${s.ai.status === 'idle' ? `<button class="btn-outline" data-action="audit-ai">Analizar con IA</button>` : ''}
       ${s.ai.status === 'loading' ? `<p class="footnote">Analizando la auditoría…</p>` : ''}
       ${s.ai.status === 'error' ? `<div class="error-panel">${escapeHtml(s.ai.error)}</div><button class="btn-outline" data-action="audit-ai" style="margin-top:8px">Reintentar</button>` : ''}

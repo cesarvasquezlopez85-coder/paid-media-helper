@@ -703,14 +703,14 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             self._handle_google_ads_audit(payload)
         elif path == "/api/ai/analizar-auditoria":
-            # Igual que el análisis de Rendimiento: prueba interna solo para admins.
-            if not self._require_admin_json():
+            # Abierto a todos los usuarios con sesión desde 2026-11-01 (antes: solo admins).
+            # El costo se acota con AI_RATE_LIMIT, por usuario.
+            if not self._require_auth_json():
                 return
             self._handle_ai_analizar_auditoria(payload)
         elif path == "/api/ai/analizar-rendimiento":
-            # Prueba interna — solo administradores mientras se valida el
-            # costo/calidad del análisis, antes de abrirlo a todos los usuarios.
-            if not self._require_admin_json():
+            # Igual que el de la auditoría: todos los usuarios con sesión, con el mismo tope por hora.
+            if not self._require_auth_json():
                 return
             self._handle_ai_analizar_rendimiento(payload)
         elif path == "/api/admin/users/delete":
