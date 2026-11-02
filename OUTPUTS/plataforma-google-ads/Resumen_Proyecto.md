@@ -16,7 +16,7 @@ El sidebar de la app ya dice V3. Lo que cambia desde la V2:
 - **Acceso por MCC:** un admin liga a un usuario a un sub-MCC completo en vez de dar cuentas una por una (2026-10-09, ver "Cómo corre la plataforma, y el login").
 - **Oportunidad de ingresos con varias cuentas y filtro por tipo de campaña** (2026-10-14, ver Función 6).
 - **Base de BigQuery** lista y sin credenciales (ver "Conexión a BigQuery").
-- **Rediseño con el sistema de Roiback**, ya construido en la rama `rediseno-roiback` y todavía sin publicar (ver "Rediseño Roiback").
+- **Rediseño con el sistema de Roiback**, publicado el 2026-11-01 como el diseño único para todos los usuarios (ver "Rediseño Roiback").
 - Material para el equipo: un documento con todas las reglas de la auditoría, una página con diseño Roiback con el mismo contenido y una presentación de 30 diapositivas (los tres son privados hasta que se compartan).
 
 ## Versión V2 (2026-07-29)
@@ -333,7 +333,9 @@ Para cruzar reservas reales con la inversión de Google Ads. Ya está construida
 
 Pregunta de cesar: cuántas personas pueden usar la plataforma a la vez sin que se cuelgue (el equipo es de unas 25). Prueba de carga local, en modo simulado y con usuarios temporales en una base de prueba: 25 usuarios con pausas de 0,5 a 2 s durante 40 s dieron 801 peticiones, 0 errores y p95 de 5 ms; sin pausas durante 15 s, 37.303 peticiones (unas 2.500 por segundo), 0 errores y p95 de 37 ms. El servidor y SQLite no son el cuello de botella; lo que no cubre la prueba es la latencia y la cuota reales de Google Ads (compartida por todo el equipo) ni los recursos del plan de Railway. Cada redespliegue corta unos segundos a quien esté conectado, así que conviene desplegar fuera de horario pico. Hay un recordatorio programado para el 2026-10-16, cuando la plataforma empieza a tener usuarios: mirar métricas de Railway y cuota de Google Ads, revisar el código de invitación y los accesos, y decidir si se registra cuántos usuarios hay activos.
 
-## Rediseño Roiback (rama `rediseno-roiback`, sin publicar)
+## Rediseño Roiback (publicado para todos el 2026-11-01)
+
+**2026-11-01:** se decidió dejarlo fijo para todo el equipo, sin interruptor (commit `0dc3693`): `index.html` carga `styles-roiback.css` y `app.js` fija `APP_THEME = 'roiback'`. El diseño anterior sigue en `styles.css` y en los valores `current` de `themed()` y de `AUDIT_*_THEMES` para poder volver atrás. La pantalla de login conserva su propio estilo. Lo que sigue describe el trabajo hecho en la rama `rediseno-roiback` antes de publicarlo.
 
 Cambio completo de colores y tipografía al sistema de diseño de Roiback, con los valores medidos en roiback.com (tinta `#10222f`, verde azulado `#03a694` y `#098e7f`, naranja `#ff9800`, Montserrat para títulos y Lato para el texto, tarjetas de 24 px, botón principal naranja). Los tokens `--rb-*` viven en `:root` de `styles.css` y los nombres que la app ya usaba (`--navy-*`, `--accent-*`) apuntan a ellos; el informe de la auditoría usa las mismas variables. Está guardado como **un solo commit** en su rama, encima de `main`, sin pasar a producción: volver a la paleta anterior es no unirlo o revertir ese commit. Falta decidir si se publica así, o si antes se arma un interruptor entre la paleta original y la de Roiback.
 
@@ -410,7 +412,7 @@ Cada usuario no-admin solo puede leer/escribir en las cuentas de Google Ads que 
 - El toggle real de AI Max (Función 10) ya se probó contra cuentas reales (2026-10-08, probado por cesar) y aplica el cambio — ya no es una limitación.
 - El ajuste real de presupuesto diario por campaña (Función 13, Ritmo de consumo) ya se probó contra cuentas reales (2026-10-08, probado por cesar) y aplica el cambio — ya no es una limitación.
 - El filtro "Agregar un MCC completo" / "Filtrar por MCC" (Función 13 y las otras ocho secciones conectadas a Google Ads) es solo para administradores — un usuario no-admin sigue viendo únicamente las cuentas que ya tiene asignadas, sin este atajo.
-- **Auditoría de cuenta (Función 14):** los umbrales son puntos de partida, no verdades de Google — conviene contrastarlos con 3 o 4 hoteles que cesar conozca bien. Solo se probó en modo simulado y, en solo lectura, con dos cuentas reales de Estelar. La API v25 no entrega la etiqueta de rendimiento de los recursos de PMax ni el ajuste de expansión de URL (P4 y P8 no se pudieron construir como se pensaron), y el estado de las conversiones mejoradas solo se puede leer desde la API v26 (A9 volvió con esa migración). Los resultados de conversiones, valor, CPA y ROAS son lo que reporta Google Ads: la auditoría no verifica reservas reales ni ingresos finales del hotel.
+- **Rediseño Roiback y capturas:** el rediseño ya está publicado (2026-11-01), pero las capturas de la presentación siguen con la paleta anterior; hay que repetirlas.
 - **Oportunidad de ingresos con varias cuentas:** máximo 20 cuentas por análisis; con el listado completo de 1.100+ cuentas la lista muestra las primeras 150 y pide afinar la búsqueda. Solo se probó en modo simulado. Si dos cuentas tienen campañas con el mismo nombre, no se distinguen en la tabla.
 - **Rediseño Roiback y capturas:** las capturas de la presentación son de la versión publicada (paleta anterior); si el rediseño se publica hay que repetirlas.
 
@@ -434,7 +436,7 @@ Cada usuario no-admin solo puede leer/escribir en las cuentas de Google Ads que 
 16. ~~Probar el toggle real de AI Max (Función 10) contra una cuenta real~~ — completado (2026-10-08, probado por cesar).
 17. ~~Probar la escritura real de presupuesto diario por campaña (Función 13, Ritmo de consumo) contra una cuenta real~~ — completado (2026-10-08, probado por cesar).
 18. Seguir validando Ritmo de consumo (Función 13) con más cuentas vigiladas a la vez, y revisar con cesar si el margen de tolerancia del semáforo (±10%) es el que quiere mantener.
-19. Probar la Función 14 (Auditoría de cuenta) con 3 o 4 hoteles que cesar conozca bien y ajustar umbrales, y probar Oportunidad de ingresos con varias cuentas reales.
+21. ~~Decidir qué hacer con el rediseño Roiback~~ — decidido el 2026-11-01: publicado fijo para todos. Falta repetir las capturas de la presentación y pasarla a colores de Roiback.
 20. Decidir sobre la Auditoría: puntaje ponderado por área, metas por campaña, "aplicadas" en F1 y magnitud en P11 (ver Función 14, "Todavía no construido").
 21. Decidir qué hacer con el rediseño Roiback: publicarlo tal cual (un commit) o construir primero un interruptor de tema; después repetir las capturas de la presentación.
 22. BigQuery: correr `get_bigquery_refresh_token.py`, configurar las variables en Railway y mapear la tabla de reservas.
