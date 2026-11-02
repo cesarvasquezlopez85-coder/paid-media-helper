@@ -412,7 +412,7 @@ Cada usuario no-admin solo puede leer/escribir en las cuentas de Google Ads que 
 - El toggle real de AI Max (Función 10) ya se probó contra cuentas reales (2026-10-08, probado por cesar) y aplica el cambio — ya no es una limitación.
 - El ajuste real de presupuesto diario por campaña (Función 13, Ritmo de consumo) ya se probó contra cuentas reales (2026-10-08, probado por cesar) y aplica el cambio — ya no es una limitación.
 - El filtro "Agregar un MCC completo" / "Filtrar por MCC" (Función 13 y las otras ocho secciones conectadas a Google Ads) es solo para administradores — un usuario no-admin sigue viendo únicamente las cuentas que ya tiene asignadas, sin este atajo.
-- **Rediseño Roiback y capturas:** el rediseño ya está publicado (2026-11-01), pero las capturas de la presentación siguen con la paleta anterior; hay que repetirlas.
+- **Rediseño Roiback y capturas:** la presentación del equipo ya usa la paleta, las fuentes y las capturas del rediseño (2026-11-02).
 - **Oportunidad de ingresos con varias cuentas:** máximo 20 cuentas por análisis; con el listado completo de 1.100+ cuentas la lista muestra las primeras 150 y pide afinar la búsqueda. Solo se probó en modo simulado. Si dos cuentas tienen campañas con el mismo nombre, no se distinguen en la tabla.
 - **Rediseño Roiback y capturas:** las capturas de la presentación son de la versión publicada (paleta anterior); si el rediseño se publica hay que repetirlas.
 
@@ -436,7 +436,7 @@ Cada usuario no-admin solo puede leer/escribir en las cuentas de Google Ads que 
 16. ~~Probar el toggle real de AI Max (Función 10) contra una cuenta real~~ — completado (2026-10-08, probado por cesar).
 17. ~~Probar la escritura real de presupuesto diario por campaña (Función 13, Ritmo de consumo) contra una cuenta real~~ — completado (2026-10-08, probado por cesar).
 18. Seguir validando Ritmo de consumo (Función 13) con más cuentas vigiladas a la vez, y revisar con cesar si el margen de tolerancia del semáforo (±10%) es el que quiere mantener.
-21. ~~Decidir qué hacer con el rediseño Roiback~~ — decidido el 2026-11-01: publicado fijo para todos. Falta repetir las capturas de la presentación y pasarla a colores de Roiback.
+21. ~~Decidir qué hacer con el rediseño Roiback~~ — decidido el 2026-11-01: publicado fijo para todos. La presentación ya quedó en colores de Roiba y con capturas nuevas (2026-11-02).
 20. Decidir sobre la Auditoría: puntaje ponderado por área, metas por campaña, "aplicadas" en F1 y magnitud en P11 (ver Función 14, "Todavía no construido").
 21. Decidir qué hacer con el rediseño Roiback: publicarlo tal cual (un commit) o construir primero un interruptor de tema; después repetir las capturas de la presentación.
 22. BigQuery: correr `get_bigquery_refresh_token.py`, configurar las variables en Railway y mapear la tabla de reservas.

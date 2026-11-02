@@ -211,7 +211,7 @@ Lista única de lo que falta, agrupada por tipo. Lo construido y validado está 
 
 ### Diseño y presentación
 - ~~Rediseño Roiback: decidir si se publica tal cual o con un interruptor~~ — decidido y publicado el 2026-11-01: **fijo para todos los usuarios, sin interruptor** (commit `0dc3693`). `styles.css` y los colores del diseño anterior siguen en el repositorio por si hay que volver atrás.
-- Presentación del equipo: sigue en azul marino y dorado; falta pasarla a colores y fuentes de Roiback y volver a tomar las capturas, ahora que el rediseño ya está publicado para todos.
+- ~~Presentación del equipo en colores y fuentes de Roiba y capturas nuevas~~ — hecho el 2026-11-02: paleta de Roiba (azul petróleo, teal y naranja), Montserrat y Lato, y 23 capturas nuevas del diseño publicado, tomadas en modo simulado.
 - Documentos del repositorio: `Resumen_Proyecto.md`, README y roadmap no recogen del todo los cambios del 2026-10-19 (Ritmo de consumo y Bookings) y hablan de 27 diapositivas; hoy son 30.
 
 ### Infraestructura y conexiones
