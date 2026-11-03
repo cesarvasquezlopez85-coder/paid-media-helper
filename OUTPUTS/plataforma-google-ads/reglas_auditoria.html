@@ -1,0 +1,251 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<meta charset="utf-8">
+<title>Reglas de la auditoría</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@500;600;700;800&family=Lato:wght@400;700&display=swap">
+<style>
+/* Layout: banda oscura de marca arriba; debajo, índice fijo a la izquierda y tarjetas de 24px con las tablas de reglas a la derecha. Paleta y tipografías medidas de roiback.com. */
+:root{
+  --bg:#f4f6f7; --surface:#ffffff; --surface-2:#f8f8f8; --ink:#10222f; --muted:#5f5c5d; --soft:#7d797a; --line:#e4e4e4; --line-soft:#f0f0f0;
+  --teal:#098e7f; --teal-bright:#03a694; --orange:#ff9800; --on-orange:#1f1f1f;
+  --hero-bg:#10222f; --hero-ink:#f4f6f7; --hero-muted:#a9bcc6;
+  --crit-bg:#fbe4e8; --crit-fg:#a82a42; --warn-bg:#fdf1d8; --warn-fg:#8a5d00; --info-bg:#eef1f6; --info-fg:#1f3155; --opp-bg:#e0f5f2; --opp-fg:#00695d;
+  --focus:#03a694;
+  --display:'Montserrat','Segoe UI',system-ui,sans-serif; --body:'Lato','Segoe UI',system-ui,sans-serif;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0b1821; --surface:#12293a; --surface-2:#0f2231; --ink:#e8eef0; --muted:#a9b8c2; --soft:#8ea0ac; --line:#24404f; --line-soft:#1b3342;
+  --teal:#4dc0b0; --teal-bright:#4dc0b0;
+  --crit-bg:#4a1f2a; --crit-fg:#ffb3c0; --warn-bg:#4a3a12; --warn-fg:#f6cf7a; --info-bg:#1d3347; --info-fg:#bcd0e6; --opp-bg:#103a38; --opp-fg:#8fe3d6; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0b1821; --surface:#12293a; --surface-2:#0f2231; --ink:#e8eef0; --muted:#a9b8c2; --soft:#8ea0ac; --line:#24404f; --line-soft:#1b3342;
+  --teal:#4dc0b0; --teal-bright:#4dc0b0;
+  --crit-bg:#4a1f2a; --crit-fg:#ffb3c0; --warn-bg:#4a3a12; --warn-fg:#f6cf7a; --info-bg:#1d3347; --info-fg:#bcd0e6; --opp-bg:#103a38; --opp-fg:#8fe3d6; color-scheme:dark}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:24px}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--body);font-size:16px;line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:var(--teal)}
+:focus-visible{outline:3px solid var(--focus);outline-offset:2px;border-radius:4px}
+.hero{background:var(--hero-bg);color:var(--hero-ink);padding-block:56px 48px;padding-inline:max(16px,calc((100% - 1180px)/2))}
+.hero .eyebrow{color:var(--teal-bright)}
+.hero h1{font-family:var(--display);font-weight:800;text-transform:uppercase;letter-spacing:.01em;font-size:clamp(30px,5vw,52px);line-height:1.08;margin:8px 0 14px;text-wrap:balance;max-width:16ch}
+.hero p.lead{max-width:62ch;color:var(--hero-muted);font-size:18px;margin:0 0 28px}
+.facts{display:flex;flex-wrap:wrap;gap:12px}
+.fact{border:1px solid #2f4a5a;border-radius:16px;padding:12px 18px;min-width:0}
+.fact b{display:block;font-family:var(--display);font-weight:800;font-size:28px;line-height:1.1;color:var(--hero-ink);font-variant-numeric:tabular-nums}
+.fact span{font-size:13px;color:var(--hero-muted)}
+.fact.accent{background:var(--orange);border-color:var(--orange)}
+.fact.accent b,.fact.accent span{color:var(--on-orange)}
+.wrap{display:grid;grid-template-columns:200px minmax(0,1fr);gap:32px;padding-block:40px 72px;padding-inline:max(16px,calc((100% - 1180px)/2));align-items:start}
+.toc{position:sticky;top:env(safe-area-inset-top,0px);padding-top:8px;display:flex;flex-direction:column;gap:2px}
+.toc p{font-family:var(--display);font-weight:700;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--soft);margin:0 0 8px}
+.toc a{text-decoration:none;color:var(--muted);font-weight:700;font-size:15px;padding:7px 12px;border-radius:8px;border-left:3px solid transparent}
+.toc a:hover{background:var(--surface);color:var(--ink)}
+.toc a.on{color:var(--ink);background:var(--surface);border-left-color:var(--teal-bright)}
+main{display:flex;flex-direction:column;gap:28px;min-width:0}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:24px;padding:32px;min-width:0}
+h2{font-family:var(--display);font-weight:800;text-transform:uppercase;letter-spacing:.01em;font-size:24px;line-height:1.2;margin:0 0 12px;text-wrap:balance}
+h3{font-family:var(--display);font-weight:700;font-size:22px;line-height:1.25;margin:2px 0 4px}
+.eyebrow{font-family:var(--display);font-weight:700;font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--teal);margin:0}
+p{margin:0 0 12px;max-width:72ch}
+.card>p:last-child{margin-bottom:0}
+ol.steps{list-style:none;counter-reset:s;padding:0;margin:16px 0;display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+ol.steps li{counter-increment:s;background:var(--surface-2);border:1px solid var(--line-soft);border-radius:16px;padding:16px 18px 16px 58px;position:relative;min-width:0}
+ol.steps li::before{content:counter(s);position:absolute;left:16px;top:14px;width:30px;height:30px;border-radius:50%;background:var(--teal-bright);color:#fff;font-family:var(--display);font-weight:800;display:grid;place-items:center;font-size:14px}
+ol.steps b{display:block;font-family:var(--display);font-weight:700}
+.tw{overflow-x:auto;margin-top:14px;border:1px solid var(--line);border-radius:14px}
+table{border-collapse:collapse;width:100%;font-size:15px}
+th{font-family:var(--display);font-weight:700;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--soft);text-align:left;background:var(--surface-2);padding:11px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:12px 14px;border-bottom:1px solid var(--line-soft);vertical-align:top;line-height:1.45}
+tr:last-child td{border-bottom:none}
+table.rules{min-width:660px}td:nth-child(2){min-width:240px}
+td.code{font-family:var(--display);font-weight:800;color:var(--teal);white-space:nowrap}
+td.sevc{min-width:150px}
+td.thr{color:var(--muted);min-width:170px}
+.pill{display:inline-block;font-family:var(--display);font-weight:700;font-size:11.5px;letter-spacing:.04em;text-transform:uppercase;padding:3px 10px;border-radius:999px;white-space:nowrap}
+.pill.crit{background:var(--crit-bg);color:var(--crit-fg)}.pill.warn{background:var(--warn-bg);color:var(--warn-fg)}
+.pill.info{background:var(--info-bg);color:var(--info-fg)}.pill.opp{background:var(--opp-bg);color:var(--opp-fg)}
+.sev-note{display:block;font-size:13px;color:var(--muted);margin-top:4px;line-height:1.35}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin:16px 0 4px}
+.chip{font-family:var(--display);font-weight:700;font-size:13px;border:1px solid var(--line);background:var(--surface);color:var(--ink);padding:8px 16px;border-radius:999px;cursor:pointer}
+.chip:hover{border-color:var(--teal-bright)}
+.chip.on{background:var(--ink);color:var(--surface);border-color:var(--ink)}
+.grp{background:var(--surface);border:1px solid var(--line);border-radius:24px;padding:28px 28px 24px;min-width:0}
+.grp-head{display:flex;flex-wrap:wrap;gap:12px 24px;justify-content:space-between;align-items:flex-start}
+.blurb{color:var(--muted);margin:2px 0 0}
+.mini{display:flex;gap:6px;flex-wrap:wrap;margin:0}
+tr[hidden]{display:none}
+.grp.empty{display:none}
+.note{background:var(--surface-2);border:1px solid var(--line-soft);border-radius:14px;padding:14px 18px;margin-top:16px;color:var(--muted);max-width:none}
+ul.plain{padding-left:20px;margin:12px 0 0;display:flex;flex-direction:column;gap:10px}
+ul.plain li{max-width:72ch}
+.footer{color:var(--soft);font-size:14px;padding-top:4px}
+@media (max-width:960px){
+  .wrap{grid-template-columns:minmax(0,1fr);gap:20px}
+  .toc{position:static;flex-direction:row;flex-wrap:wrap;gap:6px}
+  .toc p{width:100%}
+  .toc a{border:1px solid var(--line);background:var(--surface);padding:6px 12px}
+  .toc a.on{border-color:var(--teal-bright)}
+}
+@media (max-width:600px){.card,.grp{padding:20px;border-radius:20px}.hero{padding-block:40px 32px}.fact b{font-size:24px}}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+</style>
+
+<header class="hero">
+  <p class="eyebrow">Paid Media Helper · Auditoría de cuenta</p>
+  <h1>Reglas de la auditoría</h1>
+  <p class="lead">La auditoría revisa en solo lectura la configuración de una cuenta de Google Ads de un hotel, aplica 66 reglas y entrega un puntaje de 0 a 100 con los hallazgos priorizados y un informe descargable.</p>
+  <div class="facts">
+    <div class="fact"><b>66</b><span>reglas</span></div>
+    <div class="fact"><b>10</b><span>áreas</span></div>
+    <div class="fact"><b>−5</b><span>por cada crítico</span></div>
+    <div class="fact"><b>−2</b><span>por cada advertencia</span></div>
+    <div class="fact accent"><b>0 a 100</b><span>puntaje de la cuenta</span></div>
+  </div>
+</header>
+
+<div class="wrap">
+  <nav class="toc" aria-label="Secciones"><p>En esta página</p><a href="#como-funciona">Cómo funciona</a><a href="#puntaje">El puntaje</a><a href="#cuestionario">El cuestionario</a><a href="#reglas">Las reglas</a><a href="#duplicados">Sin restar dos veces</a><a href="#no-verificable">Lo que no se verifica</a><a href="#informe">El informe</a></nav>
+  <main>
+    <section class="card" id="como-funciona">
+      <p class="eyebrow">Paso a paso</p>
+      <h2>Cómo funciona</h2>
+      <p>Elegir una cuenta del MCC y apretar "Auditar cuenta" basta; el resto lo hace la plataforma en unos segundos, sin modificar nada en Google Ads.</p>
+      <ol class="steps">
+        <li><b>Elegir la cuenta</b>Con el mismo selector de las demás secciones, incluido el filtro por MCC para quienes administran muchas cuentas.</li>
+        <li><b>Llenar el cuestionario</b>Cuatro datos del hotel que ajustan las reglas.</li>
+        <li><b>Traer los datos</b>Unas 22 consultas de solo lectura a Google Ads; si la cuenta tiene Performance Max suma 10 más, y si tiene IA Max suma 5 más.</li>
+        <li><b>Aplicar las reglas</b>Cada regla compara los datos con un umbral y, si se cumple, genera un hallazgo con su gravedad, el detalle y qué hacer.</li>
+        <li><b>Calcular el puntaje</b>De 0 a 100, con un puntaje por área.</li>
+        <li><b>Mostrar y descargar</b>Pantalla con los hallazgos priorizados e informe en HTML (que se guarda como PDF con Ctrl+P) o Markdown.</li>
+      </ol>
+      <p class="note">Si Google rechaza una consulta, la plataforma no se cae ni inventa un hallazgo: esa revisión queda en "no se pudo verificar" y no resta puntos.</p>
+    </section>
+
+    <section class="card" id="puntaje">
+      <p class="eyebrow">Gravedad y resta</p>
+      <h2>Cómo se calcula el puntaje</h2>
+      <p>Se parte de 100: cada hallazgo crítico resta 5 puntos y cada advertencia resta 2; los informativos y las oportunidades no restan. El mínimo es 0.</p>
+      <div class="tw"><table class=""><thead><tr><th>Gravedad</th><th>Resta</th><th>Qué significa</th></tr></thead><tbody><tr><td><span class="pill crit">Crítico</span> prioridad alta</td><td>5 puntos</td><td>Rompe la medición o hace perder dinero. Conviene corregirlo primero.</td></tr><tr><td><span class="pill warn">Advertencia</span> prioridad media</td><td>2 puntos</td><td>Conviene corregirlo, pero no invalida la cuenta.</td></tr><tr><td><span class="pill info">Informativo</span></td><td>0</td><td>Se muestra para dar contexto; no resta.</td></tr><tr><td><span class="pill opp">Oportunidad</span></td><td>0</td><td>Una campaña rentable que no capta toda la demanda por presupuesto (C5, P12): se muestra aparte, con su propia etiqueta, y no resta.</td></tr></tbody></table></div>
+      <p style="margin-top:20px">La etiqueta del puntaje depende del total y de si hay críticos:</p>
+      <div class="tw"><table class=""><thead><tr><th>Etiqueta</th><th>Cuándo</th></tr></thead><tbody><tr><td><strong>Sana</strong></td><td>85 puntos o más y ningún crítico</td></tr><tr><td><strong>Mejorable</strong></td><td>De 60 a 84, o 85 o más con al menos un crítico</td></tr><tr><td><strong>Requiere atención</strong></td><td>Menos de 60</td></tr></tbody></table></div>
+      <p style="margin-top:20px">Además del total, cada área tiene su propio puntaje de 0 a 100 con la misma fórmula: Conversiones, Redes y segmentación, Estructura y puja, Palabras clave y términos, Activos, Automatización, Audiencias, Rendimiento contra la meta y, solo si existen, Performance Max e IA Max (campañas Search con IA Max prendido). Sirve para ver dónde está el problema.</p>
+    </section>
+
+    <section class="card" id="cuestionario">
+      <p class="eyebrow">Lo que se pregunta</p>
+      <h2>El cuestionario</h2>
+      <p>Solo se pregunta lo que cambia el resultado de alguna regla. Lo que se deja en blanco se trata como "no verificable" en vez de suponerse.</p>
+      <div class="tw"><table class=""><thead><tr><th>Dato</th><th>Para qué sirve</th><th>Reglas que afecta</th></tr></thead><tbody><tr><td>Nombre del hotel</td><td>Título del informe</td><td>Ninguna</td></tr><tr><td>Términos de marca en las búsquedas (el nombre del hotel)</td><td>Detectar búsquedas de la marca que gastan en campañas genéricas</td><td>C1, C2, P9</td></tr><tr><td>Palabras que marcan una campaña de marca en su nombre (por defecto: marca, brand, branded, brnd)</td><td>Saber qué campaña es de marca, porque los nombres suelen traer también el nombre del hotel</td><td>C1, G2, G6, P15</td></tr><tr><td>Meta principal: ROAS objetivo, CPA objetivo o volumen de reservas, con su valor</td><td>Definir qué es "rentable" y comparar lo logrado contra la meta</td><td>A7, A8, B7, C3, C5, P12, G1</td></tr><tr><td>¿Usas feed de Hotel Center con PMax? (aparece después de la primera auditoría, solo si hay PMax)</td><td>Con feed, parte de los anuncios sale del feed y no de las imágenes o videos propios</td><td>P3</td></tr></tbody></table></div>
+      <p class="note">La conversión que cuenta como reserva no se pregunta: se detecta sola (la primaria activa de compra, reserva o formulario con más conversiones); el informe muestra cuál se tomó para que quien audita la valide.</p>
+    </section>
+
+    <section class="card" id="reglas">
+      <p class="eyebrow">Las 66</p>
+      <h2>Las reglas</h2>
+      <p>Cada regla tiene un código (A1, B2, P3...), una gravedad y un umbral. Los umbrales son puntos de partida y se pueden cambiar; en la columna "Umbral" un guion significa que la regla no usa números.</p>
+      <div class="chips" role="group" aria-label="Filtrar por gravedad"><button class="chip on" data-f="all" id="f-all">Todas · 66</button><button class="chip" data-f="crit" id="f-crit">Crítico</button><button class="chip" data-f="warn" id="f-warn">Advertencia</button><button class="chip" data-f="info" id="f-info">Informativo</button><button class="chip" data-f="opp" id="f-opp">Oportunidad</button></div>
+    </section>
+    <section class="grp" id="r-a">
+<div class="grp-head"><div><p class="eyebrow">Área A · 10 reglas</p><h3>Conversiones</h3><p class="blurb">Que la medición de reservas sea confiable.</p></div>
+<p class="mini"><span class="pill crit">8</span><span class="pill warn">1</span><span class="pill info">1</span></p></div>
+<div class="tw"><table class="rules"><thead><tr><th>Código</th><th>Qué revisa</th><th>Gravedad</th><th>Umbral</th></tr></thead><tbody><tr data-sev="crit"><td class="code">A1</td><td>No hay ninguna conversión primaria activa</td><td class="sevc"><span class="pill crit">Crítico</span></td><td class="thr">—</td></tr><tr data-sev="crit"><td class="code">A2</td><td>La cuenta gastó y no registró ninguna conversión</td><td class="sevc"><span class="pill crit">Crítico</span></td><td class="thr">0 conversiones con gasto en el periodo</td></tr><tr data-sev="crit"><td class="code">A3</td><td>Conversiones primarias activas sin ningún dato en el periodo</td><td class="sevc"><span class="pill crit">Crítico</span></td><td class="thr">0 conversiones con gasto en la cuenta</td></tr><tr data-sev="crit"><td class="code">A4</td><td>Varias conversiones primarias de la misma categoría (compra, reserva o formulario): Google cuenta la misma reserva más de una vez</td><td class="sevc"><span class="pill crit">Crítico</span></td><td class="thr">Más de 1 por categoría</td></tr><tr data-sev="crit"><td class="code">A5</td><td>Importaciones de Google Analytics marcadas como primarias cuando ya hay conversiones propias primarias</td><td class="sevc"><span class="pill crit">Crítico</span></td><td class="thr">—</td></tr><tr data-sev="crit"><td class="code">A6</td><td>Microconversiones (llamada, WhatsApp, &quot;ver disponibilidad&quot;) marcadas como primarias junto con la reserva</td><td class="sevc"><span class="pill crit">Crítico</span></td><td class="thr">—</td></tr><tr data-sev="crit"><td class="code">A7</td><td>La reserva no trae valor y hay puja o meta por ROAS</td><td class="sevc"><span class="pill crit">Crítico</span></td><td class="thr">—</td></tr><tr data-sev="warn"><td class="code">A8</td><td>La reserva no trae valor y las campañas pujan por conversiones</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">—</td></tr><tr data-sev="crit"><td class="code">A9</td><td>Conversiones mejoradas desactivadas, leídas del ajuste de la cuenta con la API v26 (si Google no da un valor claro, no se dice nada)</td><td class="sevc"><span class="pill crit">Crítico</span></td><td class="thr">—</td></tr><tr data-sev="info"><td class="code">A10</td><td>Ventana de conversión corta para una reserva</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">Menos de 30 días; se pide validar si cubre el ciclo de decisión</td></tr></tbody></table></div>
+</section>
+<section class="grp" id="r-b">
+<div class="grp-head"><div><p class="eyebrow">Área B · 8 reglas</p><h3>Redes y segmentación</h3><p class="blurb">Dónde y a quién se muestran los anuncios.</p></div>
+<p class="mini"><span class="pill crit">1</span><span class="pill warn">2</span><span class="pill info">5</span></p></div>
+<div class="tw"><table class="rules"><thead><tr><th>Código</th><th>Qué revisa</th><th>Gravedad</th><th>Umbral</th></tr></thead><tbody><tr data-sev="info"><td class="code">B1</td><td>Tipo de segmentación geográfica de las campañas Search. Se informa pero no se penaliza: en hoteles &quot;presencia o interés&quot; suele ser lo deseado</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">—</td></tr><tr data-sev="warn"><td class="code">B2</td><td>La red de socios de búsqueda gasta más y convierte peor que Google Search; el hallazgo muestra gasto, conversiones y CPA de cada red</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">Más del 10% del gasto, CPA 1,3 veces el de Google Search y al menos 30 clics en socios</td></tr><tr data-sev="crit"><td class="code">B3</td><td>Campañas Search con la red de display activada</td><td class="sevc"><span class="pill crit">Crítico</span></td><td class="thr">—</td></tr><tr data-sev="info"><td class="code">B4</td><td>Campañas activas sin idioma configurado</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">—</td></tr><tr data-sev="info"><td class="code">B5</td><td>Rendimiento por país: gasto, clics, conversiones, CPA y valor según lo que reporta Google Ads</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">Países con al menos 1% del gasto</td></tr><tr data-sev="warn"><td class="code">B6</td><td>Países con gasto y sin ninguna conversión mientras otros países sí convierten</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">Al menos 3% del gasto y 30 clics, con 0 conversiones</td></tr><tr data-sev="info"><td class="code">B7</td><td>Países que rinden por debajo de la meta del cuestionario</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">Al menos 3% del gasto y ROAS bajo el 90% de la meta o CPA sobre el 110%</td></tr><tr data-sev="info"><td class="code">B8</td><td>Rendimiento por dispositivo (móvil, ordenador, tablet)</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">Dispositivos con al menos 5% del gasto</td></tr></tbody></table></div>
+</section>
+<section class="grp" id="r-c">
+<div class="grp-head"><div><p class="eyebrow">Área C · 8 reglas</p><h3>Estructura y puja</h3><p class="blurb">Cómo están armadas las campañas y cómo pujan.</p></div>
+<p class="mini"><span class="pill warn">3</span><span class="pill info">4</span><span class="pill opp">1</span></p></div>
+<div class="tw"><table class="rules"><thead><tr><th>Código</th><th>Qué revisa</th><th>Gravedad</th><th>Umbral</th></tr></thead><tbody><tr data-sev="warn"><td class="code">C1</td><td>No se identifica una estrategia de protección de marca: ninguna campaña activa lleva palabras de marca en el nombre ni hay palabras clave con el nombre del hotel</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">Palabras del nombre editables en el cuestionario (por defecto marca, brand, branded, brnd); sin términos de marca queda sin verificar</td></tr><tr data-sev="warn"><td class="code">C2</td><td>Búsquedas con el nombre del hotel gastando en campañas genéricas</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">Más del 10% del gasto de las genéricas</td></tr><tr data-sev="info"><td class="code">C3</td><td>Campañas activas con la puja Maximizar clics</td><td class="sevc"><span class="pill info">Informativo</span><span class="sev-note">Advertencia si la meta es CPA o ROAS y la campaña ya convierte</span></td><td class="thr">—</td></tr><tr data-sev="info"><td class="code">C4</td><td>Puja inteligente con muy pocas conversiones (no incluye Performance Max, que la cubre P2)</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">Menos de 15 conversiones al mes</td></tr><tr data-sev="opp"><td class="code">C5</td><td>Oportunidad de escala: campañas Search que convierten y pierden impresiones por presupuesto</td><td class="sevc"><span class="pill opp">Oportunidad</span></td><td class="thr">Pierden más del 15% y están dentro de la meta</td></tr><tr data-sev="warn"><td class="code">C6</td><td>Campañas activas sin ninguna impresión en el periodo; no cuenta las creadas hace menos de 14 días</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">0 impresiones</td></tr><tr data-sev="info"><td class="code">C7</td><td>Grupos de anuncios con muchas palabras clave</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">Más de 20 (no resta puntos)</td></tr><tr data-sev="info"><td class="code">C9</td><td>Campañas que pierden impresiones por ranking (puja o calidad), no por presupuesto</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">Más del 15% y más que por presupuesto</td></tr></tbody></table></div>
+</section>
+<section class="grp" id="r-d">
+<div class="grp-head"><div><p class="eyebrow">Área D · 6 reglas</p><h3>Palabras clave y términos</h3><p class="blurb">Qué búsquedas se compran y cuánto cuestan.</p></div>
+<p class="mini"><span class="pill warn">4</span><span class="pill info">2</span></p></div>
+<div class="tw"><table class="rules"><thead><tr><th>Código</th><th>Qué revisa</th><th>Gravedad</th><th>Umbral</th></tr></thead><tbody><tr data-sev="info"><td class="code">D2</td><td>Peso de la concordancia exacta en el gasto</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">—</td></tr><tr data-sev="warn"><td class="code">D3</td><td>Mucho gasto en términos de búsqueda que no convirtieron</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">Más del 15% del gasto de Search</td></tr><tr data-sev="warn"><td class="code">D4</td><td>Faltan negativos de temas típicos que no son reservas: empleo, gratis, alquiler de larga estadía</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">Más del 3% del gasto de Search</td></tr><tr data-sev="warn"><td class="code">D5</td><td>Palabras clave con índice de calidad bajo que pesan en el gasto; se muestran también las impresiones</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">Índice de 4 o menos y al menos 1% del gasto de Search</td></tr><tr data-sev="warn"><td class="code">D6</td><td>Palabras clave con muchos clics y ninguna conversión</td><td class="sevc"><span class="pill warn">Advertencia</span><span class="sev-note">Informativo si D3 ya saltó</span></td><td class="thr">Al menos 30 clics y 1% del gasto de Search</td></tr><tr data-sev="info"><td class="code">D9</td><td>Palabras clave con CTR bajo y volumen suficiente</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">CTR menor al 2% con al menos 1.000 impresiones</td></tr></tbody></table></div>
+</section>
+<section class="grp" id="r-e">
+<div class="grp-head"><div><p class="eyebrow">Área E · F · 4 reglas</p><h3>Activos y automatización</h3><p class="blurb">Extensiones del anuncio y recomendaciones que Google aplica solo.</p></div>
+<p class="mini"><span class="pill crit">1</span><span class="pill warn">2</span><span class="pill info">1</span></p></div>
+<div class="tw"><table class="rules"><thead><tr><th>Código</th><th>Qué revisa</th><th>Gravedad</th><th>Umbral</th></tr></thead><tbody><tr data-sev="warn"><td class="code">E3</td><td>Faltan enlaces de sitio</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">Menos de 4 enlaces de sitio</td></tr><tr data-sev="warn"><td class="code">E4</td><td>Falta el activo de ubicación (perfil de empresa)</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">—</td></tr><tr data-sev="info"><td class="code">E5</td><td>Falta el activo de llamada</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">—</td></tr><tr data-sev="crit"><td class="code">F1</td><td>Google aplica solas recomendaciones que pueden subir presupuesto, cambiar la puja o agregar palabras amplias; se lista cada una con su riesgo (alto: mueve presupuesto, puja o concordancia; medio: agrega activos)</td><td class="sevc"><span class="pill crit">Crítico</span><span class="sev-note">si hay alguna de riesgo alto; Advertencia si solo hay de riesgo medio</span></td><td class="thr">—</td></tr></tbody></table></div>
+</section>
+<section class="grp" id="r-p">
+<div class="grp-head"><div><p class="eyebrow">Área P · 13 reglas</p><h3>Performance Max</h3><p class="blurb">Solo se aplican si la cuenta tiene campañas Performance Max activas. Con &quot;usa feed de Hotel Center&quot; en el cuestionario, P3 pasa a informativa; P5, P6 y P7 ya lo son.</p></div>
+<p class="mini"><span class="pill crit">1</span><span class="pill warn">2</span><span class="pill info">9</span><span class="pill opp">1</span></p></div>
+<div class="tw"><table class="rules"><thead><tr><th>Código</th><th>Qué revisa</th><th>Gravedad</th><th>Umbral</th></tr></thead><tbody><tr data-sev="crit"><td class="code">P1</td><td>Una PMax puja por valor y la reserva no trae valor: no tiene qué optimizar</td><td class="sevc"><span class="pill crit">Crítico</span></td><td class="thr">Con conversiones y valor igual a 0</td></tr><tr data-sev="warn"><td class="code">P1b</td><td>Una PMax puja por conversiones y la reserva no trae valor</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">Igual</td></tr><tr data-sev="info"><td class="code">P2</td><td>PMax con pocas conversiones: contexto para leer el resultado, no un requisito</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">Menos de 30 conversiones al mes (orientativo: Google no publica un mínimo estricto)</td></tr><tr data-sev="warn"><td class="code">P3</td><td>Grupos de recursos con calidad Pobre o Promedio</td><td class="sevc"><span class="pill warn">Advertencia</span><span class="sev-note">si hay grupos Pobre; Informativo si solo hay Promedio</span></td><td class="thr">Calidad de Promedio o menos</td></tr><tr data-sev="info"><td class="code">P5</td><td>Grupos de recursos sin video propio (Google genera uno automático)</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">0 videos</td></tr><tr data-sev="info"><td class="code">P6</td><td>Faltan imágenes o textos en los grupos de recursos</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">Menos de 2 imágenes por formato (horizontal, cuadrada, vertical), menos de 5 títulos o menos de 4 descripciones</td></tr><tr data-sev="info"><td class="code">P7</td><td>Grupos de recursos sin señales de audiencia ni temas de búsqueda</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">0 señales</td></tr><tr data-sev="info"><td class="code">P9</td><td>PMax recibe búsquedas con el nombre del hotel y la campaña no tiene exclusión de marca</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">Más del 15% de las impresiones de las categorías de búsqueda son de la marca</td></tr><tr data-sev="info"><td class="code">P10</td><td>Dónde se muestra PMax: reparto de impresiones por tipo de ubicación (Google no entrega costo ni conversiones por ubicación)</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">—</td></tr><tr data-sev="info"><td class="code">P11</td><td>Cambios frecuentes de presupuesto o de puja; se mide la frecuencia, no cuánto cambió</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">Más de 3 cambios en 14 días por campaña</td></tr><tr data-sev="opp"><td class="code">P12</td><td>Oportunidad de escala: PMax que pierde impresiones por presupuesto</td><td class="sevc"><span class="pill opp">Oportunidad</span></td><td class="thr">Pierde más del 15% y está dentro de la meta</td></tr><tr data-sev="info"><td class="code">P13</td><td>Reparto del rendimiento entre grupos de recursos: uno concentra casi todas las conversiones o hay uno con gasto relevante y sin conversiones</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">80% de las conversiones de la campaña, o 10% del gasto de PMax sin conversiones</td></tr><tr data-sev="info"><td class="code">P15</td><td>PMax frente a Search genérico: CPA y ROAS de cada una (las dos pueden atribuirse la misma reserva)</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">—</td></tr></tbody></table></div>
+</section>
+<section class="grp" id="r-m">
+<div class="grp-head"><div><p class="eyebrow">Área M · 8 reglas</p><h3>IA Max</h3><p class="blurb">Solo en cuentas con campañas Search que tengan IA Max prendido: dónde está, qué automatizaciones tiene y si lo que sirve rinde.</p></div>
+<p class="mini"><span class="pill warn">6</span><span class="pill info">2</span></p></div>
+<div class="tw"><table class="rules"><thead><tr><th>Código</th><th>Qué revisa</th><th>Gravedad</th><th>Umbral</th></tr></thead><tbody><tr data-sev="warn"><td class="code">M1</td><td>IA Max está prendido en una campaña de marca</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">—</td></tr><tr data-sev="warn"><td class="code">M2</td><td>La expansión de URL está prendida y la campaña no tiene ninguna página excluida</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">—</td></tr><tr data-sev="info"><td class="code">M3</td><td>IA Max tiene los textos automáticos prendidos (Google escribe títulos y descripciones)</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">—</td></tr><tr data-sev="info"><td class="code">M4</td><td>Campañas que Google migró a IA Max o a concordancia amplia (para comparar antes y después)</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">Según la fecha de migración que devuelve Google</td></tr><tr data-sev="warn"><td class="code">M5</td><td>Los términos que eligió IA Max y no convirtieron suman una parte grande del gasto de la campaña</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">20% o más del gasto de la campaña y al menos 30 clics</td></tr><tr data-sev="warn"><td class="code">M6</td><td>El CPA de lo que sirve IA Max es mucho mayor que el de las palabras clave de la misma campaña (si es mucho menor, sale como oportunidad)</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">Más de 1,5 veces; mínimo 3 conversiones de cada lado y 30 clics de IA Max</td></tr><tr data-sev="warn"><td class="code">M7</td><td>La expansión de URL manda tráfico pagado a páginas que no convierten</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">5% o más del gasto de su campaña, 0 conversiones y al menos 20 clics</td></tr><tr data-sev="warn"><td class="code">M8</td><td>IA Max sirvió términos que ya contienen un negativo de la campaña</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">Negativos a nivel de campaña; el término contiene el texto del negativo</td></tr></tbody></table></div>
+</section>
+<section class="grp" id="r-u">
+<div class="grp-head"><div><p class="eyebrow">Área U · 5 reglas</p><h3>Audiencias</h3><p class="blurb">Listas de visitantes y de clientes: dónde están, qué tamaño tienen y cómo se usan. Las listas que Google arma solo no cuentan como propias.</p></div>
+<p class="mini"><span class="pill warn">1</span><span class="pill info">4</span></p></div>
+<div class="tw"><table class="rules"><thead><tr><th>Código</th><th>Qué revisa</th><th>Gravedad</th><th>Umbral</th></tr></thead><tbody><tr data-sev="info"><td class="code">U1</td><td>La cuenta no tiene listas propias de visitantes ni de clientes</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">—</td></tr><tr data-sev="warn"><td class="code">U2</td><td>Listas en uso en campañas o grupos de anuncios que no llegan al mínimo de usuarios para mostrar anuncios</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">Menos de 1.000 usuarios en Search o menos de 100 en Display (según lo que conocemos de Google)</td></tr><tr data-sev="info"><td class="code">U3</td><td>Hay listas de quien ya reservó (por el nombre: compradores, clientes, reservas, purchasers, converters...) y ninguna se excluye en ninguna campaña</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">—</td></tr><tr data-sev="info"><td class="code">U4</td><td>Señales de Performance Max con audiencias que no incluyen ninguna lista propia del hotel</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">—</td></tr><tr data-sev="info"><td class="code">U5</td><td>Grupos de anuncios que muestran los anuncios solo a su audiencia (segmentación) en vez de usarla solo para ajustar la puja (observación)</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">—</td></tr></tbody></table></div>
+</section>
+<section class="grp" id="r-g">
+<div class="grp-head"><div><p class="eyebrow">Área G · 4 reglas</p><h3>Rendimiento contra la meta</h3><p class="blurb">Cómo va la cuenta frente a lo que el hotel quiere lograr.</p></div>
+<p class="mini"><span class="pill warn">1</span><span class="pill info">3</span></p></div>
+<div class="tw"><table class="rules"><thead><tr><th>Código</th><th>Qué revisa</th><th>Gravedad</th><th>Umbral</th></tr></thead><tbody><tr data-sev="warn"><td class="code">G1</td><td>El ROAS o el CPA de la cuenta están por fuera de la meta del cuestionario</td><td class="sevc"><span class="pill warn">Advertencia</span></td><td class="thr">ROAS por debajo del 90% de la meta, o CPA por encima del 110%</td></tr><tr data-sev="info"><td class="code">G2</td><td>Referencia: campañas con CPA % (gasto ÷ valor de conversión) por encima del óptimo de su tipo; no es una meta del hotel</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">Óptimos: Search marca 11%, Performance Max 20%, Demand Gen 30%, Display 30%, Search genérica 30%</td></tr><tr data-sev="info"><td class="code">G5</td><td>El rendimiento cambió frente a los días anteriores de igual duración</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">Cambio de 20% o más en conversiones, CPA o ROAS</td></tr><tr data-sev="info"><td class="code">G6</td><td>Gran parte de las conversiones viene de campañas de marca (personas que ya conocían el hotel)</td><td class="sevc"><span class="pill info">Informativo</span></td><td class="thr">40% o más de las conversiones</td></tr></tbody></table></div>
+</section>
+
+    <section class="card" id="duplicados">
+      <p class="eyebrow">Una causa, un castigo</p>
+      <h2>Cómo se evita restar dos veces lo mismo</h2>
+      <p>Algunas situaciones podrían salir en más de una regla. Para que el puntaje no se castigue de más:</p>
+      <div class="tw"><table class=""><thead><tr><th>Si la situación es...</th><th>Qué pasa</th></tr></thead><tbody><tr><td>La reserva no trae valor (A7 o A8) y también afecta a una PMax (P1 o P1b)</td><td>Solo se muestra A7 o A8; el detalle nombra las PMax afectadas y P1 o P1b no aparecen.</td></tr><tr><td>Puja inteligente con pocas conversiones (C4) en una PMax (P2)</td><td>C4 no revisa las PMax: las cubre P2.</td></tr><tr><td>Presupuesto limitando una campaña rentable (C5 en Search, P12 en PMax)</td><td>Sin solape: cada regla mira su tipo de campaña.</td></tr><tr><td>Marca en las campañas genéricas de Search (C2) y marca en PMax (P9)</td><td>Se complementan: usan los mismos términos de marca del cuestionario.</td></tr><tr><td>Países con gasto y sin conversiones (B6) y el rendimiento por país (B5, B7)</td><td>B5 y B7 solo informan; únicamente B6 marca el problema y resta.</td></tr><tr><td>Gasto sin conversión en términos de búsqueda (D3) y en palabras clave (D6)</td><td>Si D3 salta, D6 aparece como informativa y no resta.</td></tr></tbody></table></div>
+    </section>
+
+    <section class="card" id="no-verificable">
+      <p class="eyebrow">Límites</p>
+      <h2>Lo que no se puede verificar y lo que queda fuera</h2>
+      <p>Una regla que no se puede calcular no inventa un hallazgo: aparece en el informe como "no se pudo verificar", con el motivo, y no resta puntos.</p>
+      <ul class="plain">
+        <li><b>Campos que Google rechaza.</b> Pasa con algunas consultas en ciertas cuentas; el motivo queda escrito en el informe.</li>
+        <li><b>Faltan datos del cuestionario.</b> Por ejemplo, sin el nombre del hotel no se puede revisar C2 ni C1 (cuando ninguna campaña lleva palabras de marca en el nombre); sin meta numérica, G1.</li>
+      </ul>
+      <p class="note">Todavía no están construidas dos reglas de Performance Max, porque la API no entrega el dato como se pensaba: P4 (recursos con rendimiento bajo; la etiqueta de rendimiento ya no existe y solo se puede leer si un recurso está rechazado o limitado) y P8 (expansión de URL; el campo no existe y lo más cercano es la opción de textos automáticos para páginas de expansión). Tampoco cubre la auditoría los términos exactos de búsqueda de PMax (Google solo entrega categorías agrupadas, sin costo), Hotel Ads ni la calidad del feed de Hotel Center, y auditar varias cuentas a la vez (por la cuota de Google).</p>
+    </section>
+
+    <section class="card" id="informe">
+      <p class="eyebrow">Salida</p>
+      <h2>El informe y la lectura con IA</h2>
+      <p><b>El informe</b> muestra el puntaje en un círculo, una barra por área, las métricas principales (gasto, conversiones, ROAS, CPA, campañas activas y la meta indicada), cómo se reparte el gasto por tipo de campaña, la conversión que se tomó como reserva y una tarjeta por hallazgo con su prioridad, qué pasa y qué hacer. Cuando los datos tienen columnas (países, dispositivos, comparación con el periodo anterior, PMax contra Search, grupos de recursos), la tarjeta los muestra como tabla. Desde el 16 de octubre cada auditoría real se guarda por cuenta, y el informe incluye una sección "Evolución del puntaje": si subió o bajó frente a la auditoría anterior, una gráfica, los hallazgos resueltos y nuevos, y una tabla con las últimas auditorías; avisa si la meta, el periodo o las reglas cambiaron entre dos auditorías. El botón "Ver historial de la cuenta" muestra la tendencia sin volver a consultar Google Ads. Se descarga en dos formatos:</p>
+      <ul class="plain">
+        <li><b>HTML:</b> un solo archivo que se abre en cualquier navegador y se guarda como PDF con Ctrl+P (Cmd+P en Mac). Es el que se puede mostrar a un cliente.</li>
+        <li><b>Markdown:</b> el mismo contenido en texto, para pegar en otro documento.</li>
+      </ul>
+      <p style="margin-top:16px"><b>La lectura con IA</b> es un botón opcional que puede usar cualquier persona con sesión (desde el 1 de noviembre de 2026; antes solo lo veían los administradores). Claude no recalcula nada: recibe los hallazgos ya calculados y los interpreta en 3 a 5 párrafos (qué corregir primero, qué hallazgos comparten una misma causa y qué dejar para después). Hay un límite de 10 análisis por hora por usuario porque cada llamada cuesta dinero, y si se genera, queda incluida en el informe descargable.</p>
+      <p><b>Límites de uso:</b> cada persona puede correr hasta 10 auditorías por hora, porque las consultas a Google Ads comparten la cuota de todo el equipo.</p>
+    </section>
+    <p class="footer">Actualizado el 3 de noviembre de 2026. La versión editable de este contenido es el documento "Auditoría de cuenta: cómo funciona y todas las reglas".</p>
+  </main>
+</div>
+
+<script>
+(function(){
+  var chips=[].slice.call(document.querySelectorAll('.chip'));
+  function apply(f){
+    chips.forEach(function(c){c.classList.toggle('on',c.dataset.f===f);c.setAttribute('aria-pressed',c.dataset.f===f)});
+    [].forEach.call(document.querySelectorAll('.grp'),function(g){
+      var vis=0;
+      [].forEach.call(g.querySelectorAll('tbody tr'),function(r){var show=f==='all'||r.dataset.sev===f;r.hidden=!show;if(show)vis++});
+      g.classList.toggle('empty',vis===0);
+    });
+  }
+  chips.forEach(function(c){c.addEventListener('click',function(){apply(c.dataset.f)})});
+  var links=[].slice.call(document.querySelectorAll('.toc a'));
+  var secs=links.map(function(a){return document.getElementById(a.getAttribute('href').slice(1))});
+  function spy(){
+    var y=window.scrollY+140,cur=0;
+    secs.forEach(function(s,i){if(s&&s.offsetTop<=y)cur=i});
+    links.forEach(function(a,i){a.classList.toggle('on',i===cur)});
+  }
+  window.addEventListener('scroll',spy,{passive:true});spy();
+})();
+</script>
+
+</body></html>
