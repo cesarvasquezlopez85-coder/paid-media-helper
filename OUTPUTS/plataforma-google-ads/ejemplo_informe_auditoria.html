@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auditoría de cuenta — Hotel Demo Cartagena</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;700;800&display=swap" rel="stylesheet">
+<style>body{margin:0;padding:40px 20px;background:#f4f5f8}@media print{body{background:#fff;padding:0}@page{margin:14mm}}
+.ar{font-family:'Plus Jakarta Sans','Inter',system-ui,-apple-system,sans-serif;color:#14213d;max-width:820px;margin:0 auto;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.ar *{box-sizing:border-box}
+.ar-eyebrow{color:#d9a400;font-weight:700;font-size:13px;letter-spacing:.08em;text-transform:uppercase}
+.ar-title{font-size:38px;font-weight:800;line-height:1.1;margin:6px 0 4px;color:#14213d}
+.ar-sub{color:#6b7280;font-size:14px;margin-bottom:22px}
+.ar-card{background:#fff;border:1px solid #e3e6ec;border-radius:18px;padding:26px 28px}
+.ar-score{display:flex;gap:30px;align-items:center;flex-wrap:wrap}
+.ar-donut{position:relative;width:180px;height:180px;flex:none}
+.ar-donut-c{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.ar-donut-n{font-size:56px;font-weight:800;line-height:1}
+.ar-donut-d{font-size:14px;color:#9aa1ad;margin-top:2px}
+.ar-verdict{flex:1;min-width:240px}
+.ar-verdict-k{display:flex;align-items:center;gap:8px;color:#d9a400;font-weight:700;font-size:13px;letter-spacing:.08em;text-transform:uppercase}
+.ar-verdict-i{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;border:2px solid currentColor;font-size:11px;line-height:1}
+.ar-verdict-t{font-size:20px;font-weight:700;line-height:1.35;margin-top:8px}
+.ar-verdict-s{font-size:14px;color:#8a919d;margin-top:8px}
+.ar-bars{margin-top:26px;display:grid;gap:14px}
+.ar-bar-row{display:flex;justify-content:space-between;font-size:14px;color:#8a919d}
+.ar-bar-row strong{color:#14213d}
+.ar-track{height:6px;border-radius:99px;background:#eef0f4;margin-top:6px;overflow:hidden}
+.ar-fill{height:100%;border-radius:99px;background:#14213d}
+.ar-h2{font-size:22px;font-weight:800;margin:34px 0 14px;color:#14213d;break-after:avoid;page-break-after:avoid}
+.ar-block{break-inside:avoid;page-break-inside:avoid}
+.ar-h2 small{font-size:14px;font-weight:500;color:#8a919d;margin-left:8px}
+.ar-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.ar-metric{background:#fff;border:1px solid #e3e6ec;border-radius:16px;padding:20px 22px}
+.ar-metric-l{font-size:14px;color:#8a919d}
+.ar-metric-v{font-size:34px;font-weight:800;margin-top:6px;line-height:1.1}
+.ar-metric-v.warn{color:#b98d00}
+.ar-stack{display:flex;gap:3px;height:16px}
+.ar-seg{border-radius:99px;min-width:6px}
+.ar-legend{display:flex;gap:6px 20px;flex-wrap:wrap;margin-top:14px;font-size:14px;color:#8a919d}
+.ar-legend strong{color:#14213d;margin-left:4px}
+.ar-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
+.ar-opp{background:#fff;border:1px solid #e3e6ec;border-left:5px solid var(--c);border-radius:16px;padding:22px 24px;margin-bottom:14px;break-inside:avoid;page-break-inside:avoid}
+.ar-pill{display:inline-block;padding:5px 12px;border-radius:8px;font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}
+.ar-opp-id{font-size:12px;color:#9aa1ad;margin-left:10px}
+.ar-opp h3{font-size:20px;font-weight:800;margin:14px 0 6px;color:#14213d}
+.ar-opp-d{color:#8a919d;font-size:16px;line-height:1.5;margin:0}
+.ar-rec{background:#f4f5f8;border-radius:12px;padding:14px 16px;margin-top:14px;font-size:16px;line-height:1.5}
+.ar-ev{margin:10px 0 0 18px;padding:0;color:#6b7280;font-size:14px;line-height:1.5}
+.ar-tw{margin-top:12px;overflow-x:auto}
+.ar-tbl{width:100%;border-collapse:collapse;font-size:14px;line-height:1.4}
+.ar-tbl th{text-align:right;color:#6b7280;font-weight:700;padding:7px 10px;border-bottom:2px solid #e3e6ec;white-space:nowrap}
+.ar-tbl td{text-align:right;padding:7px 10px;border-bottom:1px solid #eef0f4;color:#14213d;white-space:nowrap}
+.ar-tbl th:first-child,.ar-tbl td:first-child{text-align:left;white-space:normal}
+.ar-tbl td:first-child{font-weight:600}
+.ar-tbl tr:last-child td{border-bottom:none}
+.ar-ai{white-space:pre-wrap;font-size:16px;line-height:1.65}
+.ar-nv{margin:0 0 0 18px;padding:0;color:#6b7280;font-size:14px;line-height:1.6}
+.ar-note{background:#fdf3d9;border:1px solid #f2c419;border-radius:12px;padding:12px 16px;margin-bottom:18px;font-size:14px}
+.ar-foot{text-align:center;color:#9aa1ad;font-size:13px;margin:34px 0 8px}
+@media (max-width:640px){.ar-grid{grid-template-columns:1fr}.ar-title{font-size:30px}}
+@media print{.ar{max-width:none;padding:0 3px}}
+</style>
+</head><body>
+    <div class="ar">
+      <div class="ar-eyebrow">Auditoría de cuenta</div>
+      <div class="ar-title">Hotel Demo Cartagena</div>
+      <div class="ar-sub">Cuenta N/D (Hotel Demo (simulada)) · 2026-09-22 a 2026-10-21 (30 días) · Generada 2026-10-22</div>
+      <div class="ar-note"><strong>Datos de ejemplo (modo simulado).</strong> No son de una cuenta real.</div>
+      <div class="ar-card">
+        <div class="ar-score">
+          
+    <div class="ar-donut">
+      <svg viewBox="0 0 200 200" width="180" height="180" aria-hidden="true">
+        <circle cx="100" cy="100" r="82" fill="none" stroke="#e8eaf0" stroke-width="22"></circle>
+        <circle cx="100" cy="100" r="82" fill="none" stroke="#d23c3c" stroke-width="22" stroke-dasharray="190.6 324.6" transform="rotate(-90 100 100)"></circle>
+      </svg>
+      <div class="ar-donut-c"><div class="ar-donut-n">37</div><div class="ar-donut-d">/ 100</div></div>
+    </div>
+          <div class="ar-verdict">
+            <div class="ar-verdict-k" style="color:#d23c3c"><span class="ar-verdict-i">!</span>Puntaje de salud · Requiere atención</div>
+            <div class="ar-verdict-t">Tu cuenta tiene 5 problemas críticos de configuración que conviene corregir primero.</div>
+            <div class="ar-verdict-s">Cada crítico resta 5 puntos y cada advertencia 2.</div>
+          </div>
+        </div>
+        <div class="ar-bars">
+    <div><div class="ar-bar-row"><span>Conversiones</span><strong>80 / 100</strong></div>
+    <div class="ar-track"><div class="ar-fill" style="width:80%"></div></div></div>
+    <div><div class="ar-bar-row"><span>Redes y segmentación</span><strong>91 / 100</strong></div>
+    <div class="ar-track"><div class="ar-fill" style="width:91%"></div></div></div>
+    <div><div class="ar-bar-row"><span>Estructura y puja</span><strong>94 / 100</strong></div>
+    <div class="ar-track"><div class="ar-fill" style="width:94%"></div></div></div>
+    <div><div class="ar-bar-row"><span>Palabras clave y términos</span><strong>94 / 100</strong></div>
+    <div class="ar-track"><div class="ar-fill" style="width:94%"></div></div></div>
+    <div><div class="ar-bar-row"><span>Activos</span><strong>96 / 100</strong></div>
+    <div class="ar-track"><div class="ar-fill" style="width:96%"></div></div></div>
+    <div><div class="ar-bar-row"><span>Automatización</span><strong>100 / 100</strong></div>
+    <div class="ar-track"><div class="ar-fill" style="width:100%"></div></div></div>
+    <div><div class="ar-bar-row"><span>Performance Max</span><strong>96 / 100</strong></div>
+    <div class="ar-track"><div class="ar-fill" style="width:96%"></div></div></div>
+    <div><div class="ar-bar-row"><span>IA Max</span><strong>88 / 100</strong></div>
+    <div class="ar-track"><div class="ar-fill" style="width:88%"></div></div></div>
+    <div><div class="ar-bar-row"><span>Audiencias</span><strong>98 / 100</strong></div>
+    <div class="ar-track"><div class="ar-fill" style="width:98%"></div></div></div>
+    <div><div class="ar-bar-row"><span>Rendimiento contra la meta</span><strong>100 / 100</strong></div>
+    <div class="ar-track"><div class="ar-fill" style="width:100%"></div></div></div></div>
+      </div>
+      <div class="ar-block"><h2 class="ar-h2">Métricas principales</h2>
+      <div class="ar-grid"><div class="ar-metric"><div class="ar-metric-l">Gasto del periodo</div><div class="ar-metric-v">USD 25,600</div></div><div class="ar-metric"><div class="ar-metric-l">Conversiones</div><div class="ar-metric-v">185</div></div><div class="ar-metric"><div class="ar-metric-l">ROAS logrado</div><div class="ar-metric-v">445%</div></div><div class="ar-metric"><div class="ar-metric-l">CPA %</div><div class="ar-metric-v">22.5%</div></div><div class="ar-metric"><div class="ar-metric-l">Campañas activas</div><div class="ar-metric-v">8 de 8</div></div><div class="ar-metric"><div class="ar-metric-l">Meta indicada</div><div class="ar-metric-v">ROAS 450%</div></div></div>
+      <div class="ar-sub" style="margin:10px 0 0">Conversión tomada como reserva: <strong>Reserva confirmada (web)</strong>. Si no es la correcta, las reglas de conversiones (A1 a A8) se evalúan sobre otra acción: valídalo.</div></div>
+      
+    <div class="ar-block"><h2 class="ar-h2">Distribución del gasto</h2>
+    <div class="ar-card">
+      <div class="ar-stack"><div class="ar-seg" style="flex:0.55078125;background:#14213d"></div><div class="ar-seg" style="flex:0.33203125;background:#f2c419"></div><div class="ar-seg" style="flex:0.0703125;background:#5f7aa8"></div><div class="ar-seg" style="flex:0.046875;background:#c5c9d3"></div></div>
+      <div class="ar-legend"><span><span class="ar-dot" style="background:#14213d"></span>Search genérica<strong>55%</strong></span><span><span class="ar-dot" style="background:#f2c419"></span>Performance Max<strong>33%</strong></span><span><span class="ar-dot" style="background:#5f7aa8"></span>Search marca<strong>7%</strong></span><span><span class="ar-dot" style="background:#c5c9d3"></span>Display y video<strong>5%</strong></span></div>
+    </div></div>
+      
+      
+    <div class="ar-block"><h2 class="ar-h2">Evolución del puntaje<small>1 auditoría guardada de esta cuenta</small></h2>
+    <div class="ar-card"><p style="margin:0 0 4px;font-size:16px;font-weight:600">Es la primera auditoría guardada de esta cuenta (2026-10-22 22:46). Desde la próxima verás aquí cómo cambia el puntaje.</p>
+      
+      
+      
+    </div></div>
+      <h2 class="ar-h2">Oportunidades<small>5 críticas · 19 advertencias · 27 informativas</small></h2>
+      <div class="ar-opp" style="--c:#d23c3c">
+        <div><span class="ar-pill" style="background:#fbe3e1;color:#a8231f">Prioridad alta</span><span class="ar-opp-id">A4 · Conversiones</span></div>
+        <h3>Hay varias conversiones primarias de la misma categoría</h3>
+        <p class="ar-opp-d">Si cuentan la misma reserva, Google la suma más de una vez: el CPA y el ROAS se ven mejor de lo que son.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Dejar una sola primaria por reserva y pasar las demás a secundarias.</div>
+        <ul class="ar-ev"><li>PURCHASE: Reserva confirmada (web), GA4 purchase</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#d23c3c">
+        <div><span class="ar-pill" style="background:#fbe3e1;color:#a8231f">Prioridad alta</span><span class="ar-opp-id">A5 · Conversiones</span></div>
+        <h3>Importaciones de Google Analytics marcadas como primarias</h3>
+        <p class="ar-opp-d">Ya hay conversiones propias de Google Ads como primarias; la importación de GA debería ser secundaria para no duplicar la reserva.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Cambiar estas acciones a secundarias.</div>
+        <ul class="ar-ev"><li>GA4 purchase</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#d23c3c">
+        <div><span class="ar-pill" style="background:#fbe3e1;color:#a8231f">Prioridad alta</span><span class="ar-opp-id">A6 · Conversiones</span></div>
+        <h3>Microconversiones marcadas como primarias junto con la reserva</h3>
+        <p class="ar-opp-d">Llamadas, clics en WhatsApp o &#39;ver disponibilidad&#39; inflan las conversiones y hacen que el CPA parezca más bajo de lo real.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Pasarlas a secundarias para que la puja optimice solo hacia la reserva.</div>
+        <ul class="ar-ev"><li>Clic en WhatsApp</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#d23c3c">
+        <div><span class="ar-pill" style="background:#fbe3e1;color:#a8231f">Prioridad alta</span><span class="ar-opp-id">A9 · Conversiones</span></div>
+        <h3>Conversiones mejoradas no activadas</h3>
+        <p class="ar-opp-d">Sin conversiones mejoradas se pierden reservas que Google no puede atribuir por los cambios de privacidad.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Activarlas en Google Ads &gt; Objetivos &gt; Conversiones &gt; Configuración de conversiones.</div>
+        
+      </div>
+      <div class="ar-opp" style="--c:#d23c3c">
+        <div><span class="ar-pill" style="background:#fbe3e1;color:#a8231f">Prioridad alta</span><span class="ar-opp-id">B3 · Redes y segmentación</span></div>
+        <h3>Campañas Search con la red de display activada</h3>
+        <p class="ar-opp-d">Parte del gasto de Search se va a sitios de la red de display, con intención de compra mucho menor.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Desmarcar &#39;Incluir la Red de Display de Google&#39; en estas campañas.</div>
+        <ul class="ar-ev"><li>Hotel Demo - CO:es - Search Genérica</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#f2c419">
+        <div><span class="ar-pill" style="background:#f6e8bd;color:#a77a00">Prioridad media</span><span class="ar-opp-id">B2 · Redes y segmentación</span></div>
+        <h3>La red de socios de búsqueda gasta más y convierte peor</h3>
+        <p class="ar-opp-d">Socios de búsqueda: 20% del gasto de Search, CPA USD 400 contra USD 164 en Google Search.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Desactivar la red de socios en las campañas afectadas o acotar el presupuesto.</div>
+        <ul class="ar-ev"><li>Google Search: gasto USD 11,300, 69 conversiones, CPA USD 164</li><li>Socios de búsqueda: gasto USD 2,800, 7 conversiones, 1900 clics, CPA USD 400</li><li>Hotel Demo - CO:es - Search Genérica</li><li>Hotel Demo - CO:es - Search Todo Incluido</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#f2c419">
+        <div><span class="ar-pill" style="background:#f6e8bd;color:#a77a00">Prioridad media</span><span class="ar-opp-id">B6 · Redes y segmentación</span></div>
+        <h3>Países con gasto y sin conversiones</h3>
+        <p class="ar-opp-d">Estos países suman USD 820 (5% del gasto) con al menos 30 clics y ninguna conversión reportada, mientras otros países sí convierten.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Revisar si ese país es un mercado objetivo; si no, excluirlo de la segmentación geográfica.</div>
+        <div class="ar-tw"><table class="ar-tbl"><thead><tr><th>País</th><th>Gasto</th><th>% del gasto</th><th>Clics</th><th>Conversiones</th><th>CPA</th><th>Valor</th></tr></thead><tbody><tr><td>Estados Unidos</td><td>USD 820</td><td>5%</td><td>310</td><td>0.0</td><td>—</td><td>—</td></tr></tbody></table></div>
+      </div>
+      <div class="ar-opp" style="--c:#f2c419">
+        <div><span class="ar-pill" style="background:#f6e8bd;color:#a77a00">Prioridad media</span><span class="ar-opp-id">C2 · Estructura y puja</span></div>
+        <h3>Búsquedas de la marca están gastando en campañas genéricas</h3>
+        <p class="ar-opp-d">30% del gasto de las genéricas (USD 1,450) viene de términos con el nombre de la marca.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Agregar la marca como negativo en las genéricas y dejar esas búsquedas en la campaña de marca.</div>
+        <ul class="ar-ev"><li>hotel demo cartagena (USD 1,450)</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#f2c419">
+        <div><span class="ar-pill" style="background:#f6e8bd;color:#a77a00">Prioridad media</span><span class="ar-opp-id">C3 · Estructura y puja</span></div>
+        <h3>Campañas con la puja &#39;Maximizar clics&#39;</h3>
+        <p class="ar-opp-d">Maximizar clics trae tráfico sin importar si convierte. Estas campañas ya convierten y tu meta es CPA o ROAS: una puja por conversiones o valor estaría más alineada con la meta.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Evaluar pasarlas a una puja por conversiones o por valor de conversión.</div>
+        <ul class="ar-ev"><li>Hotel Demo - CO:es - Search Todo Incluido</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#f2c419">
+        <div><span class="ar-pill" style="background:#f6e8bd;color:#a77a00">Prioridad media</span><span class="ar-opp-id">C6 · Estructura y puja</span></div>
+        <h3>Campañas activas sin ninguna impresión en el periodo</h3>
+        <p class="ar-opp-d">Están activas pero no se muestran: pueden tener presupuesto en cero, estar sin anuncios aprobados o con una segmentación imposible. No se cuentan 1 campaña(s) creadas hace menos de 14 días.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Revisar su estado en Google Ads; si son estacionales, pausarlas.</div>
+        <ul class="ar-ev"><li>Hotel Demo - Search Fin de Año</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#f2c419">
+        <div><span class="ar-pill" style="background:#f6e8bd;color:#a77a00">Prioridad media</span><span class="ar-opp-id">D4 · Palabras clave y términos</span></div>
+        <h3>Faltan negativos de temas típicos que no son reservas</h3>
+        <p class="ar-opp-d">6% del gasto de Search (USD 880) fue a búsquedas de empleo, gratis o alquiler de largo plazo, sin conversiones.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Agregar esos temas como negativos (lista compartida de la cuenta).</div>
+        <ul class="ar-ev"><li>Empleo: USD 670 en 2 término(s), p. ej. &#39;empleo hotel cartagena&#39;</li><li>Gratis: USD 210 en 1 término(s), p. ej. &#39;hoteles gratis&#39;</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#f2c419">
+        <div><span class="ar-pill" style="background:#f6e8bd;color:#a77a00">Prioridad media</span><span class="ar-opp-id">D5 · Palabras clave y términos</span></div>
+        <h3>Palabras clave con índice de calidad bajo y gasto</h3>
+        <p class="ar-opp-d">2 palabra(s) con índice de calidad de 4 o menos pesan al menos el 1% del gasto de Search; pagan más por clic.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Mejorar la relevancia del anuncio y de la página de destino, o pausarlas.</div>
+        <ul class="ar-ev"><li>hotel cartagena (QS 4, USD 1,500, 52,000 impresiones)</li><li>hotel centro historico (QS 3, USD 420, 9,000 impresiones)</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#f2c419">
+        <div><span class="ar-pill" style="background:#f6e8bd;color:#a77a00">Prioridad media</span><span class="ar-opp-id">D6 · Palabras clave y términos</span></div>
+        <h3>Palabras clave con muchos clics y ninguna conversión</h3>
+        <p class="ar-opp-d">1 palabra(s) con al menos 30 clics y 1% o más del gasto de Search no reportaron conversiones.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Revisar si la palabra atrae búsquedas que no son de reserva; si es así, bajar la puja, cambiar la concordancia o pausarla.</div>
+        <ul class="ar-ev"><li>hoteles baratos (210 clics, USD 380)</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#f2c419">
+        <div><span class="ar-pill" style="background:#f6e8bd;color:#a77a00">Prioridad media</span><span class="ar-opp-id">E3 · Activos</span></div>
+        <h3>Faltan enlaces de sitio</h3>
+        <p class="ar-opp-d">Hay 2 de 4 enlaces de sitio recomendados. Sin ellos los anuncios ocupan menos espacio y llevan a menos páginas útiles (habitaciones, ofertas).</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Agregar enlaces de sitio a las páginas clave.</div>
+        
+      </div>
+      <div class="ar-opp" style="--c:#f2c419">
+        <div><span class="ar-pill" style="background:#f6e8bd;color:#a77a00">Prioridad media</span><span class="ar-opp-id">E4 · Activos</span></div>
+        <h3>Falta el activo de ubicación</h3>
+        <p class="ar-opp-d">Sin la ubicación (perfil de empresa) los anuncios no muestran dónde está el hotel.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Vincular el perfil de empresa de Google a la cuenta.</div>
+        
+      </div>
+      <div class="ar-opp" style="--c:#f2c419">
+        <div><span class="ar-pill" style="background:#f6e8bd;color:#a77a00">Prioridad media</span><span class="ar-opp-id">M1 · IA Max</span></div>
+        <h3>IA Max está prendido en una campaña de marca</h3>
+        <p class="ar-opp-d">En una campaña de marca el objetivo es cuidar las búsquedas del propio hotel. IA Max amplía a términos que no están en las palabras clave y puede abrirla a búsquedas que no son de marca, con la puja de marca.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Apagar IA Max en la campaña de marca, o mantenerlo solo si se decide a propósito y se revisan los términos que sirve.</div>
+        <ul class="ar-ev"><li>Hotel Demo - CO:es - Search Marca: USD 1,800 de gasto</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#f2c419">
+        <div><span class="ar-pill" style="background:#f6e8bd;color:#a77a00">Prioridad media</span><span class="ar-opp-id">M2 · IA Max</span></div>
+        <h3>La expansión de URL está prendida y no hay ninguna página excluida</h3>
+        <p class="ar-opp-d">Con la expansión de URL, Google puede mandar el tráfico a cualquier página del sitio (blog, política de privacidad, trabaje con nosotros...). Sin exclusiones, esas páginas reciben clics pagados.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Revisar a qué páginas manda el tráfico y excluir las que no deban recibirlo (IA Max &gt; Excluir páginas).</div>
+        <ul class="ar-ev"><li>Hotel Demo - CO:es - Search Genérica: USD 9,800 de gasto</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#f2c419">
+        <div><span class="ar-pill" style="background:#f6e8bd;color:#a77a00">Prioridad media</span><span class="ar-opp-id">M5 · IA Max</span></div>
+        <h3>Los términos que eligió IA Max gastan sin convertir</h3>
+        <p class="ar-opp-d">En estas campañas, los términos que IA Max eligió por su cuenta y no convirtieron suman 20% o más del gasto de la campaña. Es el costo de la expansión que no está dando reservas.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Negativizar los términos que no sirven (sección Negativización) o acotar la expansión: apagar la expansión de URL o IA Max en esa campaña.</div>
+        <div class="ar-tw"><table class="ar-tbl"><thead><tr><th>Campaña</th><th>Término</th><th>Origen</th><th>Gasto</th><th>Clics</th></tr></thead><tbody><tr><td>Hotel Demo - CO:es - Search Genérica</td><td>hoteles baratos</td><td>IA Max amplio</td><td>USD 2,200</td><td>260</td></tr><tr><td>Hotel Demo - CO:es - Search Genérica</td><td>empleo en hoteles de cartagena</td><td>IA Max sin palabra clave</td><td>USD 900</td><td>120</td></tr></tbody></table></div>
+      </div>
+      <div class="ar-opp" style="--c:#f2c419">
+        <div><span class="ar-pill" style="background:#f6e8bd;color:#a77a00">Prioridad media</span><span class="ar-opp-id">M6 · IA Max</span></div>
+        <h3>IA Max cuesta mucho más por reserva que las palabras clave</h3>
+        <p class="ar-opp-d">El CPA de lo que sirve IA Max supera en 1.5x o más al de las palabras clave de la misma campaña: la expansión está comprando reservas más caras.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Revisar los términos y las páginas de IA Max; si no se corrige, limitar la expansión o apagar IA Max en esa campaña.</div>
+        <ul class="ar-ev"><li>Hotel Demo - CO:es - Search Genérica: CPA de IA Max USD 950 (4 conv.) contra USD 80 de las palabras clave (30 conv.)</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#f2c419">
+        <div><span class="ar-pill" style="background:#f6e8bd;color:#a77a00">Prioridad media</span><span class="ar-opp-id">M7 · IA Max</span></div>
+        <h3>La expansión de URL manda tráfico pagado a páginas que no convierten</h3>
+        <p class="ar-opp-d">Estas páginas reciben 5% o más del gasto de su campaña y ninguna conversión. Suelen ser páginas de contenido (blog, políticas, contacto) que no son de reserva.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Excluirlas desde IA Max &gt; Excluir páginas (Google no deja excluir la página de destino del anuncio).</div>
+        <div class="ar-tw"><table class="ar-tbl"><thead><tr><th>Página</th><th>Campaña</th><th>Gasto</th><th>Clics</th></tr></thead><tbody><tr><td>https://www.hoteldemo.com/blog/que-hacer-en-cartagena</td><td>Hotel Demo - CO:es - Search Genérica</td><td>USD 820</td><td>140</td></tr></tbody></table></div>
+      </div>
+      <div class="ar-opp" style="--c:#f2c419">
+        <div><span class="ar-pill" style="background:#f6e8bd;color:#a77a00">Prioridad media</span><span class="ar-opp-id">M8 · IA Max</span></div>
+        <h3>IA Max sirvió términos que contienen un negativo de la campaña</h3>
+        <p class="ar-opp-d">1 términos servidos por IA Max (gasto USD 900) contienen una palabra negativa de su campaña. Un negativo de concordancia exacta o de frase no bloquea las variantes que IA Max encuentra. Se revisan las negativas a nivel de campaña.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Agregar el negativo en concordancia amplia o de frase, o negativizar el término completo (sección IA Max &gt; Cruce con negativos y Negativización).</div>
+        <div class="ar-tw"><table class="ar-tbl"><thead><tr><th>Campaña</th><th>Término</th><th>Negativo</th><th>Gasto</th></tr></thead><tbody><tr><td>Hotel Demo - CO:es - Search Genérica</td><td>empleo en hoteles de cartagena</td><td>empleo</td><td>USD 900</td></tr></tbody></table></div>
+      </div>
+      <div class="ar-opp" style="--c:#f2c419">
+        <div><span class="ar-pill" style="background:#f6e8bd;color:#a77a00">Prioridad media</span><span class="ar-opp-id">P1b · Performance Max</span></div>
+        <h3>Performance Max puja por conversiones y la reserva no trae valor</h3>
+        <p class="ar-opp-d">No se puede medir el ROAS ni priorizar las reservas de mayor valor.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Pasar el valor de la reserva desde la etiqueta.</div>
+        <ul class="ar-ev"><li>Hotel Demo - PMAX Todo Incluido</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#f2c419">
+        <div><span class="ar-pill" style="background:#f6e8bd;color:#a77a00">Prioridad media</span><span class="ar-opp-id">P3 · Performance Max</span></div>
+        <h3>Grupos de recursos con calidad baja</h3>
+        <p class="ar-opp-d">Google califica estos grupos de recursos como Pobre o Promedio: tienen menos combinaciones de anuncios para probar.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Agregar títulos, descripciones, imágenes y video hasta llegar a calidad Buena o Excelente.</div>
+        <ul class="ar-ev"><li>Hotel Demo - PMAX Reservas · Habitaciones y vistas (Pobre)</li><li>Hotel Demo - PMAX Todo Incluido · Plan todo incluido (Promedio)</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#f2c419">
+        <div><span class="ar-pill" style="background:#f6e8bd;color:#a77a00">Prioridad media</span><span class="ar-opp-id">U2 · Audiencias</span></div>
+        <h3>Listas en uso demasiado pequeñas para mostrar anuncios</h3>
+        <p class="ar-opp-d">Google solo muestra anuncios a una lista cuando tiene un mínimo de usuarios (hasta donde conocemos, 1.000 en Search y 100 en Display). Mientras no lo alcance, la audiencia no hace nada.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Esperar a que la lista crezca, ampliar su ventana o juntarla con otra; mientras tanto no depender de ella.</div>
+        <ul class="ar-ev"><li>Carrito abandonado: 200 usuarios en Search (mínimo 1,000) · en Hotel Demo - CO:es - Search Genérica</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">B1 · Redes y segmentación</span></div>
+        <h3>Tipo de segmentación geográfica de las campañas Search</h3>
+        <p class="ar-opp-d">2 usan &#39;presencia o interés&#39; y 3 solo &#39;presencia&#39;. En hoteles &#39;presencia o interés&#39; suele ser lo deseado (personas interesadas en el destino); no resta puntos.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Confirmar que cada campaña usa el tipo que corresponde a su mercado.</div>
+        <ul class="ar-ev"><li>Hotel Demo - CO:es - Search Genérica</li><li>Hotel Demo - CO:es - Search Todo Incluido</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">B4 · Redes y segmentación</span></div>
+        <h3>Campañas sin idioma configurado</h3>
+        <p class="ar-opp-d">Sin idioma, Google muestra los anuncios a cualquier idioma del navegador.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Elegir los idiomas de los mercados objetivo.</div>
+        <ul class="ar-ev"><li>Hotel Demo - CO:es - Search Marca</li><li>Hotel Demo - PMAX Todo Incluido</li><li>Hotel Demo - PMAX Reservas</li><li>Hotel Demo - Display Remarketing</li><li>Hotel Demo - Search Fin de Año</li><li>Hotel Demo - Search Semana Santa (nueva)</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">B5 · Redes y segmentación</span></div>
+        <h3>Rendimiento por país</h3>
+        <p class="ar-opp-d">Dónde se fue el gasto y qué convirtió en cada país, según lo que reporta Google Ads. Solo informativo: no resta puntos.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Comparar los países entre sí y con tus mercados prioritarios.</div>
+        <div class="ar-tw"><table class="ar-tbl"><thead><tr><th>País</th><th>Gasto</th><th>% del gasto</th><th>Clics</th><th>Conversiones</th><th>CPA</th><th>Valor</th></tr></thead><tbody><tr><td>Colombia</td><td>USD 14,800</td><td>91%</td><td>6,900</td><td>118.0</td><td>USD 125</td><td>USD 71,200</td></tr><tr><td>Estados Unidos</td><td>USD 820</td><td>5%</td><td>310</td><td>0.0</td><td>—</td><td>—</td></tr><tr><td>México</td><td>USD 640</td><td>4%</td><td>260</td><td>4.0</td><td>USD 160</td><td>USD 2,900</td></tr></tbody></table></div>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">B8 · Redes y segmentación</span></div>
+        <h3>Rendimiento por dispositivo</h3>
+        <p class="ar-opp-d">Cómo se reparten el gasto y las conversiones entre móvil, ordenador y tablet, según lo que reporta Google Ads. En hoteles es común que se navegue en móvil y se reserve en ordenador. Solo informativo.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Si un dispositivo gasta mucho y casi no convierte, revisar la página de reserva en ese dispositivo o ajustar la puja.</div>
+        <div class="ar-tw"><table class="ar-tbl"><thead><tr><th>Dispositivo</th><th>% del gasto</th><th>Gasto</th><th>Clics</th><th>Conversiones</th><th>CPA</th><th>ROAS</th></tr></thead><tbody><tr><td>Móvil</td><td>62%</td><td>USD 10,200</td><td>5,400</td><td>71.0</td><td>USD 144</td><td>393%</td></tr><tr><td>Ordenador</td><td>32%</td><td>USD 5,200</td><td>1,900</td><td>49.0</td><td>USD 106</td><td>650%</td></tr><tr><td>Tablet</td><td>6%</td><td>USD 950</td><td>260</td><td>2.0</td><td>USD 475</td><td>116%</td></tr></tbody></table></div>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">C4 · Estructura y puja</span></div>
+        <h3>Puja inteligente con muy pocas conversiones</h3>
+        <p class="ar-opp-d">Estas campañas tienen menos de 15 conversiones al mes; la puja inteligente aprende poco con tan pocos datos.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Considerar agrupar campañas parecidas o ampliar el presupuesto.</div>
+        <ul class="ar-ev"><li>Hotel Demo - Display Remarketing</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">C7 · Estructura y puja</span></div>
+        <h3>Grupos de anuncios con muchas palabras clave</h3>
+        <p class="ar-opp-d">1 grupo(s) con más de 20 palabras. Con puja inteligente no suele ser un problema; no resta puntos.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Revisar solo si los anuncios no se parecen a las palabras del grupo.</div>
+        <ul class="ar-ev"><li>Genéricas Cartagena (34 palabras)</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">C9 · Estructura y puja</span></div>
+        <h3>Campañas que pierden impresiones por ranking</h3>
+        <p class="ar-opp-d">Perder impresiones por ranking significa que la puja o la calidad del anuncio no alcanzan para ganar la subasta; subir el presupuesto no lo arregla. Solo informativo.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Revisar la puja objetivo, la relevancia de los anuncios y la calidad de la página de destino.</div>
+        <ul class="ar-ev"><li>Hotel Demo - CO:es - Search Todo Incluido (pierde 31% por ranking y 4% por presupuesto)</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">D2 · Palabras clave y términos</span></div>
+        <h3>Peso de la concordancia exacta en el gasto</h3>
+        <p class="ar-opp-d">21% del gasto en palabras clave va a concordancia exacta.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Solo informativo.</div>
+        
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">D9 · Palabras clave y términos</span></div>
+        <h3>Palabras clave con CTR bajo y volumen</h3>
+        <p class="ar-opp-d">1 palabra(s) con al menos 1,000 impresiones y un CTR menor al 2% (referencia editable). Un CTR bajo suele indicar anuncios poco relevantes para esa búsqueda. Solo informativo.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Revisar que el anuncio responda a lo que se busca, o separar la palabra en un grupo con anuncios propios.</div>
+        <ul class="ar-ev"><li>hotel centro historico (CTR 1.4%, 9,000 impresiones)</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">E5 · Activos</span></div>
+        <h3>Falta el activo de llamada</h3>
+        <p class="ar-opp-d">Sin el teléfono, quien prefiere llamar no tiene el botón en el anuncio. Depende de si el hotel atiende llamadas de reservas; no resta puntos.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Agregar el teléfono si el hotel atiende reservas por llamada.</div>
+        
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">G2 · Rendimiento contra la meta</span></div>
+        <h3>Referencia: campañas con CPA % por encima del óptimo de su tipo</h3>
+        <p class="ar-opp-d">Mismos óptimos que usa la sección Rendimiento: Search marca 11%, Performance Max 20%, Demand Gen 30%, Display 30%, Search genérica 30%. Son referencias de la plataforma, no una meta de tu hotel: no resta puntos. La meta que cuenta es la que declaras arriba (G1).</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Revisar presupuesto y pujas de estas campañas.</div>
+        <ul class="ar-ev"><li>Hotel Demo - CO:es - Search Todo Incluido: CPA % 46% (óptimo 30%)</li><li>Hotel Demo - Display Remarketing: CPA % 57% (óptimo 30%)</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">G5 · Rendimiento contra la meta</span></div>
+        <h3>El rendimiento cambió frente al periodo anterior</h3>
+        <p class="ar-opp-d">Comparación con los 30 días anteriores (2026-08-14 a 2026-09-12). Un cambio de 20% o más en conversiones, CPA o ROAS merece una explicación (temporada, cambios en la cuenta, medición). Solo informativo.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Revisar si coincide con cambios en la cuenta, estacionalidad del destino o problemas de medición.</div>
+        <div class="ar-tw"><table class="ar-tbl"><thead><tr><th>Métrica</th><th>Periodo anterior (2026-08-14 a 2026-09-12)</th><th>Periodo actual</th><th>Cambio</th></tr></thead><tbody><tr><td>Gasto</td><td>USD 14,100</td><td>USD 25,600</td><td>+82%</td></tr><tr><td>Conversiones</td><td>138</td><td>185</td><td>+34%</td></tr><tr><td>CPA</td><td>USD 102</td><td>USD 138</td><td>+35%</td></tr><tr><td>ROAS</td><td>624%</td><td>445%</td><td>-29%</td></tr></tbody></table></div>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">M3 · IA Max</span></div>
+        <h3>IA Max tiene los textos automáticos prendidos</h3>
+        <p class="ar-opp-d">Google puede escribir títulos y descripciones propios a partir del sitio. Si el hotel tiene tono de marca, tarifas o promociones que no se pueden contradecir, conviene revisar lo que crea. Solo informativo.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Revisar los recursos creados por IA Max (IA Max &gt; Qué creó IA Max) y, si algo no sirve, apagar los textos automáticos o ajustar las pautas.</div>
+        <ul class="ar-ev"><li>Hotel Demo - CO:es - Search Genérica</li><li>Hotel Demo - CO:es - Search Marca</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">M4 · IA Max</span></div>
+        <h3>Campañas que Google migró a IA Max o a concordancia amplia</h3>
+        <p class="ar-opp-d">Estas campañas tuvieron una migración automática (o por una recomendación aplicada). Conviene comparar su rendimiento antes y después. Solo informativo.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Revisar el rendimiento desde la fecha de migración y confirmar que se quiere mantener.</div>
+        <ul class="ar-ev"><li>Hotel Demo - CO:es - Search Marca: IA Max migrado el 2026-09-12</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">P10 · Performance Max</span></div>
+        <h3>Dónde se muestra Performance Max</h3>
+        <p class="ar-opp-d">Reparto de las impresiones por tipo de ubicación. Google no entrega costo ni conversiones por ubicación, así que no se puede saber cuál rinde mejor.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Si una ubicación te parece ajena a un hotel, revisa las exclusiones de ubicaciones en Google Ads.</div>
+        <ul class="ar-ev"><li>sitios web (Display): 52% de las impresiones</li><li>apps móviles: 31% de las impresiones</li><li>YouTube: 17% de las impresiones</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">P11 · Performance Max</span></div>
+        <h3>Cambios frecuentes de presupuesto o de puja en Performance Max</h3>
+        <p class="ar-opp-d">Más de 3 cambios en 14 días. El efecto sobre el aprendizaje depende del tipo y tamaño de cada cambio (aquí solo se mide la frecuencia, no la magnitud), pero tantos ajustes hacen difícil saber qué funcionó. No resta puntos.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Revisar si todos los cambios eran necesarios y esperar entre ajustes grandes.</div>
+        <ul class="ar-ev"><li>Hotel Demo - PMAX Reservas: 6 cambios en 14 días (presupuesto 4, puja 2)</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#2e9b5f">
+        <div><span class="ar-pill" style="background:#dff3e8;color:#1d6b41">Oportunidad</span><span class="ar-opp-id">P12 · Performance Max</span></div>
+        <h3>Oportunidad de escala: Performance Max que pierde impresiones por presupuesto</h3>
+        <p class="ar-opp-d">Hay demanda que estas campañas no alcanzan a captar porque el presupuesto diario se agota. Es una oportunidad, no un error: no resta puntos.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Subir el presupuesto o redistribuirlo desde campañas menos rentables.</div>
+        <ul class="ar-ev"><li>Hotel Demo - PMAX Reservas (pierde 22% por presupuesto)</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">P13 · Performance Max</span></div>
+        <h3>Reparto del rendimiento entre grupos de recursos</h3>
+        <p class="ar-opp-d">Un grupo concentra casi todas las conversiones de su campaña, o hay un grupo con gasto relevante y sin conversiones. Google no explica por qué reparte así el presupuesto; solo informativo.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Revisar los recursos y las señales de los grupos que no convierten, o aprender de lo que tiene el que sí.</div>
+        <div class="ar-tw"><table class="ar-tbl"><thead><tr><th>Campaña · grupo de recursos</th><th>Gasto</th><th>% del gasto de la campaña</th><th>Conversiones</th><th>% de las conversiones</th></tr></thead><tbody><tr><td>Hotel Demo - PMAX Reservas · Habitaciones y vistas</td><td>USD 5,200</td><td>68%</td><td>4.0</td><td>8%</td></tr><tr><td>Hotel Demo - PMAX Reservas · Marca</td><td>USD 2,400</td><td>32%</td><td>48.0</td><td>92%</td></tr></tbody></table></div>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">P15 · Performance Max</span></div>
+        <h3>Performance Max frente a Search genérico</h3>
+        <p class="ar-opp-d">Comparación de CPA y ROAS entre las dos. Las dos campañas pueden atribuirse la misma reserva (PMax también muestra en búsquedas), así que es una referencia y no una prueba de cuál rinde mejor. No resta puntos.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Usarlo como contexto para repartir presupuesto, mirando también la marca dentro de PMax (P9).</div>
+        <div class="ar-tw"><table class="ar-tbl"><thead><tr><th>Tipo</th><th>Gasto</th><th>Conversiones</th><th>CPA</th><th>ROAS</th></tr></thead><tbody><tr><td>Performance Max</td><td>USD 8,500</td><td>60.0</td><td>USD 142</td><td>458%</td></tr><tr><td>Search genérico</td><td>USD 14,100</td><td>79.0</td><td>USD 178</td><td>359%</td></tr></tbody></table></div>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">P2 · Performance Max</span></div>
+        <h3>Performance Max con pocas conversiones: contexto para leer el resultado</h3>
+        <p class="ar-opp-d">Con menos de 30 conversiones al mes la puja tiene pocos datos y puede rendir de forma irregular. Es contexto, no un requisito: Google no publica un mínimo estricto y no resta puntos.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Agrupar campañas parecidas, ampliar el presupuesto o medir una conversión más temprana como secundaria.</div>
+        <ul class="ar-ev"><li>Hotel Demo - PMAX Todo Incluido (8 conversiones al mes)</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">P5 · Performance Max</span></div>
+        <h3>Grupos de recursos sin video propio</h3>
+        <p class="ar-opp-d">Sin video, Google genera uno automático a partir de tus imágenes, que suele ser de menor calidad.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Subir al menos un video propio, horizontal y vertical si es posible.</div>
+        <ul class="ar-ev"><li>Hotel Demo - PMAX Reservas · Habitaciones y vistas</li><li>Hotel Demo - PMAX Todo Incluido · Plan todo incluido</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">P6 · Performance Max</span></div>
+        <h3>Faltan imágenes o textos en grupos de recursos</h3>
+        <p class="ar-opp-d">Menos recursos significan menos combinaciones que Google puede probar.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Completar hasta los mínimos recomendados (editables en la auditoría).</div>
+        <ul class="ar-ev"><li>Hotel Demo - PMAX Reservas · Habitaciones y vistas: faltan imágenes horizontales (1 de 2), imágenes verticales (0 de 2), títulos (3 de 5), descripciones (2 de 4)</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">P7 · Performance Max</span></div>
+        <h3>Grupos de recursos sin señales de audiencia ni temas de búsqueda</h3>
+        <p class="ar-opp-d">Las señales no limitan la campaña, pero le dan a Google un punto de partida más cercano a quien reserva.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Agregar audiencias propias (visitantes del sitio, lista de clientes) y temas de búsqueda del destino.</div>
+        <ul class="ar-ev"><li>Hotel Demo - PMAX Reservas · Habitaciones y vistas</li><li>Hotel Demo - PMAX Todo Incluido · Plan todo incluido</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">P9 · Performance Max</span></div>
+        <h3>Performance Max recibe búsquedas de la marca y no la tiene excluida</h3>
+        <p class="ar-opp-d">Las búsquedas del nombre del hotel suelen captarse más barato con la campaña de marca de Search; PMax puede estar quedándose con parte de ellas. Solo informativo: los datos de PMax no traen costo por categoría.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Evaluar agregar una exclusión de marca a la campaña PMax.</div>
+        <ul class="ar-ev"><li>Hotel Demo - PMAX Reservas: 32% de las impresiones de categorías de búsqueda son de la marca</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">U3 · Audiencias</span></div>
+        <h3>Hay listas de quien ya reservó y no se excluyen en ninguna campaña</h3>
+        <p class="ar-opp-d">Excluir a los huéspedes recientes de las campañas de captación evita pagar por quien ya reservó. Es una decisión de estrategia (a veces se les quiere volver a vender), por eso es solo informativa.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Evaluar excluir estas listas en las campañas de captación, o usarlas en una campaña propia de huéspedes anteriores.</div>
+        <ul class="ar-ev"><li>Clientes 2026: 2,700 usuarios en Search, 2,200 en Display</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">U4 · Audiencias</span></div>
+        <h3>Señales de Performance Max sin listas propias del hotel</h3>
+        <p class="ar-opp-d">Estos grupos de recursos tienen audiencias como señal, pero ninguna incluye una lista de visitantes o de clientes del hotel. Las señales no limitan la campaña, pero una lista propia le da a Google un punto de partida más cercano a quien reserva.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Agregar como señal la lista de visitantes del sitio o de clientes.</div>
+        <ul class="ar-ev"><li>Hotel Demo - PMAX Reservas · Marca</li></ul>
+      </div>
+      <div class="ar-opp" style="--c:#9fb0cf">
+        <div><span class="ar-pill" style="background:#e8edf5;color:#31456b">Informativo</span><span class="ar-opp-id">U5 · Audiencias</span></div>
+        <h3>Grupos de anuncios que muestran los anuncios solo a su audiencia</h3>
+        <p class="ar-opp-d">En estos grupos la audiencia es una segmentación: solo la ve quien está en la lista. En observación (lo más común) la audiencia solo ajusta la puja y no limita el alcance.</p>
+        <div class="ar-rec"><strong>Recomendación:</strong> Confirmar que limitar el alcance a esa lista es lo que se quiere.</div>
+        <ul class="ar-ev"><li>Hotel Demo - CO:es - Search Todo Incluido · Remarketing</li></ul>
+      </div>
+      <h2 class="ar-h2">Revisiones que no se pudieron verificar</h2><div class="ar-card"><ul class="ar-nv"><li><strong>F1 · Recomendaciones que se aplican solas:</strong> No se pudo leer: Dato de ejemplo: recurso no consultado en modo simulado.</li></ul></div>
+      <div class="ar-foot">Generado con Paid Media Helper a partir de datos de Google Ads. Los umbrales son heurísticos y no reemplazan el criterio del estratega de cuenta.</div>
+    </div></body></html>
