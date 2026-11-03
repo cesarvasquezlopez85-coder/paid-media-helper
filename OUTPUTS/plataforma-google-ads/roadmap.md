@@ -1,8 +1,11 @@
 # Roadmap: Plataforma de Análisis de Google Ads
 Fecha: 2026-07-12
 
+## Versión: V4 (2026-11-03)
+La app está en V4 — el sidebar ya lo dice. Las novedades de la V4 (diseño Roiba para todos, 66 reglas en la auditoría, más herramientas de IA Max, análisis con IA para todos y copys con IA) están en `Resumen_Proyecto.md`, sección "Versión V4". Lo que sigue es el detalle de la V3:
+
 ## Versión: V3 (2026-10-14)
-La app está en V3 — el sidebar ya lo dice. Desde la V2 se sumaron la **Auditoría de cuenta** (Función 14, primera del menú), el acceso de usuarios por MCC completo, Oportunidad de ingresos con varias cuentas y filtro por tipo de campaña, la base de conexión a BigQuery y un rediseño con el sistema de Roiback (ya construido en la rama `rediseno-roiback`, sin publicar). Ver `Resumen_Proyecto.md` para el detalle.
+La app estaba en V3 — el sidebar lo decía. Desde la V2 se sumaron la **Auditoría de cuenta** (Función 14, primera del menú), el acceso de usuarios por MCC completo, Oportunidad de ingresos con varias cuentas y filtro por tipo de campaña, la base de conexión a BigQuery y un rediseño con el sistema de Roiback (ya construido en la rama `rediseno-roiback`, sin publicar). Ver `Resumen_Proyecto.md` para el detalle.
 
 ## Versión anterior: V2 (2026-07-29)
 La app pasó de V1 a V2 — el sidebar ya lo muestra así. El salto de versión marca que la plataforma dejó de depender solo de archivos subidos a mano: ahora hay conexión real y en producción con la API de Google Ads (lectura de campañas y términos de búsqueda, y la primera escritura real — subir palabras clave negativas), además de tres funciones nuevas desde el lanzamiento original (Comparar periodos, Oportunidad de ingresos, Proyección de ventas). Ver "Ya construido y validado" abajo para el detalle completo de cada pieza.

@@ -8,6 +8,19 @@ El generador de copys de anuncio desde una URL estuvo oculto del menú desde el 
 
 Ya no es solo un prototipo de Streamlit, y ya no corre solo local: existe una implementación web completa (`webapp/`, HTML/CSS/JS + un servidor Python sin dependencias externas) con login por usuario/contraseña, que reproduce el diseño hecho en Claude Design. **Vive en producción en [Railway](https://railway.app)**, en `https://paid-media-helper.up.railway.app`, con auto-deploy desde la rama `main` del repo de GitHub — cualquier cambio que se suba se despliega solo, sin pasos manuales. También se puede correr local con `python3 webapp/server.py` → `http://localhost:8642` — ver "Cómo corre la plataforma" más abajo.
 
+## Versión V4 (2026-11-03)
+
+El sidebar de la app ya dice V4. Lo que cambia desde la V3 (35 cambios publicados entre el 2026-10-14 y el 2026-11-03):
+
+- **Diseño Roiback para todos** (2026-11-01): colores, tipografía (Montserrat y Lato) y menú del rediseño, sin interruptor. El diseño anterior sigue en `styles.css` por si hay que volver atrás.
+- **Auditoría con 66 reglas en 10 áreas:** se sumaron Audiencias (U1 a U5, 2026-10-17) e IA Max (M1 a M8, 2026-10-22); además la lectura de conversiones mejoradas (A9) vuelve con la API v26 (2026-10-17) y cada auditoría guarda su historial con tendencia del puntaje (2026-10-16).
+- **IA Max con más herramientas** (2026-10-22): estado con textos automáticos y expansión de URL, pestaña "Qué creó IA Max" (recursos, búsquedas y páginas, con filas en ámbar y orden por columnas) y pestaña "Excluir páginas" para sacar páginas de la expansión de URL, siempre con vista previa.
+- **IA para todos y copys con IA** (2026-11-01): el análisis con IA de Rendimiento y de la Auditoría queda abierto a todos los usuarios (10 por hora por usuario) y el Generador de copys vuelve al menú, solo para administradores, con borradores para Search, Performance Max, Demand Gen, YouTube y Meta.
+- **Ritmo de consumo y Bookings** (2026-10-19): selector de hotel (uno o varios), totales en la ventana de campañas, y Comparar periodos de Bookings en un solo cuadro con flechas y porcentaje de cambio, descargable en HTML.
+- **Menú reordenado** (2026-10-22): Auditoría, Rendimiento, ROAS, IA Max, Ritmo de consumo y siguientes.
+- **Infraestructura y seguridad:** plan Pro de Railway, despliegue solo cuando cambia `webapp/`, librerías de la página servidas desde la propia plataforma (`vendor/`), todas las credenciales rotadas tras el incidente de seguridad de Railway (2026-10-21 y 22) y `/api/fetch` ya no acepta direcciones internas.
+- **Material para el equipo:** presentación de 31 diapositivas en colores de Roiba con capturas nuevas, el documento y la página con las 66 reglas, el informe de ejemplo de la auditoría y la comparación con Google Ads Editor.
+
 ## Versión V3 (2026-10-14)
 
 El sidebar de la app ya dice V3. Lo que cambia desde la V2:
@@ -28,7 +41,7 @@ Fue la versión del sidebar entre el 2026-07-29 y el 2026-10-14. El salto de V1 
 - **Conectada de verdad desde el 2026-07-28** (no solo en modo simulado): la primera prueba contra una cuenta real de la agencia encontró y corrigió varios bugs reales (versión de API retirada, un parámetro no soportado, un nombre de campo equivocado, un filtro que dejaba fuera la mayoría de las cuentas del MCC) — ver el detalle completo en la sección de Función 1 más abajo y en `roadmap.md`.
 - Mientras las credenciales de Google no estén configuradas (o para cualquier cuenta de prueba), todo sigue funcionando en **modo simulado** — mismos botones, mismo flujo, datos de ejemplo en vez de reales.
 
-## Estado: V3 — catorce funciones construidas, catorce activas en el menú (la Función 3, copys, solo para administradores desde el 2026-11-01)
+## Estado: V4 — catorce funciones construidas, catorce activas en el menú (la Función 3, copys, solo para administradores desde el 2026-11-01)
 
 **Menú reordenado (2026-07-29):** las cuatro funciones conectadas a Google Ads quedan agrupadas arriba — Rendimiento, Comparar periodos, Oportunidad de ingresos, Negativización — y las dos que no dependen de Google Ads (Bookings, Proyección de ventas) quedan abajo.
 
