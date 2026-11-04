@@ -7181,7 +7181,7 @@ function renderHotelDetail() {
         <td>${c.ad_groups_updated} actualiz. · ${c.ad_groups_created} nuevos · ${c.ad_groups_unchanged} sin cambio</td></tr>`).join('');
       flowHtml = `
         <div class="ok-panel" style="margin-top:14px">
-          <strong>Vista previa lista.</strong> Google validó el cambio sin aplicar nada: se actualizarán <strong>${p.updated}</strong> modificadores y se crearán <strong>${p.created}</strong>
+          <strong>Vista previa lista.</strong> Google validó el cambio sin aplicar nada: se actualizar${p.updated === 1 ? 'á' : 'án'} <strong>${p.updated}</strong> modificador${p.updated === 1 ? '' : 'es'} y se crear${p.created === 1 ? 'á' : 'án'} <strong>${p.created}</strong>
           en los ${data.ad_groups} grupo${data.ad_groups === 1 ? '' : 's'} de anuncios de "${escapeHtml(data.campaign_name)}"${p.simulated ? ' (modo simulado)' : ''}.
           ${p.failed_count ? `<div class="error-panel" style="margin-top:8px"><strong>${p.failed_count} con problema:</strong><ul style="margin:6px 0 0 18px">${(p.failed || []).map((m) => `<li>${escapeHtml(m)}</li>`).join('')}</ul></div>` : ''}
           <div class="table-scroll" style="margin-top:10px"><table>
@@ -7194,7 +7194,7 @@ function renderHotelDetail() {
         </div>`;
     } else {
       const done = f.status === 'done' && f.result ? `
-        <div class="ok-panel" style="margin-top:14px"><strong>Listo.</strong> Se actualizaron ${f.result.updated} modificadores y se crearon ${f.result.created}${f.result.simulated ? ' (modo simulado)' : ''}.
+        <div class="ok-panel" style="margin-top:14px"><strong>Listo.</strong> Se actualiz${f.result.updated === 1 ? 'ó' : 'aron'} ${f.result.updated} modificador${f.result.updated === 1 ? '' : 'es'} y se cre${f.result.created === 1 ? 'ó' : 'aron'} ${f.result.created}${f.result.simulated ? ' (modo simulado)' : ''}.
           ${f.result.failed_count ? `<div class="error-panel" style="margin-top:8px"><strong>${f.result.failed_count} con problema:</strong><ul style="margin:6px 0 0 18px">${(f.result.failed || []).map((m) => `<li>${escapeHtml(m)}</li>`).join('')}</ul></div>` : ''}
           Los valores de arriba ya son los leídos de nuevo desde Google Ads.</div>` : '';
       flowHtml = `
