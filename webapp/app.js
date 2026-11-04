@@ -6934,6 +6934,8 @@ const HOTEL_TYPE_META = {
   rango_fechas: { label: 'Rango de fechas de entrada', help: 'Temporadas o fechas concretas. Solo lectura en esta versión.', min: 0.1, max: 10, zeroOk: true, editable: false },
 };
 const HOTEL_RENDER_LIMIT = 200;
+// Interruptor de la sección Hoteles en el menú. false = oculta para todos.
+const HOTEL_SECTION_VISIBLE = false;
 
 function hotelMoney(n, currency) {
   if (n === null || n === undefined || Number.isNaN(n)) return 'N/D';
@@ -7161,7 +7163,7 @@ function renderHotelDetail() {
         ${perfNote}
         <div class="table-scroll">
           <table>
-            <thead><tr><th>Tramo</th><th>Valor actual</th><th>Clics</th><th>CPC</th><th>Conv.</th><th>CPA</th><th title="CPA del tramo frente al CPA promedio de la campaña (solo con 3+ conversiones)">CPA vs. campaña</th><th>Nuevo valor</th></tr></thead>
+            <thead><tr><th>Tramo</th><th title="Multiplicador que Google aplica sobre la puja base en este tramo">Modificador actual (×)</th><th>Clics</th><th title="CPC real pagado en el periodo, no la puja">CPC pagado</th><th>Conv.</th><th>CPA</th><th title="CPA del tramo frente al CPA promedio de la campaña (solo con 3+ conversiones)">CPA vs. campaña</th><th>Nuevo modificador (×)</th></tr></thead>
             <tbody>${tramos.map((t) => renderHotelTramoRow(t, data.totals, currency, locked)).join('')}</tbody>
           </table>
         </div>
@@ -7215,6 +7217,7 @@ function renderHotelDetail() {
       <h3 style="margin:0">${escapeHtml(data.campaign_name)}</h3>
       <span class="footnote">${escapeHtml(BID_STRATEGY_LABELS_ES[data.bidding_strategy_type] || data.bidding_strategy_type || '')} · ${data.ad_groups} grupo${data.ad_groups === 1 ? '' : 's'} de anuncios · ${fmtInt(t.clicks)} clics · ${hotelMoney(t.cost, currency)} · ${t.conversions ? t.conversions.toFixed(1) : 0} conv.</span>
     </div>
+    <p class="footnote" style="margin:0 0 14px">Un <strong>modificador</strong> es un multiplicador que Google aplica sobre la puja base de la campaña en ese tramo: 1 = sin ajuste, 0,8 = pujar un 20 % menos, 1,3 = un 30 % más, 0 = no servir. El <strong>CPC pagado</strong> es lo que costó cada clic en el periodo, no la puja.</p>
     ${lockBanner}
     ${data.tramos.length ? groups : '<div class="error-panel">Esta campaña no tiene modificadores de hotel en sus grupos de anuncios.</div>'}
     <p class="footnote">El cambio se aplica por campaña: el mismo valor en el tramo para todos sus grupos de anuncios (si algún grupo no tiene el tramo, se crea). Valores entre 0,1 y 10 (fechas elegidas: 0,5 a 2); 1 = sin ajuste; 0 = no servir en ese tramo. El CPA de cada tramo es el del periodo elegido; con pocas conversiones no es concluyente.</p>
@@ -12183,9 +12186,11 @@ fetch('/api/me').then((r) => r.json()).then((data) => {
   if (navAdmin && currentUser.isAdmin) navAdmin.style.display = '';
   const navCopys = document.getElementById('nav-copys');
   if (navCopys && currentUser.isAdmin) navCopys.style.display = '';
-  // Hoteles está en afinado: solo super admin (el servidor lo exige también).
+  // Hoteles está en afinado: oculto para todos (también para el super admin) hasta
+  // que se ponga HOTEL_SECTION_VISIBLE en true; cuando se muestre, solo super admin
+  // (el servidor también lo exige).
   const navHoteles = document.getElementById('nav-hoteles');
-  if (navHoteles && currentUser.isSuperAdmin) navHoteles.style.display = '';
+  if (navHoteles && HOTEL_SECTION_VISIBLE && currentUser.isSuperAdmin) navHoteles.style.display = '';
   if (data.must_change_password) {
     forcePasswordChange = true;
     render();
