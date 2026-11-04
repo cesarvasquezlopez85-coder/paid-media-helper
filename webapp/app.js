@@ -207,6 +207,27 @@ const state = {
     actions: {}, // resource_name -> { status: 'idle'|'busy'|'error', error }
   },
 
+  // Hoteles — modificadores de oferta de campañas de hotel (AdGroupBidModifier).
+  // Se elige cuenta + rango, se listan las campañas de hotel y se edita una
+  // campaña a la vez. Misma regla que ROAS/IA Max: vista previa antes de escribir.
+  hotel: {
+    api: {
+      statusChecked: false, configured: false,
+      accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
+      dateFrom: hotelDefaultDates().from, dateTo: hotelDefaultDates().to,
+      simulated: false, error: null,
+      mcc: {
+        status: 'idle', groups: [], filter: '',
+        selectedId: '', selectedName: '', accountIdsStatus: 'idle', accountIds: null, error: null,
+      },
+    },
+    list: { status: 'idle', error: null, campaigns: [], currency: '', templateLocked: false, filter: '' },
+    detail: {
+      status: 'idle', error: null, data: null, campaignId: null,
+      edits: {}, // 'tipo|tramo' -> texto escrito por el usuario
+      flow: { status: 'idle', preview: null, result: null, error: null }, // idle | previewing | preview_ready | applying | done | error
+    },
+  },
   // IA Max (AI Max for Search) — a diferencia de "Ask Advisor", sí tiene
   // API real (Campaign.ai_max_setting, desde v25). Tres sub-vistas sobre
   // las mismas campañas Search de la cuenta elegida: estado/toggle, qué
@@ -465,6 +486,10 @@ const PAGE_META = {
   recomendaciones: {
     title: 'Recomendaciones de Google',
     caption: 'El puntaje de optimización y las recomendaciones que Google Ads ya generó para la cuenta — revísalas, y aplícalas o descártalas directo desde acá.',
+  },
+  hoteles: {
+    title: 'Hoteles',
+    caption: 'Modificadores de oferta de las campañas de hotel: ventana de reserva, duración de la estancia, día de entrada y fechas elegidas. Ve cómo rinde cada tramo y ajústalos campaña por campaña.',
   },
   iamax: {
     title: 'IA Max',
@@ -772,6 +797,7 @@ function render() {
   else if (state.page === 'auditoria') pageHtml = renderAuditPage();
   else if (state.page === 'recomendaciones') pageHtml = renderRecsPage();
   else if (state.page === 'iamax') pageHtml = renderIaMaxPage();
+  else if (state.page === 'hoteles') pageHtml = renderHotelPage();
   else if (state.page === 'exclusiones') pageHtml = renderContentExclusionsPage();
   else if (state.page === 'keywordplanner') pageHtml = renderKeywordPlannerPage();
   else if (state.page === 'pacing') pageHtml = renderPacingPage();
@@ -6888,6 +6914,570 @@ function renderIaMaxPage() {
 }
 
 // ---------------------------------------------------------------------------
+// Página — Hoteles (modificadores de oferta de campañas de hotel)
+//
+// Los modificadores (ventana de reserva, estancia, día de entrada, fechas
+// elegidas por el usuario) viven por grupo de anuncios; acá se editan POR
+// CAMPAÑA: el mismo valor en cada tramo para todos los grupos de la campaña.
+// Mismo patrón de escritura que ROAS e IA Max: vista previa validada por
+// Google y solo después "Confirmar y aplicar". En las cuentas con plantilla
+// externa de modificadores la sección es de solo lectura (el servidor
+// también lo rechaza, no depende de esta pantalla).
+// ---------------------------------------------------------------------------
+
+const HOTEL_TYPE_ORDER = ['ventana', 'estancia', 'dia', 'fechas_usuario', 'rango_fechas'];
+const HOTEL_TYPE_META = {
+  ventana: { label: 'Ventana de reserva', help: 'Días entre la búsqueda y la entrada al hotel.', min: 0.1, max: 10, zeroOk: true, editable: true },
+  estancia: { label: 'Duración de la estancia', help: 'Noches de la estancia buscada.', min: 0.1, max: 10, zeroOk: true, editable: true },
+  dia: { label: 'Día de entrada', help: 'Día de la semana en que empieza la estancia.', min: 0.1, max: 10, zeroOk: true, editable: true },
+  fechas_usuario: { label: 'Fechas elegidas por el usuario', help: 'Si quien busca eligió fechas o Google usó unas por defecto.', min: 0.5, max: 2, zeroOk: false, editable: true },
+  rango_fechas: { label: 'Rango de fechas de entrada', help: 'Temporadas o fechas concretas. Solo lectura en esta versión.', min: 0.1, max: 10, zeroOk: true, editable: false },
+};
+const HOTEL_RENDER_LIMIT = 200;
+
+function hotelMoney(n, currency) {
+  if (n === null || n === undefined || Number.isNaN(n)) return 'N/D';
+  try {
+    return new Intl.NumberFormat('en-US', { style: 'currency', currency: currency || 'USD', currencyDisplay: 'code', maximumFractionDigits: 2 }).format(n);
+  } catch (err) {
+    return n.toFixed(2) + (currency ? ' ' + currency : '');
+  }
+}
+
+function hotelDefaultDates() {
+  const pad = (n) => String(n).padStart(2, '0');
+  const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const to = new Date(); to.setDate(to.getDate() - 1);
+  const from = new Date(to); from.setDate(from.getDate() - 29);
+  return { from: iso(from), to: iso(to) };
+}
+
+function resetHotelAccountData() {
+  const s = state.hotel;
+  s.list = { status: 'idle', error: null, campaigns: [], currency: '', templateLocked: false, filter: s.list ? s.list.filter : '' };
+  s.detail = { status: 'idle', error: null, data: null, campaignId: null, edits: {}, flow: { status: 'idle', preview: null, result: null, error: null } };
+}
+
+function hotelRefocus(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.focus();
+  const len = el.value.length;
+  try { el.setSelectionRange(len, len); } catch (err) { /* algunos tipos de input no lo permiten */ }
+}
+
+function fetchHotelCampaigns() {
+  const s = state.hotel;
+  const a = s.api;
+  const customerId = hotelCustomerId();
+  if (!customerId && !a.simulated) { a.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
+  if (!a.dateFrom || !a.dateTo) { a.error = 'Elige el rango de fechas.'; render(); return; }
+  a.error = null;
+  s.list.status = 'loading'; s.list.error = null;
+  s.detail = { status: 'idle', error: null, data: null, campaignId: null, edits: {}, flow: { status: 'idle', preview: null, result: null, error: null } };
+  render();
+
+  const params = new URLSearchParams({ customer_id: customerId || '', date_from: a.dateFrom, date_to: a.dateTo });
+  fetch(`/api/google-ads/hotel-campaigns?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.simulated = !!data.simulated;
+      s.list.campaigns = data.campaigns || [];
+      s.list.currency = data.currency || '';
+      s.list.templateLocked = !!data.template_locked;
+      s.list.status = 'ready';
+      render();
+    })
+    .catch((err) => {
+      a.error = err.message || String(err);
+      s.list.status = 'idle';
+      render();
+    });
+}
+
+// keepFlow=true: se vuelve a leer la campaña después de aplicar, sin borrar el aviso de "Listo".
+function openHotelCampaign(campaignId, keepFlow) {
+  const s = state.hotel;
+  const a = s.api;
+  const d = s.detail;
+  d.campaignId = campaignId; d.status = 'loading'; d.error = null;
+  if (!keepFlow) { d.edits = {}; d.flow = { status: 'idle', preview: null, result: null, error: null }; }
+  render();
+
+  const params = new URLSearchParams({ customer_id: hotelCustomerId() || '', campaign_id: campaignId, date_from: a.dateFrom, date_to: a.dateTo });
+  fetch(`/api/google-ads/hotel-modifiers?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      d.data = data; d.status = 'ready';
+      if (data.template_locked) s.list.templateLocked = true;
+      render();
+    })
+    .catch((err) => { d.status = 'error'; d.error = err.message || String(err); render(); });
+}
+
+function hotelTramoKey(t) { return `${t.type}|${t.label}`; }
+
+// Cambios que el usuario escribió y difieren de lo vigente. `invalid` junta lo que no cumple los límites.
+function hotelPendingChanges() {
+  const d = state.hotel.detail;
+  const changes = []; const invalid = [];
+  if (!d.data) return { changes, invalid };
+  d.data.tramos.forEach((t) => {
+    const raw = d.edits[hotelTramoKey(t)];
+    if (raw === undefined || String(raw).trim() === '') return;
+    const meta = HOTEL_TYPE_META[t.type];
+    if (!meta || !meta.editable) return;
+    const value = Number(String(raw).replace(',', '.'));
+    if (Number.isNaN(value)) { invalid.push(`${t.text}: "${raw}" no es un número.`); return; }
+    const rounded = Math.round(value * 100) / 100;
+    if (rounded === 0 && !meta.zeroOk) { invalid.push(`${meta.label} · ${t.text}: no admite 0.`); return; }
+    if (rounded !== 0 && (rounded < meta.min || rounded > meta.max)) { invalid.push(`${meta.label} · ${t.text}: debe estar entre ${meta.min} y ${meta.max}${meta.zeroOk ? ' (o 0 para no servir)' : ''}.`); return; }
+    if (!t.mixed && t.value !== null && Math.abs(t.value - rounded) < 0.005) return; // igual a lo vigente
+    changes.push({ type: t.type, label: t.label, text: t.text, value: rounded, previous: t.mixed ? null : t.value });
+  });
+  return { changes, invalid };
+}
+
+function submitHotelModifiers(preview) {
+  const s = state.hotel;
+  const d = s.detail;
+  const f = d.flow;
+  const { changes, invalid } = hotelPendingChanges();
+  if (invalid.length) { f.status = 'error'; f.error = invalid.join(' '); render(); return; }
+  if (!changes.length) { f.status = 'error'; f.error = 'No hay cambios: escribe un valor distinto al actual en algún tramo.'; render(); return; }
+
+  f.status = preview ? 'previewing' : 'applying'; f.error = null;
+  render();
+  fetch('/api/google-ads/hotel-modifiers-apply', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customer_id: hotelCustomerId(),
+      campaign_id: d.campaignId,
+      changes: changes.map((c) => ({ type: c.type, label: c.label, value: c.value })),
+      validate_only: preview,
+    }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) {
+        if (data.template_locked) s.list.templateLocked = true;
+        throw new Error(data.error || 'Error desconocido.');
+      }
+      if (preview) {
+        f.status = 'preview_ready'; f.preview = data;
+        render();
+      } else {
+        f.status = 'done'; f.result = data;
+        d.edits = {};
+        openHotelCampaign(d.campaignId, true); // vuelve a leer lo vigente en Google
+      }
+    })
+    .catch((err) => { f.status = 'error'; f.error = err.message || String(err); render(); });
+}
+
+function hotelPerfCells(t, totals, currency) {
+  const p = t.perf;
+  if (!p) return '<td colspan="5" class="footnote">Sin desglose disponible</td>';
+  const cpc = p.clicks ? p.cost / p.clicks : null;
+  const cpa = p.conversions ? p.cost / p.conversions : null;
+  const convRate = p.clicks ? (p.conversions / p.clicks) * 100 : null;
+  let vsAvg = '<span class="footnote">—</span>';
+  const avgCpa = totals.conversions ? totals.cost / totals.conversions : null;
+  if (cpa !== null && avgCpa && p.conversions >= 3) {
+    const diff = (cpa / avgCpa - 1) * 100;
+    const good = diff <= -10; const bad = diff >= 10;
+    vsAvg = `<span style="font-weight:600;color:${good ? 'var(--color-success, #1a7f4b)' : bad ? 'var(--color-danger, #b3261e)' : 'inherit'}">${diff > 0 ? '+' : ''}${diff.toFixed(0)}%</span>`;
+  } else if (p.conversions > 0 && p.conversions < 3) {
+    vsAvg = '<span class="footnote" title="Menos de 3 conversiones: no es concluyente">pocos datos</span>';
+  }
+  return `
+    <td>${fmtInt(p.clicks)}</td>
+    <td>${cpc !== null ? hotelMoney(cpc, currency) : 'N/D'}</td>
+    <td>${p.conversions ? p.conversions.toFixed(p.conversions % 1 ? 1 : 0) : '0'}</td>
+    <td>${cpa !== null ? hotelMoney(cpa, currency) : 'N/D'}${convRate !== null && p.conversions ? `<div style="margin:2px 0 0;font-size:11.5px;color:var(--color-text-muted)">${convRate.toFixed(1)}% conv/clic</div>` : ''}</td>
+    <td>${vsAvg}</td>`;
+}
+
+function renderHotelTramoRow(t, totals, currency, locked) {
+  const d = state.hotel.detail;
+  const meta = HOTEL_TYPE_META[t.type];
+  const key = hotelTramoKey(t);
+  const edited = d.edits[key] !== undefined && String(d.edits[key]).trim() !== '';
+  const current = t.mixed
+    ? `<span title="Los grupos de anuncios tienen valores distintos en este tramo">variado ${t.min_value !== null ? t.min_value + '–' + t.max_value : ''}</span>`
+    : (t.value !== null ? `<strong>${t.value}</strong>` : 'sin valor');
+  const missing = t.ad_groups_missing > 0
+    ? `<div class="footnote" style="color:var(--color-warning, #8a5a00)">falta en ${t.ad_groups_missing} grupo${t.ad_groups_missing === 1 ? '' : 's'}: se creará al guardar</div>` : '';
+  let input;
+  if (locked) input = '<span class="footnote">solo lectura</span>';
+  else if (!meta.editable) input = '<span class="footnote">solo lectura</span>';
+  else input = `<input type="text" inputmode="decimal" data-hotel-edit="${escapeHtml(key)}" value="${escapeHtml(edited ? d.edits[key] : '')}" placeholder="${t.mixed || t.value === null ? 'nuevo' : t.value}" style="width:84px${edited ? ';border-color:var(--color-accent, #0b57d0)' : ''}" />`;
+  return `
+    <tr>
+      <td>${escapeHtml(t.text)}${missing}</td>
+      <td>${current}</td>
+      ${hotelPerfCells(t, totals, currency)}
+      <td>${input}</td>
+    </tr>`;
+}
+
+function renderHotelDetail() {
+  const s = state.hotel;
+  const d = s.detail;
+  const currency = s.list.currency;
+
+  if (d.status === 'loading') {
+    return `<div class="card state-panel loading"><div class="spinner"></div><p>Trayendo los modificadores de la campaña…</p></div>`;
+  }
+  if (d.status === 'error') {
+    return `<div class="error-panel"><strong>No se pudieron traer los modificadores.</strong> ${escapeHtml(d.error)}
+      <div style="margin-top:8px"><button class="btn-outline sm" data-action="hotel-back">Volver a las campañas</button></div></div>`;
+  }
+  const data = d.data;
+  if (!data) return '';
+  const locked = !!(data.template_locked || s.list.templateLocked);
+  const f = d.flow;
+  const busy = f.status === 'previewing' || f.status === 'applying';
+  const { changes, invalid } = hotelPendingChanges();
+
+  const lockBanner = locked ? `
+    <div class="error-panel" style="margin-bottom:16px">
+      <strong>Solo lectura en esta cuenta.</strong> Los modificadores de esta cuenta siguen una plantilla externa que se aplica de forma masiva (la misma en muchas cuentas).
+      Si se cambian aquí, el siguiente ciclo de esa herramienta los vuelve a pisar. Puedes ver los valores y el rendimiento de cada tramo, pero no editarlos desde la plataforma.
+    </div>` : '';
+
+  const groups = HOTEL_TYPE_ORDER.map((type) => {
+    const tramos = data.tramos.filter((t) => t.type === type);
+    if (!tramos.length) return '';
+    const meta = HOTEL_TYPE_META[type];
+    const perfNote = type !== 'rango_fechas' && data.perf_available && data.perf_available[type] === false
+      ? '<p class="footnote">No se pudo traer el desglose de rendimiento de este tipo.</p>' : '';
+    return `
+      <div class="card table-panel" style="margin-bottom:16px">
+        <div class="table-panel-head"><h3>${escapeHtml(meta.label)}</h3><span class="footnote">${escapeHtml(meta.help)}</span></div>
+        ${perfNote}
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Tramo</th><th>Valor actual</th><th>Clics</th><th>CPC</th><th>Conv.</th><th>CPA</th><th title="CPA del tramo frente al CPA promedio de la campaña (solo con 3+ conversiones)">CPA vs. campaña</th><th>Nuevo valor</th></tr></thead>
+            <tbody>${tramos.map((t) => renderHotelTramoRow(t, data.totals, currency, locked)).join('')}</tbody>
+          </table>
+        </div>
+      </div>`;
+  }).join('');
+
+  let flowHtml = '';
+  if (!locked) {
+    if (busy) {
+      flowHtml = `<p class="footnote">${f.status === 'previewing' ? 'Validando con Google Ads (vista previa, no aplica nada todavía)…' : 'Aplicando los cambios en Google Ads…'}</p>`;
+    } else if (f.status === 'preview_ready' && f.preview) {
+      const p = f.preview;
+      const rows = (p.changes || []).map((c) => `
+        <tr><td>${escapeHtml(HOTEL_TYPE_META[c.type] ? HOTEL_TYPE_META[c.type].label : c.type)} · ${escapeHtml(c.text)}</td>
+        <td>${c.previous_values.length ? escapeHtml(c.previous_values.join(', ')) : '—'}</td>
+        <td><strong>${c.new_value}</strong>${c.new_value === 0 ? ' <span class="footnote">(no servirá en este tramo)</span>' : ''}</td>
+        <td>${c.ad_groups_updated} actualiz. · ${c.ad_groups_created} nuevos · ${c.ad_groups_unchanged} sin cambio</td></tr>`).join('');
+      flowHtml = `
+        <div class="ok-panel" style="margin-top:14px">
+          <strong>Vista previa lista.</strong> Google validó el cambio sin aplicar nada: se actualizarán <strong>${p.updated}</strong> modificadores y se crearán <strong>${p.created}</strong>
+          en los ${data.ad_groups} grupo${data.ad_groups === 1 ? '' : 's'} de anuncios de "${escapeHtml(data.campaign_name)}"${p.simulated ? ' (modo simulado)' : ''}.
+          ${p.failed_count ? `<div class="error-panel" style="margin-top:8px"><strong>${p.failed_count} con problema:</strong><ul style="margin:6px 0 0 18px">${(p.failed || []).map((m) => `<li>${escapeHtml(m)}</li>`).join('')}</ul></div>` : ''}
+          <div class="table-scroll" style="margin-top:10px"><table>
+            <thead><tr><th>Tramo</th><th>Antes</th><th>Después</th><th>Grupos</th></tr></thead><tbody>${rows}</tbody></table></div>
+          <p class="footnote" style="margin-top:10px">Esto cambia de verdad cuánto puja Google en esos tramos, en producción y desde ya.</p>
+          <div style="margin-top:10px;display:flex;gap:8px">
+            <button class="btn-accent" data-action="hotel-confirm">Confirmar y aplicar</button>
+            <button class="btn-outline" data-action="hotel-cancel">Cancelar</button>
+          </div>
+        </div>`;
+    } else {
+      const done = f.status === 'done' && f.result ? `
+        <div class="ok-panel" style="margin-top:14px"><strong>Listo.</strong> Se actualizaron ${f.result.updated} modificadores y se crearon ${f.result.created}${f.result.simulated ? ' (modo simulado)' : ''}.
+          ${f.result.failed_count ? `<div class="error-panel" style="margin-top:8px"><strong>${f.result.failed_count} con problema:</strong><ul style="margin:6px 0 0 18px">${(f.result.failed || []).map((m) => `<li>${escapeHtml(m)}</li>`).join('')}</ul></div>` : ''}
+          Los valores de arriba ya son los leídos de nuevo desde Google Ads.</div>` : '';
+      flowHtml = `
+        <div style="margin-top:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+          <button class="btn-accent" data-action="hotel-preview" ${changes.length ? '' : 'disabled'}>Vista previa${changes.length ? ` (${changes.length} tramo${changes.length === 1 ? '' : 's'})` : ''}</button>
+          ${changes.length ? '<button class="btn-outline" data-action="hotel-cancel">Descartar cambios</button>' : '<span class="footnote">Escribe un valor nuevo en los tramos que quieras cambiar.</span>'}
+        </div>
+        ${invalid.length ? `<div class="error-panel" style="margin-top:8px">${invalid.map(escapeHtml).join('<br>')}</div>` : ''}
+        ${f.status === 'error' ? `<div class="error-panel" style="margin-top:8px">${escapeHtml(f.error)}</div>` : ''}
+        ${done}`;
+    }
+  }
+
+  const t = data.totals;
+  return `
+    <div style="margin-bottom:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button class="btn-outline sm" data-action="hotel-back">← Campañas</button>
+      <h3 style="margin:0">${escapeHtml(data.campaign_name)}</h3>
+      <span class="footnote">${escapeHtml(BID_STRATEGY_LABELS_ES[data.bidding_strategy_type] || data.bidding_strategy_type || '')} · ${data.ad_groups} grupo${data.ad_groups === 1 ? '' : 's'} de anuncios · ${fmtInt(t.clicks)} clics · ${hotelMoney(t.cost, currency)} · ${t.conversions ? t.conversions.toFixed(1) : 0} conv.</span>
+    </div>
+    ${lockBanner}
+    ${data.tramos.length ? groups : '<div class="error-panel">Esta campaña no tiene modificadores de hotel en sus grupos de anuncios.</div>'}
+    <p class="footnote">El cambio se aplica por campaña: el mismo valor en el tramo para todos sus grupos de anuncios (si algún grupo no tiene el tramo, se crea). Valores entre 0,1 y 10 (fechas elegidas: 0,5 a 2); 1 = sin ajuste; 0 = no servir en ese tramo. El CPA de cada tramo es el del periodo elegido; con pocas conversiones no es concluyente.</p>
+    ${flowHtml}`;
+}
+
+function renderHotelCampaignList() {
+  const s = state.hotel;
+  const l = s.list;
+  const currency = l.currency;
+  const q = (l.filter || '').trim().toLowerCase();
+  const all = l.campaigns || [];
+  const filtered = q ? all.filter((c) => c.campaign_name.toLowerCase().includes(q) || c.campaign_id.includes(q)) : all;
+  const shown = filtered.slice(0, HOTEL_RENDER_LIMIT);
+  const rows = shown.map((c) => `
+    <tr>
+      <td>${escapeHtml(c.campaign_name)}</td>
+      <td>${c.status === 'ENABLED' ? 'Activa' : 'Pausada'}</td>
+      <td>${escapeHtml(BID_STRATEGY_LABELS_ES[c.bidding_strategy_type] || c.bidding_strategy_type || '')}</td>
+      <td>${fmtInt(c.clicks)}</td>
+      <td>${hotelMoney(c.cost, currency)}</td>
+      <td>${c.conversions ? c.conversions.toFixed(c.conversions % 1 ? 1 : 0) : '0'}</td>
+      <td>${c.conversions ? hotelMoney(c.cost / c.conversions, currency) : 'N/D'}</td>
+      <td><button class="btn-outline sm" data-hotel-open="${escapeHtml(c.campaign_id)}">${l.templateLocked ? 'Ver' : 'Ver y editar'}</button></td>
+    </tr>`).join('');
+  const lockBanner = l.templateLocked ? `
+    <div class="error-panel" style="margin-bottom:16px">
+      <strong>Cuenta en solo lectura.</strong> Sus modificadores de oferta siguen una plantilla externa aplicada de forma masiva; editarlos aquí se perdería con su siguiente ciclo.
+      Puedes ver cada campaña y el rendimiento por tramo.
+    </div>` : '';
+  return `
+    ${lockBanner}
+    <div class="card table-panel">
+      <div class="table-panel-head">
+        <h3>Campañas de hotel (${fmtInt(all.length)})</h3>
+        <input type="text" id="hotel-campaign-filter" placeholder="Buscar por nombre o ID…" value="${escapeHtml(l.filter)}" style="width:280px" />
+      </div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Campaña</th><th>Estado</th><th>Estrategia de puja</th><th>Clics</th><th>Coste</th><th>Conv.</th><th>CPA</th><th></th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="8" class="footnote">Ninguna campaña coincide con la búsqueda.</td></tr>'}</tbody>
+        </table>
+      </div>
+      ${filtered.length > shown.length ? `<p class="footnote" style="margin-top:10px">Mostrando ${shown.length} de ${fmtInt(filtered.length)} (ordenadas por coste). Usa el buscador para llegar a una campaña concreta.</p>` : ''}
+    </div>`;
+}
+
+function renderHotelApiPanel() {
+  const a = state.hotel.api;
+
+  if (!a.statusChecked) {
+    return `<div class="field"><p class="footnote">Consultando la conexión con Google Ads…</p></div>`;
+  }
+  const simulatedNotice = a.simulated ? `
+    <div class="ok-panel" style="margin:10px 0">
+      <strong>Modo simulado.</strong> La API de Google Ads todavía no está configurada en el servidor
+      — estos son datos de ejemplo, no de una cuenta real.
+    </div>` : '';
+
+  if (a.accountsStatus === 'idle') {
+    return `
+      <div class="card control-panel align-end">
+        <div class="field">
+          <p class="footnote">${a.configured ? 'Conectado a la API de Google Ads.' : 'La API de Google Ads aún no está configurada — se usarán datos simulados para probar el flujo.'}</p>
+          <button class="btn-outline" data-action="hotel-api-load-accounts">Ver cuentas disponibles</button>
+        </div>
+      </div>`;
+  }
+  if (a.accountsStatus === 'loading') {
+    return `<div class="card control-panel align-end"><div class="field"><p class="footnote">Cargando cuentas…</p></div></div>`;
+  }
+  if (a.accountsStatus === 'error') {
+    return `<div class="error-panel"><strong>No se pudieron cargar las cuentas.</strong> ${escapeHtml(a.error)}</div>`;
+  }
+
+  const mccFilterActive = a.mcc.selectedId && a.mcc.accountIds;
+  const visibleAccounts = mccFilterActive ? a.accounts.filter((acc) => a.mcc.accountIds.has(acc.id)) : a.accounts;
+  const accountOptions = ['<option value="">Elige una cuenta…</option>']
+    .concat(visibleAccounts.map((acc) => `<option value="${escapeHtml(acc.id)}" ${a.accountId === acc.id ? 'selected' : ''}>${escapeHtml(acc.name)} (${escapeHtml(acc.id)})</option>`))
+    .join('');
+
+  return `
+    <div class="card control-panel align-end">
+      ${simulatedNotice}
+      ${renderHotelMccFilterPanel()}
+      <div class="field">
+        <label>Cuenta${mccFilterActive ? ` (${visibleAccounts.length} en "${escapeHtml(a.mcc.selectedName)}")` : ''}</label>
+        <select id="hotel-api-account" style="width:320px">${accountOptions}</select>
+      </div>
+      <div class="field">
+        <label>...o escribe el ID de la cuenta</label>
+        <input type="text" id="hotel-api-account-manual" value="${escapeHtml(a.accountIdManual)}" placeholder="ej. 6862893390" style="width:160px" />
+      </div>
+      <div style="display:flex;gap:24px;flex-wrap:nowrap">
+        <div class="field">
+          <label>Desde</label>
+          <input type="date" id="hotel-api-date-from" value="${escapeHtml(a.dateFrom)}" />
+        </div>
+        <div class="field">
+          <label>Hasta</label>
+          <input type="date" id="hotel-api-date-to" value="${escapeHtml(a.dateTo)}" />
+        </div>
+      </div>
+      <button class="btn-accent" data-action="hotel-api-fetch">Traer campañas de hotel</button>
+      ${a.error ? `<div class="error-panel" style="margin-top:10px"><strong>No se pudo traer los datos.</strong> ${escapeHtml(a.error)}</div>` : ''}
+    </div>`;
+}
+
+function renderHotelPage() {
+  const s = state.hotel;
+  if (!currentUser.isSuperAdmin) {
+    return `<div class="card state-panel idle"><p>Esta sección todavía no está disponible para tu usuario.</p></div>`;
+  }
+  ensureHotelGoogleAdsStatusLoaded();
+  const controlPanel = renderHotelApiPanel();
+
+  let body = '';
+  if (s.list.status === 'idle') {
+    body = `
+      <div class="card state-panel idle">
+        ${icon('bed-double', 30)}
+        <p>Elige una cuenta con campañas de hotel y trae el rango de fechas para ver los modificadores de oferta de cada campaña y cómo rinde cada tramo.</p>
+      </div>`;
+  } else if (s.list.status === 'loading') {
+    body = `<div class="card state-panel loading"><div class="spinner"></div><p>Trayendo las campañas de hotel…</p></div>`;
+  } else if (s.detail.campaignId) {
+    body = renderHotelDetail();
+  } else if (!(s.list.campaigns || []).length) {
+    body = `<div class="error-panel">Esta cuenta no tiene campañas de hotel (tipo "Hotel"). Si usa Performance Max o IA Max para viajes, esos tipos no llevan estos modificadores.</div>`;
+  } else {
+    body = renderHotelCampaignList();
+  }
+  return `${controlPanel}${body}`;
+}
+
+function ensureHotelGoogleAdsStatusLoaded() {
+  const a = state.hotel.api;
+  if (a.statusChecked) return;
+  fetch('/api/google-ads/status')
+    .then((r) => r.json())
+    .then((data) => { a.statusChecked = true; a.configured = !!data.configured; render(); })
+    .catch(() => { a.statusChecked = true; a.configured = false; render(); });
+}
+
+function loadHotelGoogleAdsAccounts() {
+  const a = state.hotel.api;
+  a.accountsStatus = 'loading'; a.error = null;
+  render();
+  fetch('/api/google-ads/accounts')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.accounts = data.accounts || [];
+      a.simulated = !!data.simulated;
+      a.accountsStatus = 'ready';
+      render();
+    })
+    .catch((err) => {
+      a.accountsStatus = 'error'; a.error = err.message || String(err);
+      render();
+    });
+}
+
+function hotelCustomerId() {
+  const a = state.hotel.api;
+  const manualId = (a.accountIdManual || '').replace(/[^0-9]/g, '');
+  return manualId || a.accountId;
+}
+
+function loadHotelMccGroups() {
+  const m = state.hotel.api.mcc;
+  m.status = 'loading'; m.error = null;
+  render();
+  fetch('/api/google-ads/mcc-groups')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      m.groups = data.groups || [];
+      m.status = 'ready';
+      render();
+    })
+    .catch((err) => { m.status = 'error'; m.error = err.message || String(err); render(); });
+}
+
+function applyHotelMccFilter(groupId, groupName) {
+  const a = state.hotel.api;
+  const m = a.mcc;
+  m.selectedId = groupId; m.selectedName = groupName;
+  m.accountIdsStatus = 'loading'; m.error = null;
+  render();
+  fetch(`/api/google-ads/mcc-group-accounts?group_customer_id=${encodeURIComponent(groupId)}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      m.accountIds = new Set((data.accounts || []).map((acc) => acc.id));
+      m.accountIdsStatus = 'ready';
+      if (a.accountId && !m.accountIds.has(a.accountId)) a.accountId = '';
+      render();
+    })
+    .catch((err) => { m.accountIdsStatus = 'error'; m.error = err.message || String(err); render(); });
+}
+
+function clearHotelMccFilter() {
+  const m = state.hotel.api.mcc;
+  m.selectedId = ''; m.selectedName = ''; m.accountIds = null; m.accountIdsStatus = 'idle'; m.filter = '';
+  render();
+}
+
+function renderHotelMccFilterPanel() {
+  if (!currentUser.isAdmin) return '';
+  const m = state.hotel.api.mcc;
+
+  if (m.selectedId) {
+    const countLabel = m.accountIdsStatus === 'loading' ? 'cargando…'
+      : m.accountIdsStatus === 'ready' ? `${m.accountIds.size} cuenta(s)`
+      : 'error';
+    return `
+      <div class="field">
+        <label>Filtrando por MCC</label>
+        <div style="display:flex;align-items:center;gap:10px">
+          <span class="delta-badge neutral">${escapeHtml(m.selectedName)} — ${countLabel}</span>
+          <button class="btn-link" data-action="hotel-mcc-clear">Quitar filtro</button>
+        </div>
+      </div>`;
+  }
+
+  if (m.status === 'idle') {
+    return `<div class="field"><button class="btn-outline sm" data-action="hotel-mcc-load">Filtrar por MCC (ej. una cadena de hoteles)</button></div>`;
+  }
+  if (m.status === 'loading') {
+    return `<div class="field"><p class="footnote">Cargando agrupaciones del MCC…</p></div>`;
+  }
+  if (m.status === 'error') {
+    return `<div class="error-panel">${escapeHtml(m.error)}</div>`;
+  }
+
+  const filter = (m.filter || '').trim().toLowerCase();
+  let matches = [];
+  if (filter.length >= 2) {
+    matches = m.groups.filter((g) => g.id.includes(filter) || (g.name || '').toLowerCase().includes(filter)).slice(0, 25);
+  }
+  const matchesHtml = matches.length
+    ? `<div class="table-scroll" style="max-height:200px;margin-top:8px">
+        <table><tbody>
+          ${matches.map((g) => `
+            <tr>
+              <td>${escapeHtml(g.name)}</td>
+              <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(g.id)}</td>
+              <td><button class="btn-outline xs" data-hotel-mcc-pick="${escapeHtml(g.id)}" data-hotel-mcc-pick-name="${escapeHtml(g.name)}">Usar</button></td>
+            </tr>`).join('')}
+        </tbody></table>
+      </div>`
+    : (filter.length >= 2 ? `<p class="footnote" style="margin-top:8px">Sin resultados para "${escapeHtml(filter)}".</p>` : '');
+
+  return `
+    <div class="field">
+      <label>Filtrar por MCC</label>
+      <input type="text" id="hotel-mcc-filter" placeholder="Busca por nombre o ID del MCC (${m.groups.length} agrupaciones)…" value="${escapeHtml(m.filter)}" style="width:320px" />
+      ${matchesHtml}
+    </div>`;
+}
+
+// ---------------------------------------------------------------------------
 // Página — Exclusiones de contenido (CustomerNegativeCriterion, a nivel de
 // cuenta). Espejo en el cliente de CONTENT_LABEL_TYPES/CONTENT_LABEL_LABELS
 // en google_ads_client.py — se necesita acá para el picker de "agregar",
@@ -10516,6 +11106,40 @@ function bindEvents() {
     });
   });
 
+  // Hoteles
+  const hotelApiAccount = document.getElementById('hotel-api-account');
+  if (hotelApiAccount) hotelApiAccount.addEventListener('change', (e) => {
+    state.hotel.api.accountId = e.target.value;
+    resetHotelAccountData();
+  });
+  const hotelApiAccountManual = document.getElementById('hotel-api-account-manual');
+  if (hotelApiAccountManual) hotelApiAccountManual.addEventListener('input', (e) => {
+    state.hotel.api.accountIdManual = e.target.value;
+    resetHotelAccountData();
+  });
+  const hotelApiDateFrom = document.getElementById('hotel-api-date-from');
+  if (hotelApiDateFrom) hotelApiDateFrom.addEventListener('change', (e) => { state.hotel.api.dateFrom = e.target.value; });
+  const hotelApiDateTo = document.getElementById('hotel-api-date-to');
+  if (hotelApiDateTo) hotelApiDateTo.addEventListener('change', (e) => { state.hotel.api.dateTo = e.target.value; });
+  const hotelMccFilter = document.getElementById('hotel-mcc-filter');
+  if (hotelMccFilter) hotelMccFilter.addEventListener('input', (e) => { state.hotel.api.mcc.filter = e.target.value; render(); hotelRefocus('hotel-mcc-filter'); });
+  document.querySelectorAll('[data-hotel-mcc-pick]').forEach((btn) => {
+    btn.addEventListener('click', () => applyHotelMccFilter(btn.dataset.hotelMccPick, btn.dataset.hotelMccPickName));
+  });
+  const hotelCampaignFilter = document.getElementById('hotel-campaign-filter');
+  if (hotelCampaignFilter) hotelCampaignFilter.addEventListener('input', (e) => { state.hotel.list.filter = e.target.value; render(); hotelRefocus('hotel-campaign-filter'); });
+  document.querySelectorAll('[data-hotel-open]').forEach((btn) => {
+    btn.addEventListener('click', () => openHotelCampaign(btn.dataset.hotelOpen, false));
+  });
+  document.querySelectorAll('[data-hotel-edit]').forEach((input) => {
+    input.addEventListener('change', (e) => {
+      const d = state.hotel.detail;
+      d.edits[input.dataset.hotelEdit] = e.target.value;
+      if (d.flow.status === 'preview_ready' || d.flow.status === 'error' || d.flow.status === 'done') d.flow = { status: 'idle', preview: null, result: null, error: null };
+      render();
+    });
+  });
+
   // IA Max
   const iamaxApiAccount = document.getElementById('iamax-api-account');
   if (iamaxApiAccount) iamaxApiAccount.addEventListener('change', (e) => {
@@ -11225,6 +11849,26 @@ function handleAction(action) {
     case 'iamax-created-sub-pages': state.iamax.created.sub = 'pages'; render(); break;
     case 'iamax-created-csv': downloadIaMaxCreatedCsv(); break;
     case 'iamax-tab-cruce': state.iamax.tab = 'cruce'; render(); break;
+    case 'hotel-api-load-accounts': loadHotelGoogleAdsAccounts(); break;
+    case 'hotel-mcc-load': loadHotelMccGroups(); break;
+    case 'hotel-mcc-clear': clearHotelMccFilter(); break;
+    case 'hotel-api-fetch': fetchHotelCampaigns(); break;
+    case 'hotel-back': {
+      const d = state.hotel.detail;
+      d.campaignId = null; d.status = 'idle'; d.data = null; d.edits = {};
+      d.flow = { status: 'idle', preview: null, result: null, error: null };
+      render();
+      break;
+    }
+    case 'hotel-preview': submitHotelModifiers(true); break;
+    case 'hotel-confirm': submitHotelModifiers(false); break;
+    case 'hotel-cancel': {
+      const d = state.hotel.detail;
+      d.edits = {};
+      d.flow = { status: 'idle', preview: null, result: null, error: null };
+      render();
+      break;
+    }
 
     case 'exclusiones-api-load-accounts': loadContentExclusionsGoogleAdsAccounts(); break;
     case 'exclusiones-mcc-load': loadExclusionesMccGroups(); break;
@@ -11539,6 +12183,9 @@ fetch('/api/me').then((r) => r.json()).then((data) => {
   if (navAdmin && currentUser.isAdmin) navAdmin.style.display = '';
   const navCopys = document.getElementById('nav-copys');
   if (navCopys && currentUser.isAdmin) navCopys.style.display = '';
+  // Hoteles está en afinado: solo super admin (el servidor lo exige también).
+  const navHoteles = document.getElementById('nav-hoteles');
+  if (navHoteles && currentUser.isSuperAdmin) navHoteles.style.display = '';
   if (data.must_change_password) {
     forcePasswordChange = true;
     render();

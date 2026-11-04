@@ -3268,3 +3268,601 @@ def simulated_audit_data():
             + [{"type": "CAMPAIGN", "resource": "customers/1/campaigns/3", "fields": "maximizeConversionValue.targetRoas"}] * 2
         ),
     }
+
+
+# ---------------------------------------------------------------------------
+# Hoteles — modificadores de oferta (AdGroupBidModifier, v26)
+#
+# Los modificadores de hotel (ventana de reserva, duración de la estancia,
+# día de entrada, fechas elegidas por el usuario, rango de fechas de entrada)
+# viven a nivel de GRUPO DE ANUNCIOS. La herramienta los edita por campaña:
+# un mismo valor para ese tramo en todos los grupos de anuncios de la campaña.
+#
+# Nombres v26 (en v25 se llamaban hotel_advance_booking_window,
+# hotel_length_of_stay, hotel_check_in_day, hotel_date_selection_type y
+# hotel_check_in_date_range — los valores y los IDs de criterio no cambiaron).
+#
+# Cuentas con plantilla externa: en 30 de las 249 cuentas con modificadores
+# que se escanearon (2026-11) hay una plantilla idéntica de valores aplicada
+# de forma masiva por otra herramienta o socio. Escribir encima de esa
+# plantilla se pisaría con el siguiente ciclo de esa herramienta, así que en
+# esas cuentas la sección queda de solo lectura (ver hotel_template_locked).
+# ---------------------------------------------------------------------------
+
+# Los criterios 30000, 30001 y 30002 son los modificadores de dispositivo
+# (escritorio, móvil, tablet) — viven en la misma tabla pero no son de hotel.
+HOTEL_NON_HOTEL_CRITERION_IDS = "30000, 30001, 30002"
+
+HOTEL_MODIFIER_TYPES = {
+    "ventana": {
+        "api": "advanceBookingWindow",
+        "label": "Ventana de reserva",
+        "help": "Días entre la búsqueda y la entrada al hotel.",
+        "min": 0.1, "max": 10.0, "zero_ok": True,
+    },
+    "estancia": {
+        "api": "lengthOfBooking",
+        "label": "Duración de la estancia",
+        "help": "Noches de la estancia buscada.",
+        "min": 0.1, "max": 10.0, "zero_ok": True,
+    },
+    "dia": {
+        "api": "startDayOfWeek",
+        "label": "Día de entrada",
+        "help": "Día de la semana en que empieza la estancia.",
+        "min": 0.1, "max": 10.0, "zero_ok": True,
+    },
+    "fechas_usuario": {
+        "api": "userSetDates",
+        "label": "Fechas elegidas por el usuario",
+        "help": "Si quien busca eligió fechas, o Google usó unas por defecto.",
+        "min": 0.5, "max": 2.0, "zero_ok": False,
+    },
+    "rango_fechas": {
+        "api": "startDateRange",
+        "label": "Rango de fechas de entrada",
+        "help": "Tramos de fechas concretas (temporadas, puentes). Solo lectura en esta versión.",
+        "min": 0.1, "max": 10.0, "zero_ok": True,
+    },
+}
+HOTEL_MODIFIER_TYPE_ORDER = ["ventana", "estancia", "dia", "fechas_usuario", "rango_fechas"]
+HOTEL_EDITABLE_TYPES = {"ventana", "estancia", "dia", "fechas_usuario"}
+HOTEL_DAY_ORDER = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]
+HOTEL_DAY_LABELS_ES = {
+    "MONDAY": "Lunes", "TUESDAY": "Martes", "WEDNESDAY": "Miércoles", "THURSDAY": "Jueves",
+    "FRIDAY": "Viernes", "SATURDAY": "Sábado", "SUNDAY": "Domingo",
+}
+HOTEL_DATE_SELECTION_LABELS_ES = {
+    "DEFAULT_SELECTION": "Fechas por defecto (el usuario no eligió)",
+    "USER_SELECTED": "El usuario eligió las fechas",
+}
+
+HOTEL_MODIFIER_FIELDS = """
+    ad_group.id, ad_group.name, ad_group.status,
+    ad_group_bid_modifier.resource_name, ad_group_bid_modifier.criterion_id,
+    ad_group_bid_modifier.bid_modifier,
+    ad_group_bid_modifier.advance_booking_window.min_days, ad_group_bid_modifier.advance_booking_window.max_days,
+    ad_group_bid_modifier.length_of_booking.min_days, ad_group_bid_modifier.length_of_booking.max_days,
+    ad_group_bid_modifier.start_day_of_week.day_of_week,
+    ad_group_bid_modifier.user_set_dates.type,
+    ad_group_bid_modifier.start_date_range.start_date, ad_group_bid_modifier.start_date_range.end_date
+"""
+
+# Firma de la plantilla externa: tres valores concretos que, juntos, casi
+# seguro vienen de la misma herramienta (en el escaneo de 249 cuentas con
+# modificadores, 30 cuentas tenían la primera, 29 las dos primeras). Se
+# declara bloqueada la cuenta si salen DOS de las tres.
+_HOTEL_TEMPLATE_SIGNATURES = [
+    ("advance_booking_window", 3, 7, 0.57),
+    ("length_of_booking", 8, 30, 0.23),
+    ("advance_booking_window", 50, 330, 1.21),
+]
+_HOTEL_TEMPLATE_CACHE = {}
+_HOTEL_TEMPLATE_CACHE_SECONDS = 600
+
+
+def _hotel_valid_id(value):
+    value = str(value or "").strip()
+    if not value.isdigit():
+        raise ValueError("ID inválido.")
+    return value
+
+
+def _hotel_modifier_key(m):
+    """(tipo, etiqueta del tramo) de un AdGroupBidModifier ya parseado — o None
+    si no es un modificador de hotel conocido."""
+    if "advanceBookingWindow" in m:
+        a = m["advanceBookingWindow"]
+        return "ventana", f"{a.get('minDays', 0)}-{a.get('maxDays', '+')}"
+    if "lengthOfBooking" in m:
+        a = m["lengthOfBooking"]
+        return "estancia", f"{a.get('minDays', 0)}-{a.get('maxDays', '+')}"
+    if "startDayOfWeek" in m:
+        return "dia", m["startDayOfWeek"].get("dayOfWeek", "?")
+    if "userSetDates" in m:
+        return "fechas_usuario", m["userSetDates"].get("type", "?")
+    if "startDateRange" in m:
+        a = m["startDateRange"]
+        return "rango_fechas", f"{a.get('startDate', '?')}..{a.get('endDate', '?')}"
+    return None
+
+
+def _hotel_range(label):
+    """'3-7' -> (3, 7); '50-+' -> (50, None)."""
+    lo, _, hi = str(label).partition("-")
+    try:
+        lo_n = int(lo)
+    except ValueError:
+        return None
+    return lo_n, (int(hi) if hi.lstrip("-").isdigit() else None)
+
+
+def _hotel_tramo_sort_key(tipo, label):
+    if tipo == "dia":
+        return HOTEL_DAY_ORDER.index(label) if label in HOTEL_DAY_ORDER else 99
+    if tipo == "fechas_usuario":
+        return 0 if label == "DEFAULT_SELECTION" else 1
+    r = _hotel_range(label)
+    return r[0] if r else 9999
+
+
+def _hotel_tramo_text(tipo, label):
+    if tipo == "dia":
+        return HOTEL_DAY_LABELS_ES.get(label, label)
+    if tipo == "fechas_usuario":
+        return HOTEL_DATE_SELECTION_LABELS_ES.get(label, label)
+    if tipo in ("ventana", "estancia"):
+        r = _hotel_range(label)
+        if not r:
+            return label
+        lo, hi = r
+        unit = "día" if tipo == "ventana" else "noche"
+        if tipo == "ventana" and lo == 0 and hi == 0:
+            return "Mismo día"
+        if hi is None:
+            return f"{lo} {unit}s o más"
+        if lo == hi:
+            return f"{lo} {unit}" + ("" if lo == 1 else "s")
+        return f"{lo} a {hi} {unit}s"
+    return label
+
+
+def _hotel_criterion_object(tipo, label):
+    """El sub-objeto de criterio (camelCase de la API REST) para CREAR un modificador."""
+    if tipo in ("ventana", "estancia"):
+        r = _hotel_range(label)
+        if not r:
+            raise ValueError(f"Tramo inválido: {label}.")
+        obj = {"minDays": r[0]}
+        if r[1] is not None:
+            obj["maxDays"] = r[1]
+        return obj
+    if tipo == "dia":
+        if label not in HOTEL_DAY_ORDER:
+            raise ValueError(f"Día inválido: {label}.")
+        return {"dayOfWeek": label}
+    if tipo == "fechas_usuario":
+        if label not in HOTEL_DATE_SELECTION_LABELS_ES:
+            raise ValueError(f"Tipo de selección de fechas inválido: {label}.")
+        return {"type": label}
+    raise ValueError("Este tipo de modificador no se puede crear desde la plataforma.")
+
+
+def hotel_template_locked(customer_id):
+    """True si la cuenta tiene la plantilla externa de modificadores (ver nota
+    de sección). Tres consultas pequeñas con LIMIT 1, en caché 10 minutos.
+    Si una consulta falla no se asume nada: se cuenta como "no encontrada"
+    (la escritura igual pasa por la vista previa de Google)."""
+    customer_id = _hotel_valid_id(customer_id)
+    now = time.time()
+    cached = _HOTEL_TEMPLATE_CACHE.get(customer_id)
+    if cached and now - cached[0] < _HOTEL_TEMPLATE_CACHE_SECONDS:
+        return cached[1]
+    hits = 0
+    for field, lo, hi, val in _HOTEL_TEMPLATE_SIGNATURES:
+        query = f"""
+            SELECT ad_group_bid_modifier.bid_modifier
+            FROM ad_group_bid_modifier
+            WHERE campaign.advertising_channel_type = 'HOTEL'
+              AND ad_group_bid_modifier.{field}.min_days = {lo}
+              AND ad_group_bid_modifier.{field}.max_days = {hi}
+              AND ad_group_bid_modifier.bid_modifier > {val - 0.005}
+              AND ad_group_bid_modifier.bid_modifier < {val + 0.005}
+            LIMIT 1
+        """
+        try:
+            if _search(customer_id, query):
+                hits += 1
+        except RuntimeError:
+            pass
+    locked = hits >= 2
+    _HOTEL_TEMPLATE_CACHE[customer_id] = (now, locked)
+    return locked
+
+
+def fetch_hotel_campaigns(customer_id, date_from, date_to):
+    """Campañas de hotel (HOTEL) de la cuenta con sus métricas del periodo,
+    más si la cuenta está bloqueada por plantilla externa."""
+    customer_id = _hotel_valid_id(customer_id)
+    camp_rows = _search(customer_id, """
+        SELECT campaign.id, campaign.name, campaign.status, campaign.bidding_strategy_type
+        FROM campaign
+        WHERE campaign.advertising_channel_type = 'HOTEL' AND campaign.status != 'REMOVED'
+    """)
+    currency = ""
+    try:
+        cur = _search(customer_id, "SELECT customer.currency_code FROM customer LIMIT 1")
+        if cur:
+            currency = cur[0].get("customer", {}).get("currencyCode", "")
+    except RuntimeError:
+        pass
+    metrics = {}
+    metric_rows = _search(customer_id, f"""
+        SELECT campaign.id, metrics.impressions, metrics.clicks, metrics.cost_micros,
+               metrics.conversions, metrics.conversions_value
+        FROM hotel_performance_view
+        WHERE segments.date BETWEEN '{date_from}' AND '{date_to}'
+    """)
+    for r in metric_rows:
+        cid = r["campaign"]["id"]
+        m, acc = r["metrics"], metrics.setdefault(cid, {"impressions": 0, "clicks": 0, "cost": 0.0, "conversions": 0.0, "conv_value": 0.0})
+        acc["impressions"] += int(m.get("impressions", 0))
+        acc["clicks"] += int(m.get("clicks", 0))
+        acc["cost"] += int(m.get("costMicros", 0)) / MICROS
+        acc["conversions"] += float(m.get("conversions", 0))
+        acc["conv_value"] += float(m.get("conversionsValue", 0))
+    campaigns = []
+    for r in camp_rows:
+        c = r["campaign"]
+        mt = metrics.get(c["id"], {"impressions": 0, "clicks": 0, "cost": 0.0, "conversions": 0.0, "conv_value": 0.0})
+        campaigns.append({
+            "campaign_id": c["id"], "campaign_name": c.get("name", ""), "status": c.get("status", ""),
+            "bidding_strategy_type": c.get("biddingStrategyType", ""),
+            **mt,
+        })
+    campaigns.sort(key=lambda x: -x["cost"])
+    return {"campaigns": campaigns, "currency": currency, "template_locked": hotel_template_locked(customer_id)}
+
+
+def _fetch_hotel_modifier_rows(customer_id, campaign_id):
+    """Todos los modificadores de hotel de los grupos de anuncios (no
+    eliminados) de una campaña, ya parseados."""
+    rows = _search(customer_id, f"""
+        SELECT {HOTEL_MODIFIER_FIELDS}
+        FROM ad_group_bid_modifier
+        WHERE campaign.id = {campaign_id}
+          AND ad_group.status != 'REMOVED'
+          AND ad_group_bid_modifier.criterion_id NOT IN ({HOTEL_NON_HOTEL_CRITERION_IDS})
+    """)
+    out = []
+    for r in rows:
+        m = r["adGroupBidModifier"]
+        key = _hotel_modifier_key(m)
+        if key is None:
+            continue
+        out.append({
+            "ad_group_id": r["adGroup"]["id"],
+            "ad_group_name": r["adGroup"].get("name", ""),
+            "resource_name": m["resourceName"],
+            "type": key[0], "label": key[1],
+            "value": round(m["bidModifier"], 2) if "bidModifier" in m else None,
+        })
+    return out
+
+
+def _hotel_perf_by_segment(customer_id, campaign_id, date_from, date_to):
+    """Rendimiento de la campaña por tramo, de hotel_performance_view. Devuelve
+    {tipo: {valor_del_segmento: acumulado}}, con valor_del_segmento int (ventana,
+    estancia) o str (día, tipo de selección de fechas)."""
+    specs = {
+        "ventana": ("segments.hotel_booking_window_days", "hotelBookingWindowDays", int),
+        "estancia": ("segments.hotel_length_of_stay", "hotelLengthOfStay", int),
+        "dia": ("segments.hotel_check_in_day_of_week", "hotelCheckInDayOfWeek", str),
+        "fechas_usuario": ("segments.hotel_date_selection_type", "hotelDateSelectionType", str),
+    }
+    out = {}
+    for tipo, (seg, jkey, cast) in specs.items():
+        try:
+            rows = _search(customer_id, f"""
+                SELECT campaign.id, {seg}, metrics.impressions, metrics.clicks, metrics.cost_micros,
+                       metrics.conversions, metrics.conversions_value
+                FROM hotel_performance_view
+                WHERE campaign.id = {campaign_id} AND segments.date BETWEEN '{date_from}' AND '{date_to}'
+            """)
+        except RuntimeError:
+            out[tipo] = None  # el desglose falló: se muestra como no disponible, no como cero
+            continue
+        agg = {}
+        for r in rows:
+            raw = r.get("segments", {}).get(jkey)
+            if raw is None:
+                continue
+            val = cast(raw)
+            m = r["metrics"]
+            a = agg.setdefault(val, {"impressions": 0, "clicks": 0, "cost": 0.0, "conversions": 0.0, "conv_value": 0.0})
+            a["impressions"] += int(m.get("impressions", 0))
+            a["clicks"] += int(m.get("clicks", 0))
+            a["cost"] += int(m.get("costMicros", 0)) / MICROS
+            a["conversions"] += float(m.get("conversions", 0))
+            a["conv_value"] += float(m.get("conversionsValue", 0))
+        out[tipo] = agg
+    return out
+
+
+def _hotel_perf_for_tramo(perf_by_type, tipo, label):
+    """Acumulado del rendimiento que cae dentro de un tramo, o None si no se tiene."""
+    seg = perf_by_type.get(tipo)
+    if seg is None or tipo == "rango_fechas":
+        return None
+    total = {"impressions": 0, "clicks": 0, "cost": 0.0, "conversions": 0.0, "conv_value": 0.0}
+    if tipo in ("ventana", "estancia"):
+        r = _hotel_range(label)
+        if not r:
+            return None
+        lo, hi = r
+        for val, a in seg.items():
+            if val >= lo and (hi is None or val <= hi) and val >= 0:
+                for k in total:
+                    total[k] += a[k]
+    else:
+        a = seg.get(label)
+        if a:
+            total.update(a)
+    return total
+
+
+def fetch_hotel_campaign_modifiers(customer_id, campaign_id, date_from, date_to):
+    """Perfil actual de modificadores de una campaña de hotel (un renglón por
+    tramo) con el rendimiento de cada tramo en el periodo."""
+    customer_id = _hotel_valid_id(customer_id)
+    campaign_id = _hotel_valid_id(campaign_id)
+    head = _search(customer_id, f"""
+        SELECT campaign.id, campaign.name, campaign.status, campaign.bidding_strategy_type
+        FROM campaign WHERE campaign.id = {campaign_id} AND campaign.advertising_channel_type = 'HOTEL'
+    """)
+    if not head:
+        raise ValueError("No se encontró esa campaña de hotel en la cuenta.")
+    ad_groups = _search(customer_id, f"""
+        SELECT ad_group.id FROM ad_group WHERE campaign.id = {campaign_id} AND ad_group.status != 'REMOVED'
+    """)
+    n_groups = len(ad_groups)
+    rows = _fetch_hotel_modifier_rows(customer_id, campaign_id)
+    perf_by_type = _hotel_perf_by_segment(customer_id, campaign_id, date_from, date_to)
+    totals = {"impressions": 0, "clicks": 0, "cost": 0.0, "conversions": 0.0, "conv_value": 0.0}
+    for a in (perf_by_type.get("estancia") or {}).values():
+        for k in totals:
+            totals[k] += a[k]
+
+    grouped = {}
+    for r in rows:
+        grouped.setdefault((r["type"], r["label"]), []).append(r)
+    tramos = []
+    for (tipo, label), items in grouped.items():
+        values = [i["value"] for i in items]
+        distinct = sorted({v for v in values if v is not None})
+        perf = _hotel_perf_for_tramo(perf_by_type, tipo, label)
+        tramos.append({
+            "type": tipo, "label": label, "text": _hotel_tramo_text(tipo, label),
+            "value": distinct[0] if len(distinct) == 1 and all(v is not None for v in values) else None,
+            "mixed": len(distinct) > 1 or any(v is None for v in values),
+            "min_value": distinct[0] if distinct else None, "max_value": distinct[-1] if distinct else None,
+            "ad_groups_with": len({i["ad_group_id"] for i in items}),
+            "ad_groups_missing": max(0, n_groups - len({i["ad_group_id"] for i in items})),
+            "perf": perf,
+        })
+    tramos.sort(key=lambda t: (HOTEL_MODIFIER_TYPE_ORDER.index(t["type"]), _hotel_tramo_sort_key(t["type"], t["label"])))
+    c = head[0]["campaign"]
+    return {
+        "campaign_id": campaign_id, "campaign_name": c.get("name", ""), "status": c.get("status", ""),
+        "bidding_strategy_type": c.get("biddingStrategyType", ""),
+        "ad_groups": n_groups, "tramos": tramos, "totals": totals,
+        "perf_available": {t: perf_by_type.get(t) is not None for t in ("ventana", "estancia", "dia", "fechas_usuario")},
+        "template_locked": hotel_template_locked(customer_id),
+    }
+
+
+def _hotel_validate_changes(changes):
+    if not isinstance(changes, list) or not changes:
+        raise ValueError("No hay cambios que aplicar.")
+    if len(changes) > 200:
+        raise ValueError("Demasiados cambios a la vez (máximo 200 tramos).")
+    clean, seen = [], set()
+    for ch in changes:
+        tipo, label = str(ch.get("type") or ""), str(ch.get("label") or "")
+        spec = HOTEL_MODIFIER_TYPES.get(tipo)
+        if not spec or tipo not in HOTEL_EDITABLE_TYPES:
+            raise ValueError(f"El tipo \"{tipo}\" no se puede editar desde la plataforma.")
+        if (tipo, label) in seen:
+            raise ValueError(f"El tramo {label} aparece repetido.")
+        seen.add((tipo, label))
+        try:
+            value = round(float(ch.get("value")), 2)
+        except (TypeError, ValueError):
+            raise ValueError(f"El valor del tramo {_hotel_tramo_text(tipo, label)} no es un número.")
+        if value == 0 and not spec["zero_ok"]:
+            raise ValueError(f"\"{spec['label']}\" no admite 0 (excluir): usa un valor entre {spec['min']} y {spec['max']}.")
+        if value != 0 and not (spec["min"] <= value <= spec["max"]):
+            zero_note = " (o 0 para no servir en ese tramo)" if spec["zero_ok"] else ""
+            raise ValueError(
+                f"{spec['label']} · {_hotel_tramo_text(tipo, label)}: el valor debe estar entre {spec['min']} y {spec['max']}"
+                f"{zero_note} — recibido {value}."
+            )
+        _hotel_criterion_object(tipo, label)  # valida el tramo
+        clean.append({"type": tipo, "label": label, "value": value})
+    return clean
+
+
+def update_hotel_campaign_modifiers(customer_id, campaign_id, changes, validate_only=True):
+    """Pone el mismo valor en un tramo para TODOS los grupos de anuncios de la
+    campaña: actualiza el modificador donde ya existe y lo crea donde falta.
+    Vuelve a leer lo vigente en Google antes de armar las operaciones (no se
+    confía en lo que mostraba el navegador). validate_only=True valida sin
+    aplicar. Usa partialFailure: un grupo con problema no tumba el resto."""
+    customer_id = _hotel_valid_id(customer_id)
+    campaign_id = _hotel_valid_id(campaign_id)
+    if hotel_template_locked(customer_id):
+        raise PermissionError(
+            "Esta cuenta tiene una plantilla externa de modificadores de oferta. "
+            "Para no pisar ese trabajo, la plataforma solo permite verlos aquí."
+        )
+    clean = _hotel_validate_changes(changes)
+    group_rows = _search(customer_id, f"""
+        SELECT ad_group.id FROM ad_group WHERE campaign.id = {campaign_id} AND ad_group.status != 'REMOVED'
+    """)
+    group_ids = [r["adGroup"]["id"] for r in group_rows]
+    if not group_ids:
+        raise ValueError("La campaña no tiene grupos de anuncios.")
+    existing = {}
+    for r in _fetch_hotel_modifier_rows(customer_id, campaign_id):
+        existing[(r["ad_group_id"], r["type"], r["label"])] = r
+
+    operations, items, summary = [], [], []
+    updated = created = unchanged = 0
+    for ch in clean:
+        tipo, label, value = ch["type"], ch["label"], ch["value"]
+        spec = HOTEL_MODIFIER_TYPES[tipo]
+        prev_values, n_up, n_new, n_same = set(), 0, 0, 0
+        for gid in group_ids:
+            cur = existing.get((gid, tipo, label))
+            if cur is not None:
+                prev_values.add(cur["value"])
+                if cur["value"] is not None and abs(cur["value"] - value) < 0.005:
+                    n_same += 1
+                    continue
+                operations.append({"update": {"resourceName": cur["resource_name"], "bidModifier": value}, "updateMask": "bid_modifier"})
+                items.append(f"{cur['ad_group_name'] or gid} · {_hotel_tramo_text(tipo, label)}")
+                n_up += 1
+            else:
+                operations.append({"create": {
+                    "adGroup": f"customers/{customer_id}/adGroups/{gid}",
+                    "bidModifier": value,
+                    spec["api"]: _hotel_criterion_object(tipo, label),
+                }})
+                items.append(f"grupo {gid} · {_hotel_tramo_text(tipo, label)}")
+                n_new += 1
+        updated += n_up; created += n_new; unchanged += n_same
+        summary.append({
+            "type": tipo, "label": label, "text": _hotel_tramo_text(tipo, label), "new_value": value,
+            "previous_values": sorted(v for v in prev_values if v is not None),
+            "ad_groups_updated": n_up, "ad_groups_created": n_new, "ad_groups_unchanged": n_same,
+        })
+    if len(operations) > 20000:
+        raise ValueError(f"El cambio tocaría {len(operations)} modificadores; el máximo por vez es 20.000. Divide los tramos.")
+
+    failed = []
+    n_failed = 0
+    url = f"{BASE_URL}/customers/{customer_id}/adGroupBidModifiers:mutate"
+    for start in range(0, len(operations), 2000):
+        chunk_ops, chunk_items = operations[start:start + 2000], items[start:start + 2000]
+        payload = _mutate_with_partial_failure(url, chunk_ops, validate_only)
+        failed_idx, messages = _partial_failures(payload, chunk_items, lambda it: it)
+        n_failed += len(failed_idx)
+        failed.extend(m for m in messages if m not in failed)  # Google repite el mismo mensaje por operación
+    return {
+        "validate_only": validate_only, "applied": not validate_only,
+        "updated": updated, "created": created, "unchanged": unchanged,
+        "operations": len(operations), "failed_count": n_failed, "failed": failed[:20],
+        "changes": summary,
+    }
+
+
+# Hoteles simulado — dos campañas de hotel con modificadores y rendimiento
+# de ejemplo, en memoria: aplicar (validate_only=False) cambia los valores y
+# la siguiente lectura ya los trae, para poder probar el flujo completo.
+_SIM_HOTEL_CAMPAIGNS = [
+    {"campaign_id": "9100000001", "campaign_name": "Hotel Demo - Hotel Ads - Cartagena", "status": "ENABLED",
+     "bidding_strategy_type": "MANUAL_CPC", "impressions": 48200, "clicks": 1530, "cost": 2140.0, "conversions": 52.0, "conv_value": 31800.0},
+    {"campaign_id": "9100000002", "campaign_name": "Hotel Demo - Hotel Ads - Santa Marta", "status": "ENABLED",
+     "bidding_strategy_type": "PERCENT_CPC", "impressions": 22100, "clicks": 640, "cost": 810.0, "conversions": 11.0, "conv_value": 6200.0},
+]
+_SIM_HOTEL_GROUPS = {"9100000001": 4, "9100000002": 2}
+_SIM_HOTEL_BASE = [
+    ("ventana", "0-0", 0.8), ("ventana", "1-2", 1.0), ("ventana", "3-7", 1.0), ("ventana", "8-14", 1.0),
+    ("ventana", "15-30", 1.0), ("ventana", "31-49", 1.0), ("ventana", "50-330", 1.0),
+    ("estancia", "1-1", 1.0), ("estancia", "2-2", 1.0), ("estancia", "3-3", 1.0),
+    ("estancia", "4-5", 1.0), ("estancia", "6-30", 1.0),
+    ("dia", "MONDAY", 1.0), ("dia", "TUESDAY", 1.0), ("dia", "WEDNESDAY", 1.0), ("dia", "THURSDAY", 1.0),
+    ("dia", "FRIDAY", 1.0), ("dia", "SATURDAY", 1.0), ("dia", "SUNDAY", 1.0),
+    ("fechas_usuario", "DEFAULT_SELECTION", 1.0), ("fechas_usuario", "USER_SELECTED", 1.0),
+]
+_SIM_HOTEL_STATE = {}  # campaign_id -> {(tipo, label): value}
+# Peso de impresiones por tramo para generar rendimiento de ejemplo creíble.
+_SIM_HOTEL_PERF = {
+    ("ventana", "0-0"): (0.14, 0.7), ("ventana", "1-2"): (0.12, 0.9), ("ventana", "3-7"): (0.20, 1.1),
+    ("ventana", "8-14"): (0.18, 1.2), ("ventana", "15-30"): (0.16, 1.0), ("ventana", "31-49"): (0.12, 0.8),
+    ("ventana", "50-330"): (0.08, 0.6),
+    ("estancia", "1-1"): (0.38, 1.2), ("estancia", "2-2"): (0.28, 1.0), ("estancia", "3-3"): (0.16, 0.9),
+    ("estancia", "4-5"): (0.12, 0.6), ("estancia", "6-30"): (0.06, 0.3),
+    ("dia", "MONDAY"): (0.10, 0.9), ("dia", "TUESDAY"): (0.10, 0.9), ("dia", "WEDNESDAY"): (0.12, 1.0),
+    ("dia", "THURSDAY"): (0.15, 1.1), ("dia", "FRIDAY"): (0.22, 1.2), ("dia", "SATURDAY"): (0.20, 1.0),
+    ("dia", "SUNDAY"): (0.11, 0.8),
+    ("fechas_usuario", "DEFAULT_SELECTION"): (0.55, 0.7), ("fechas_usuario", "USER_SELECTED"): (0.45, 1.3),
+}
+
+
+def _sim_hotel_state(campaign_id):
+    if campaign_id not in _SIM_HOTEL_STATE:
+        _SIM_HOTEL_STATE[campaign_id] = {(t, l): v for t, l, v in _SIM_HOTEL_BASE}
+    return _SIM_HOTEL_STATE[campaign_id]
+
+
+def simulated_hotel_campaigns(date_from=None, date_to=None):
+    return {"campaigns": [dict(c) for c in _SIM_HOTEL_CAMPAIGNS], "currency": "USD", "template_locked": False}
+
+
+def simulated_hotel_campaign_modifiers(campaign_id, date_from=None, date_to=None):
+    camp = next((c for c in _SIM_HOTEL_CAMPAIGNS if c["campaign_id"] == campaign_id), None)
+    if camp is None:
+        raise ValueError("No se encontró esa campaña de hotel en la cuenta.")
+    state = _sim_hotel_state(campaign_id)
+    tramos = []
+    for tipo, label, _ in _SIM_HOTEL_BASE:
+        share, conv_idx = _SIM_HOTEL_PERF[(tipo, label)]
+        perf = {
+            "impressions": round(camp["impressions"] * share),
+            "clicks": round(camp["clicks"] * share),
+            "cost": round(camp["cost"] * share, 2),
+            "conversions": round(camp["conversions"] * share * conv_idx, 1),
+            "conv_value": round(camp["conv_value"] * share * conv_idx, 2),
+        }
+        v = state[(tipo, label)]
+        tramos.append({
+            "type": tipo, "label": label, "text": _hotel_tramo_text(tipo, label), "value": v, "mixed": False,
+            "min_value": v, "max_value": v, "ad_groups_with": _SIM_HOTEL_GROUPS[campaign_id], "ad_groups_missing": 0, "perf": perf,
+        })
+    totals = {k: camp[k] for k in ("impressions", "clicks", "cost", "conversions", "conv_value")}
+    return {
+        "campaign_id": campaign_id, "campaign_name": camp["campaign_name"], "status": camp["status"],
+        "bidding_strategy_type": camp["bidding_strategy_type"], "ad_groups": _SIM_HOTEL_GROUPS[campaign_id],
+        "tramos": tramos, "totals": totals,
+        "perf_available": {"ventana": True, "estancia": True, "dia": True, "fechas_usuario": True},
+        "template_locked": False,
+    }
+
+
+def simulated_update_hotel_campaign_modifiers(campaign_id, changes, validate_only=True):
+    if campaign_id not in _SIM_HOTEL_GROUPS:
+        raise ValueError("No se encontró esa campaña de hotel en la cuenta.")
+    clean = _hotel_validate_changes(changes)
+    state = _sim_hotel_state(campaign_id)
+    n_groups = _SIM_HOTEL_GROUPS[campaign_id]
+    summary, updated, unchanged = [], 0, 0
+    for ch in clean:
+        key = (ch["type"], ch["label"])
+        if key not in state:
+            raise ValueError(f"El tramo {_hotel_tramo_text(*key)} no existe en esta campaña (simulado).")
+        prev = state[key]
+        same = abs(prev - ch["value"]) < 0.005
+        summary.append({
+            "type": ch["type"], "label": ch["label"], "text": _hotel_tramo_text(*key), "new_value": ch["value"],
+            "previous_values": [prev], "ad_groups_updated": 0 if same else n_groups, "ad_groups_created": 0,
+            "ad_groups_unchanged": n_groups if same else 0,
+        })
+        updated += 0 if same else n_groups
+        unchanged += n_groups if same else 0
+        if not validate_only:
+            state[key] = ch["value"]
+    return {
+        "validate_only": validate_only, "applied": not validate_only, "updated": updated, "created": 0,
+        "unchanged": unchanged, "operations": updated, "failed_count": 0, "failed": [], "changes": summary, "simulated": True,
+    }

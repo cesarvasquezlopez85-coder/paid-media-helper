@@ -573,6 +573,18 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_roas(parse_qs(parsed.query))
             return
 
+        if path == "/api/google-ads/hotel-campaigns":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_hotel_campaigns(parse_qs(parsed.query))
+            return
+
+        if path == "/api/google-ads/hotel-modifiers":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_hotel_modifiers(parse_qs(parsed.query))
+            return
+
         if path == "/api/google-ads/recommendations":
             if not self._require_auth_json():
                 return
@@ -692,6 +704,10 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_google_ads_roas_adjust(payload)
+        elif path == "/api/google-ads/hotel-modifiers-apply":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_hotel_modifiers_apply(payload)
         elif path == "/api/google-ads/ai-max-toggle":
             if not self._require_auth_json():
                 return
@@ -935,6 +951,18 @@ class Handler(SimpleHTTPRequestHandler):
             return None
         if not user["is_admin"]:
             self._send_json(403, {"error": "Esta acción requiere permisos de administrador."})
+            return None
+        return user
+
+    # Funciones en afinado (p. ej. Hoteles): solo las ve y usa un super admin.
+    # El menú oculto en el navegador no basta — el servidor también lo exige.
+    def _require_super_admin_json(self):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return None
+        if user["username"].lower() not in SUPER_ADMIN_USERNAMES:
+            self._send_json(403, {"error": "Esta sección todavía no está disponible para tu usuario."})
             return None
         return user
 
@@ -2266,6 +2294,119 @@ class Handler(SimpleHTTPRequestHandler):
         except ValueError as e:
             self._send_json(400, {"error": str(e)})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    # ------------------------------------------------------- Hoteles ---
+    # Modificadores de oferta de campañas de hotel (AdGroupBidModifier). La
+    # lectura devuelve el perfil actual por campaña con el rendimiento de cada
+    # tramo; la escritura sigue el mismo patrón que ROAS/IA Max (vista previa
+    # validada por Google y luego confirmar) y se rechaza en las cuentas con
+    # plantilla externa de modificadores.
+    def _hotel_dates(self, query):
+        date_from = (query.get("date_from") or [""])[0].strip()
+        date_to = (query.get("date_to") or [""])[0].strip()
+        pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+        if not pattern.match(date_from) or not pattern.match(date_to):
+            self._send_json(400, {"error": "date_from y date_to deben tener formato AAAA-MM-DD."})
+            return None
+        return date_from, date_to
+
+    def _hotel_account_access(self, customer_id):
+        """Devuelve el usuario si puede tocar la cuenta; si no, responde el error y devuelve None."""
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return None
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return None
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return None
+        return user
+
+    def _handle_google_ads_hotel_campaigns(self, query):
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        dates = self._hotel_dates(query)
+        if not dates:
+            return
+        if not google_ads_client.is_configured():
+            self._send_json(200, {**google_ads_client.simulated_hotel_campaigns(*dates), "simulated": True})
+            return
+        if not self._hotel_account_access(customer_id):
+            return
+        try:
+            self._send_json(200, {**google_ads_client.fetch_hotel_campaigns(customer_id, *dates), "simulated": False})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    def _handle_google_ads_hotel_modifiers(self, query):
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        campaign_id = (query.get("campaign_id") or [""])[0].strip()
+        dates = self._hotel_dates(query)
+        if not dates:
+            return
+        if not campaign_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro campaign_id."})
+            return
+        if not google_ads_client.is_configured():
+            try:
+                self._send_json(200, {**google_ads_client.simulated_hotel_campaign_modifiers(campaign_id, *dates), "simulated": True})
+            except ValueError as e:
+                self._send_json(404, {"error": str(e)})
+            return
+        if not self._hotel_account_access(customer_id):
+            return
+        try:
+            self._send_json(200, {**google_ads_client.fetch_hotel_campaign_modifiers(customer_id, campaign_id, *dates), "simulated": False})
+        except ValueError as e:
+            self._send_json(404, {"error": str(e)})
+        except Exception as e:  # noqa: BLE001
+            self._send_google_ads_error(e)
+
+    def _handle_google_ads_hotel_modifiers_apply(self, payload):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not _write_limiter.allow(f"user:{user['id']}", *WRITE_RATE_LIMIT):
+            self._send_json(429, {"error": "Demasiadas escrituras seguidas. Espera un minuto y vuelve a intentar."})
+            return
+        customer_id = str(payload.get("customer_id") or "").strip()
+        campaign_id = str(payload.get("campaign_id") or "").strip()
+        changes = payload.get("changes")
+        validate_only = payload.get("validate_only", True) is not False
+        if not campaign_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido campaign_id."})
+            return
+
+        if not google_ads_client.is_configured():
+            try:
+                self._send_json(200, google_ads_client.simulated_update_hotel_campaign_modifiers(campaign_id, changes, validate_only))
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+        try:
+            result = google_ads_client.update_hotel_campaign_modifiers(customer_id, campaign_id, changes, validate_only)
+            if not validate_only:
+                print(
+                    f"[hotel-modifiers] user={user['id']} customer={customer_id} campaign={campaign_id} "
+                    f"updated={result['updated']} created={result['created']} failed={result['failed_count']}",
+                    flush=True,
+                )
+            self._send_json(200, result)
+        except PermissionError as e:
+            self._send_json(403, {"error": str(e), "template_locked": True})
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+        except Exception as e:  # noqa: BLE001
             self._send_google_ads_error(e)
 
     # ------------------------------------------------------- IA Max ---
