@@ -6935,7 +6935,7 @@ const HOTEL_TYPE_META = {
 };
 const HOTEL_RENDER_LIMIT = 200;
 // Interruptor de la sección Hoteles en el menú. false = oculta para todos.
-const HOTEL_SECTION_VISIBLE = false;
+const HOTEL_SECTION_VISIBLE = true;
 
 function hotelMoney(n, currency) {
   if (n === null || n === undefined || Number.isNaN(n)) return 'N/D';
