@@ -4477,6 +4477,47 @@ function renderNegAiPushPanel() {
     </div>`;
 }
 
+// Los términos a revisar agrupados por la pregunta que les hizo la IA, del grupo con más gasto al de menos.
+// `seguros` = los que la casilla del grupo puede marcar sin riesgo: no convierten, no llevan la marca y
+// todavía no existen como negativa exacta (o no hay campañas, en modo archivo).
+function negAiReviewGroups(revisar, canPush) {
+  const byQuestion = new Map();
+  (revisar || []).forEach((t) => {
+    if (!byQuestion.has(t.pregunta)) byQuestion.set(t.pregunta, []);
+    byQuestion.get(t.pregunta).push(t);
+  });
+  return [...byQuestion.entries()].map(([pregunta, terms]) => ({
+    pregunta, terms,
+    cost: terms.reduce((sum, t) => sum + t.cost, 0),
+    conversions: terms.reduce((sum, t) => sum + t.conversions, 0),
+    seguros: terms.filter((t) => t.conversions === 0 && !t.es_marca && (t.campanias.length || !canPush)),
+  })).sort((x, y) => y.cost - x.cost);
+}
+
+function renderNegAiReviewGroup(g, idx, canPush) {
+  const ai = state.neg.ai;
+  const marked = g.seguros.filter((t) => ai.selected.has(`r:${t.key}`)).length;
+  const state3 = g.seguros.length === 0 ? 'none' : marked === g.seguros.length ? 'all' : marked > 0 ? 'some' : 'off';
+  const excluded = g.terms.length - g.seguros.length;
+  return `
+    <div style="border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:12px 14px;margin-bottom:12px">
+      <label style="display:flex;gap:10px;align-items:flex-start;font-size:13.5px;${g.seguros.length ? 'cursor:pointer' : ''}">
+        <input type="checkbox" data-neg-ai-review-group="${idx}" data-state="${state3}" ${state3 === 'all' ? 'checked' : ''} ${g.seguros.length ? '' : 'disabled'} style="margin-top:3px" />
+        <span>
+          <strong>${escapeHtml(g.pregunta)}</strong>
+          <span class="footnote" style="display:block;margin:2px 0 0">${fmtInt(g.terms.length)} término${g.terms.length === 1 ? '' : 's'} · ${fmtMoney(g.cost)} · ${fmtInt(g.conversions)} conv.${g.seguros.length ? ` · la casilla marca ${fmtInt(g.seguros.length)}${excluded ? ` (los otros ${fmtInt(excluded)} convierten, llevan la marca o ya existen: márcalos a mano si quieres)` : ''}` : ' · ninguno se puede marcar en bloque (convierten, llevan la marca o ya existen)'}</span>
+        </span>
+      </label>
+      <div class="table-scroll" style="max-height:260px;margin-top:8px"><table>
+        <thead><tr><th></th><th>Término</th><th>Clics</th><th>Costo</th><th>Conv.</th></tr></thead>
+        <tbody>${g.terms.map((t) => `<tr>
+          <td><input type="checkbox" data-neg-ai-sel="r:${escapeHtml(t.key)}" ${ai.selected.has(`r:${t.key}`) ? 'checked' : ''} ${t.campanias.length || !canPush ? '' : 'disabled title="Ya existe como negativa exacta en sus campañas"'} /></td>
+          <td>${escapeHtml(t.term)}${t.es_marca ? ' <span class="delta-badge warn">lleva la marca</span>' : ''}${t.conversions > 0 ? ' <span class="delta-badge bad">convierte</span>' : ''}</td>
+          <td>${fmtInt(t.clicks)}</td><td>${fmtMoney(t.cost)}</td><td>${fmtInt(t.conversions)}</td></tr>`).join('')}</tbody>
+      </table></div>
+    </div>`;
+}
+
 function renderNegAiResult() {
   const ai = state.neg.ai;
   const r = ai.result;
@@ -4502,15 +4543,8 @@ function renderNegAiResult() {
           <button class="btn-outline sm" data-action="neg-ai-review-select-none">Quitar marcas</button>
         </span>
       </div>
-      <p style="margin:0 0 10px;font-size:12.5px;color:var(--color-text-muted)">Marca los que quieras negativizar: se suben como negativas <strong>exactas</strong> en las campañas donde aparecieron, junto con el resto de lo marcado más arriba.</p>
-      <div class="table-scroll" style="max-height:420px"><table>
-        <thead><tr><th></th><th>Término</th><th>Clics</th><th>Costo</th><th>Conv.</th><th>Qué hay que decidir</th></tr></thead>
-        <tbody>${r.revisar.slice(0, 150).map((t) => `<tr>
-          <td><input type="checkbox" data-neg-ai-sel="r:${escapeHtml(t.key)}" ${ai.selected.has(`r:${t.key}`) ? 'checked' : ''} ${t.campanias.length || !canPush ? '' : 'disabled title="Ya existe como negativa exacta en sus campañas"'} /></td>
-          <td>${escapeHtml(t.term)}${t.es_marca ? ' <span class="delta-badge warn">lleva la marca</span>' : ''}${t.conversions > 0 ? ' <span class="delta-badge bad">convierte</span>' : ''}</td>
-          <td>${fmtInt(t.clicks)}</td><td>${fmtMoney(t.cost)}</td><td>${fmtInt(t.conversions)}</td><td>${escapeHtml(t.pregunta)}</td></tr>`).join('')}</tbody>
-      </table></div>
-      ${r.revisar.length > 150 ? `<p class="footnote">Mostrando 150 de ${r.revisar.length}; los botones de arriba actúan sobre todos.</p>` : ''}
+      <p style="margin:0 0 10px;font-size:12.5px;color:var(--color-text-muted)">Están agrupados por la duda que tuvo la IA. La casilla de cada grupo marca de una vez los términos seguros del grupo; también puedes marcar uno por uno. Se suben como negativas <strong>exactas</strong> en las campañas donde aparecieron, junto con el resto de lo marcado más arriba.</p>
+      ${negAiReviewGroups(r.revisar, canPush).map((g, idx) => renderNegAiReviewGroup(g, idx, canPush)).join('')}
     </div>` : '';
 
   return `
@@ -11908,6 +11942,19 @@ function bindEvents() {
     };
     reader.onerror = () => { state.neg.ai.rowsStatus = 'idle'; state.neg.ai.rowsError = 'No se pudo leer el archivo.'; render(); };
     reader.readAsArrayBuffer(file);
+  });
+  document.querySelectorAll('[data-neg-ai-review-group]').forEach((box) => {
+    box.indeterminate = box.dataset.state === 'some';
+    box.addEventListener('change', () => {
+      const ai = state.neg.ai;
+      const g = negAiReviewGroups(ai.result && ai.result.revisar, !!ai.customerId)[Number(box.dataset.negAiReviewGroup)];
+      if (!g) return;
+      // Si ya estaban todos marcados se quitan; en cualquier otro caso se marcan los seguros del grupo.
+      const allMarked = g.seguros.length > 0 && g.seguros.every((t) => ai.selected.has(`r:${t.key}`));
+      g.seguros.forEach((t) => { if (allMarked) ai.selected.delete(`r:${t.key}`); else ai.selected.add(`r:${t.key}`); });
+      if (ai.push.status !== 'idle') ai.push = { status: 'idle', preview: null, result: null, error: null };
+      render();
+    });
   });
   document.querySelectorAll('[data-neg-ai-sel]').forEach((box) => {
     box.addEventListener('change', () => {
