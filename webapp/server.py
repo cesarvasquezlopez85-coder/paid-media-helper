@@ -1815,8 +1815,12 @@ class Handler(SimpleHTTPRequestHandler):
         date_to = (query.get("date_to") or [""])[0].strip()
         date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+        # pmax_terms=1 (pestaña "Con IA"): términos reales de Performance Max con costo, en vez de categorías.
+        pmax_terms = (query.get("pmax_terms") or [""])[0].strip() == "1"
+
         if not google_ads_client.is_configured():
-            rows = google_ads_client.simulated_search_terms() + google_ads_client.simulated_pmax_search_term_insights()
+            pmax_rows = google_ads_client.simulated_pmax_search_terms() if pmax_terms else google_ads_client.simulated_pmax_search_term_insights()
+            rows = google_ads_client.simulated_search_terms() + pmax_rows
             self._send_json(200, {"rows": rows, "simulated": True})
             return
 
@@ -1845,12 +1849,20 @@ class Handler(SimpleHTTPRequestHandler):
         # fetch_pmax_search_term_insights), no cuentas sin campañas PMax lo
         # necesitan; si falla, no debe tumbar el reporte de términos Search
         # que sí funcionó.
-        try:
-            rows = rows + google_ads_client.fetch_pmax_search_term_insights(customer_id, date_from, date_to)
-        except Exception:
-            pass
+        pmax_fallback = False
+        if pmax_terms:
+            try:
+                rows = rows + google_ads_client.fetch_pmax_search_terms(customer_id, date_from, date_to)
+            except Exception as e:  # noqa: BLE001 — si falla la vista de términos, se cae a las categorías de siempre
+                print(f"[pmax-terms] {' '.join(str(e).split())[:200]}", flush=True)
+                pmax_fallback = True
+        if not pmax_terms or pmax_fallback:
+            try:
+                rows = rows + google_ads_client.fetch_pmax_search_term_insights(customer_id, date_from, date_to)
+            except Exception:
+                pass
 
-        self._send_json(200, {"rows": rows, "simulated": False})
+        self._send_json(200, {"rows": rows, "simulated": False, "pmax_fallback": pmax_fallback})
 
     def _handle_google_ads_campaign_list(self, query):
         # Listado liviano de TODAS las campañas activas de la cuenta (no

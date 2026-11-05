@@ -92,6 +92,10 @@ def aggregate_terms(rows):
         cid = r.get("campaign_id")
         if cid not in (None, ""):
             a["campaigns"][str(cid)] = r.get("campaign_name") or str(cid)
+            if r.get("pmax"):
+                a.setdefault("pmax_campaigns", set()).add(str(cid))
+        if r.get("pmax"):
+            a["pmax"] = True
     return list(by.values())
 
 
@@ -147,7 +151,7 @@ def _round_metrics(m):
 def _term_view(t):
     return {
         "term": t["term"], "clicks": t["clicks"], "impr": t["impr"], "cost": round(t["cost"], 2),
-        "conversions": round(t["conversions"], 2),
+        "conversions": round(t["conversions"], 2), "pmax": bool(t.get("pmax")),
         "campaigns": [{"id": cid, "name": name} for cid, name in t["campaigns"].items()],
     }
 
@@ -191,6 +195,11 @@ def build_result(ai, all_terms, chosen, ctx, existing_negatives):
     destino = _phrases(split_lines(ctx.get("destino")))
     protegidas = marca + destino
     existing = _clean_existing(existing_negatives)
+    pmax_ids = {cid for t in all_terms for cid in t.get("pmax_campaigns", ())}
+
+    def camp(cid, name):
+        # `pmax`: en Performance Max las negativas de frase no están probadas; la pantalla lo avisa.
+        return {"id": cid, "name": name, "pmax": cid in pmax_ids}
 
     def has_brand(t):
         return any(_contains_phrase(t["tokens"], p) for p in marca)
@@ -200,7 +209,7 @@ def build_result(ai, all_terms, chosen, ctx, existing_negatives):
         clave, si lleva la marca (para avisar) y las campañas donde aún no existe esa negativa exacta."""
         return {
             **_term_view(t), "key": t["key"], "es_marca": has_brand(t),
-            "campanias": [{"id": cid, "name": name} for cid, name in t["campaigns"].items()
+            "campanias": [camp(cid, name) for cid, name in t["campaigns"].items()
                           if not _existing_covers(existing, t["tokens"], "EXACT", cid)],
         }
 
@@ -324,7 +333,7 @@ def build_result(ai, all_terms, chosen, ctx, existing_negatives):
                 "choques": choques[:8], "choques_total": len(choques), "riesgo": risk,
                 "extra": {"terminos": len(extra), "costo": round(sum(t["cost"] for t in extra), 2),
                           "ejemplos": [t["term"] for t in sorted(extra, key=lambda x: -x["cost"])[:5]]},
-                "campanias": [{"id": cid, "name": name} for cid, name in campaigns.items()],
+                "campanias": [camp(cid, name) for cid, name in campaigns.items()],
                 "ya_existe": ya_existe,
             })
         negativas.sort(key=lambda x: -x["bloquea"]["costo"])
@@ -337,7 +346,7 @@ def build_result(ai, all_terms, chosen, ctx, existing_negatives):
                      if not _existing_covers(existing, t["tokens"], "EXACT", cid)}
             if camps:
                 exactas.append({"term": t["term"], "key": t["key"], "cost": round(t["cost"], 2), "clicks": t["clicks"],
-                                "campanias": [{"id": cid, "name": name} for cid, name in camps.items()]})
+                                "campanias": [camp(cid, name) for cid, name in camps.items()]})
         own_metrics = _empty_metrics()
         for t in own:
             _add_metrics(own_metrics, t)

@@ -652,6 +652,52 @@ def fetch_search_terms(customer_id, date_from, date_to):
     return rows
 
 
+def fetch_pmax_search_terms(customer_id, date_from, date_to, limit=15000):
+    """Términos de búsqueda REALES de campañas Performance Max, con costo, de
+    campaign_search_term_view. Confirmado contra una cuenta real (2026-11-05,
+    Estelar Alto Prado: 675 términos en 30 días): esta vista sí trae el texto
+    exacto de la búsqueda e impresiones, clics, costo y conversiones — a
+    diferencia de campaign_search_term_insight (fetch_pmax_search_term_insights),
+    que solo agrupa en categorías y no trae costo. Su campo `status` no existe.
+    Se queda con los de más gasto (limit) para no devolver cientos de miles de
+    filas en cuentas con muchas campañas."""
+    query = f"""
+        SELECT
+          campaign_search_term_view.search_term,
+          campaign.id,
+          campaign.name,
+          metrics.clicks,
+          metrics.impressions,
+          metrics.cost_micros,
+          metrics.conversions
+        FROM campaign_search_term_view
+        WHERE segments.date BETWEEN '{date_from}' AND '{date_to}'
+          AND campaign.advertising_channel_type = 'PERFORMANCE_MAX'
+        ORDER BY metrics.cost_micros DESC
+        LIMIT {int(limit)}
+    """
+    rows = []
+    for r in _search(customer_id, query):
+        view = r.get("campaignSearchTermView", {})
+        campaign = r.get("campaign", {})
+        metrics = r.get("metrics", {})
+        term = view.get("searchTerm") or ""
+        if not term:
+            continue
+        rows.append({
+            "term": term,
+            "campaign_id": str(campaign.get("id")) if campaign.get("id") is not None else None,
+            "campaign_name": campaign.get("name") or "(sin nombre)",
+            "ad_group_id": None, "ad_group_name": None,
+            "clicks": _int_or_none(metrics.get("clicks")) or 0,
+            "impr": _int_or_none(metrics.get("impressions")) or 0,
+            "cost": _micros_to_units(_int_or_none(metrics.get("costMicros"))) or 0,
+            "conversions": _float_or_none(metrics.get("conversions")) or 0,
+            "is_category": False, "pmax": True,
+        })
+    return rows
+
+
 def fetch_pmax_search_term_insights(customer_id, date_from, date_to):
     """Categorías de búsqueda para campañas Performance Max. Confirmado
     contra una cuenta real (2026-07-29): search_term_view devuelve 0 filas
@@ -2373,6 +2419,19 @@ SIMULATED_PMAX_SEARCH_TERM_INSIGHTS = [
     {"term": "hoteles para eventos empresariales bogota", "campaign_id": "1111111103", "campaign_name": "Estelar Hoteles - CO:es - PMAX Corpo", "ad_group_id": None, "ad_group_name": None, "clicks": 95, "impr": 3100, "cost": None, "conversions": 6.1, "is_category": True},
     {"term": "hotel tequendama bogota", "campaign_id": "1111111103", "campaign_name": "Estelar Hoteles - CO:es - PMAX Corpo", "ad_group_id": None, "ad_group_name": None, "clicks": 14, "impr": 240, "cost": None, "conversions": 0, "is_category": True},
 ]
+
+
+# Términos reales de la campaña PMax simulada (con costo), para probar la pestaña "Con IA" con Performance Max.
+SIMULATED_PMAX_SEARCH_TERMS = [
+    {"term": "hotel estelar corporativo bogota", "campaign_id": "1111111103", "campaign_name": "Estelar Hoteles - CO:es - PMAX Corpo", "ad_group_id": None, "ad_group_name": None, "clicks": 210, "impr": 5600, "cost": 310.5, "conversions": 18.4, "is_category": False, "pmax": True},
+    {"term": "airbnb bogota centro", "campaign_id": "1111111103", "campaign_name": "Estelar Hoteles - CO:es - PMAX Corpo", "ad_group_id": None, "ad_group_name": None, "clicks": 40, "impr": 900, "cost": 52.0, "conversions": 0, "is_category": False, "pmax": True},
+    {"term": "empleo hotel bogota", "campaign_id": "1111111103", "campaign_name": "Estelar Hoteles - CO:es - PMAX Corpo", "ad_group_id": None, "ad_group_name": None, "clicks": 22, "impr": 410, "cost": 27.4, "conversions": 0, "is_category": False, "pmax": True},
+    {"term": "hoteles para eventos empresariales bogota", "campaign_id": "1111111103", "campaign_name": "Estelar Hoteles - CO:es - PMAX Corpo", "ad_group_id": None, "ad_group_name": None, "clicks": 95, "impr": 3100, "cost": 120.8, "conversions": 6.1, "is_category": False, "pmax": True},
+]
+
+
+def simulated_pmax_search_terms():
+    return SIMULATED_PMAX_SEARCH_TERMS
 
 
 def simulated_pmax_search_term_insights():

@@ -777,6 +777,7 @@ export function loadSearchTermsFromApi(apiRows) {
       if (r.cost == null) { existing.cost_na = true; } else { existing.cost += Number(r.cost) || 0; }
       existing.conversions += Number(r.conversions) || 0;
       if (r.is_category) existing.is_category = true;
+      if (r.pmax) existing.pmax = true;
     } else {
       byKey.set(key, {
         term,
@@ -788,6 +789,7 @@ export function loadSearchTermsFromApi(apiRows) {
         campaign_id: campaignId,
         campaign_name: r.campaign_name || 'N/D',
         is_category: !!r.is_category,
+        pmax: !!r.pmax,
       });
     }
   }
