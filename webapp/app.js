@@ -4590,7 +4590,7 @@ function renderNegAiResult() {
         <div class="stat-sub">${fmtMoney(rs.revisar.costo)} · ${fmtInt(rs.revisar.clics)} clics</div>
       </div>
     </div>
-    <p class="footnote" style="margin:-4px 0 16px">La IA revisó ${fmtInt(rs.analizados)} de ${fmtInt(rs.terminos_total)} términos (los de más gasto y todos los que convierten).${rs.no_analizados ? ` Los otros ${fmtInt(rs.no_analizados)} (${fmtMoney(rs.costo_no_analizado)}) son cola larga: no se clasificaron, pero cada palabra negativa se midió contra ellos y se avisa si los bloquea.` : ''}${r.negativas_existentes ? ` Se tuvieron en cuenta las ${fmtInt(r.negativas_existentes)} negativas que la cuenta ya tiene.` : ''}</p>
+    <p class="footnote" style="margin:-4px 0 16px">La IA revisó ${fmtInt(rs.analizados)} de ${fmtInt(rs.terminos_total)} términos (los de más gasto y todos los que convierten).${rs.no_analizados ? ` Los otros ${fmtInt(rs.no_analizados)} (${fmtMoney(rs.costo_no_analizado)}) son cola larga: no se clasificaron, pero cada palabra negativa se midió contra ellos y se avisa si los bloquea.` : ''}${r.negativas_existentes ? ` Se tuvieron en cuenta las ${fmtInt(r.negativas_existentes)} negativas que la cuenta ya tiene.` : ''}${r.ya_bloqueados && r.ya_bloqueados.terminos ? ` Se dejaron fuera ${fmtInt(r.ya_bloqueados.terminos)} término${r.ya_bloqueados.terminos === 1 ? '' : 's'} (${fmtMoney(r.ya_bloqueados.costo)}) que ya bloquea una negativa existente de su campaña.` : ''}</p>
     ${avisos}
     <h3 style="margin:18px 0 10px">Qué negativizar, por tema</h3>
     ${(r.temas || []).length ? r.temas.map((t) => renderNegAiTema(t, canPush)).join('') : '<div class="card state-panel idle"><p>La IA no encontró términos para negativizar en este periodo.</p></div>'}

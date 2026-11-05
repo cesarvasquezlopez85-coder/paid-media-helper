@@ -70,6 +70,46 @@ def split_lines(value):
     return [p.strip() for p in re.split(r"[\n,;]+", str(value or "")) if p.strip()]
 
 
+def _blocked_by(tokens, negatives):
+    """¿Alguna negativa (tokens, concordancia) bloquea esta búsqueda? Mismas reglas que Google, sin variantes
+    cercanas (las negativas no las cubren): exacta = igual; frase = las palabras seguidas y en orden; amplia =
+    todas las palabras, en cualquier orden."""
+    for ntoks, match in negatives:
+        if match == "EXACT" and tokens == ntoks:
+            return True
+        if match == "PHRASE" and _contains_phrase(tokens, ntoks):
+            return True
+        if match == "BROAD" and all(w in tokens for w in ntoks):
+            return True
+    return False
+
+
+def drop_blocked(rows, existing_negatives):
+    """Separa las filas (término, campaña) que YA bloquea una negativa existente de su propia campaña: no tiene
+    sentido volver a negativizarlas ni gastarle tokens a la IA con ellas. En Search Google ya las marca como
+    excluidas y la consulta las descarta; en Performance Max la vista no trae estado y reaparecen dentro del
+    periodo. Las filas sin campaña (CSV) se conservan. Devuelve (conservadas, descartadas)."""
+    by = {}
+    for e in _clean_existing(existing_negatives):
+        by.setdefault(e["campaign_id"], []).append((e["tokens"], e["match"]))
+    kept, dropped = [], []
+    for r in rows or []:
+        cid = r.get("campaign_id") if isinstance(r, dict) else None
+        negs = by.get(str(cid)) if cid not in (None, "") else None
+        if negs and _blocked_by(_tokens(r.get("term")), negs):
+            dropped.append(r)
+        else:
+            kept.append(r)
+    return kept, dropped
+
+
+def summarize_dropped(dropped):
+    """Cuántos términos únicos y cuánto gasto se dejaron fuera por estar ya bloqueados."""
+    terms = {norm(r.get("term")) for r in dropped if not r.get("is_category")}
+    cost = sum(float(r.get("cost") or 0) for r in dropped if not r.get("is_category"))
+    return {"terminos": len(terms), "costo": round(cost, 2)}
+
+
 def aggregate_terms(rows):
     """Une las filas por término normalizado (un mismo término puede venir de
     varias campañas). Descarta categorías de Performance Max y vacíos."""

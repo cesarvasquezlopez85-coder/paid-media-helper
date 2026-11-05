@@ -2206,20 +2206,8 @@ class Handler(SimpleHTTPRequestHandler):
         if not negativos_ia.split_lines(ctx["marca"]):
             self._send_json(400, {"error": "Escribe el nombre del hotel o la marca: se usa para que la IA nunca niegue búsquedas de tu propia marca."})
             return
-        try:
-            terms = negativos_ia.aggregate_terms(rows)
-        except (TypeError, ValueError):
-            self._send_json(400, {"error": "Los términos traen valores inválidos (clics, costo o conversiones)."})
-            return
-        if not terms:
-            self._send_json(400, {"error": "No hay términos de búsqueda reales para analizar (las categorías de Performance Max no se analizan)."})
-            return
-        if not _ai_limiter.allow(f"user:{user['id']}", *AI_RATE_LIMIT):
-            self._send_json(429, {"error": "Alcanzaste el límite de análisis con IA por esta hora. Intenta más tarde."})
-            return
-
-        # Las negativas que la cuenta ya tiene (solo con Google Ads real y acceso a la cuenta): la IA no las repite
-        # y el resultado omite las que ya existen en cada campaña.
+        # Las negativas que la cuenta ya tiene (solo con Google Ads real y acceso a la cuenta): la IA no las repite,
+        # el resultado omite las que ya existen en cada campaña y los términos que ya bloquean se sacan de la lista.
         existing = []
         customer_id = str(payload.get("customer_id") or "").strip()
         if google_ads_client.is_configured() and customer_id.isdigit() and self._user_can_access_account(user, customer_id):
@@ -2228,11 +2216,27 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001 — sin esto el análisis igual sirve
                 print(f"[neg-ia] no se pudieron leer las negativas existentes: {' '.join(str(e).split())[:200]}", flush=True)
         try:
+            rows, dropped_rows = negativos_ia.drop_blocked(rows, existing)
+            terms = negativos_ia.aggregate_terms(rows)
+        except (TypeError, ValueError):
+            self._send_json(400, {"error": "Los términos traen valores inválidos (clics, costo o conversiones)."})
+            return
+        if not terms:
+            if dropped_rows:
+                self._send_json(400, {"error": "Todos los términos de este periodo ya están bloqueados por negativas que la cuenta tiene: no hay nada nuevo que analizar."})
+            else:
+                self._send_json(400, {"error": "No hay términos de búsqueda reales para analizar (las categorías de Performance Max no se analizan)."})
+            return
+        if not _ai_limiter.allow(f"user:{user['id']}", *AI_RATE_LIMIT):
+            self._send_json(429, {"error": "Alcanzaste el límite de análisis con IA por esta hora. Intenta más tarde."})
+            return
+        try:
             chosen = negativos_ia.select_for_ai(terms)
             user_content = negativos_ia.build_user_content(ctx, chosen, sorted({e["text"] for e in existing}))
             ai = claude_client.analizar_negativos(user_content)
             result = negativos_ia.build_result(ai, terms, chosen, ctx, existing)
             result["negativas_existentes"] = len(existing)
+            result["ya_bloqueados"] = negativos_ia.summarize_dropped(dropped_rows)
             self._send_json(200, result)
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             print(f"[claude-error] neg-ia: {' '.join(str(e).split())[:300]}", flush=True)
