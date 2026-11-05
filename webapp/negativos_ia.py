@@ -369,7 +369,13 @@ def build_result(ai, all_terms, chosen, ctx, existing_negatives):
             continue
         t = by_id[tid]
         _add_metrics(total_review, t)
-        review_out.append({**_term_view(t), "pregunta": w[1]})
+        # Cada término a revisar se puede marcar para subirlo como negativa exacta: se manda la clave, si lleva
+        # la marca (para avisar) y las campañas donde aún no existe esa exacta.
+        review_out.append({
+            **_term_view(t), "key": t["key"], "es_marca": has_brand(t), "pregunta": w[1],
+            "campanias": [{"id": cid, "name": name} for cid, name in t["campaigns"].items()
+                          if not _existing_covers(existing, t["tokens"], "EXACT", cid)],
+        })
     review_out.sort(key=lambda x: -x["cost"])
 
     analyzed = {t["key"] for t in chosen}
