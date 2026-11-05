@@ -33,6 +33,8 @@ const state = {
   },
 
   neg: {
+    tab: 'reglas', // 'reglas' | 'ia' (la pestaña "Con IA" solo la ve el super admin)
+    ai: negAiFresh(),
     core: '',
     exceptions: '',
     status: 'idle', error: null, fileName: null, rows: null,
@@ -42,7 +44,7 @@ const state = {
     api: {
       statusChecked: false, configured: false,
       accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
-      dateFrom: '', dateTo: '',
+      dateFrom: '', dateTo: '', period: '30', // '30' | '60' | '90' | 'custom'
       simulated: false, error: null,
       allCampaigns: [], // {id, name} de TODAS las campañas activas de la cuenta — no solo las que tienen search terms
       mcc: {
@@ -3538,6 +3540,15 @@ function runForecastInvestmentAnalysis(text, fileName) {
 
 function renderNegPage() {
   const s = state.neg;
+  const tabs = currentUser.isSuperAdmin ? `
+    <div class="seg-control" style="margin-bottom:20px">
+      <button class="seg-btn ${s.tab !== 'ia' ? 'active' : ''}" data-action="neg-tab-reglas">Por reglas</button>
+      <button class="seg-btn ${s.tab === 'ia' ? 'active' : ''}" data-action="neg-tab-ia">Con IA</button>
+    </div>` : '';
+  if (currentUser.isSuperAdmin && s.tab === 'ia') {
+    ensureNegGoogleAdsStatusLoaded();
+    return `${tabs}${renderNegAiTab()}`;
+  }
 
   let body = '';
   if (s.status === 'idle') {
@@ -3585,6 +3596,7 @@ function renderNegPage() {
   }
 
   return `
+    ${tabs}
     <div class="card control-panel">
       <div class="field" style="flex:1;min-width:240px">
         <label>Terminos de la campaña (lo que si debe ir)</label>
@@ -3719,7 +3731,7 @@ function renderNegMccFilterPanel() {
     </div>`;
 }
 
-function renderNegApiPanel() {
+function renderNegApiPanel(fetchAction = 'neg-api-fetch', fetchLabel = 'Traer términos de Google Ads') {
   const a = state.neg.api;
 
   if (!a.statusChecked) {
@@ -3763,6 +3775,14 @@ function renderNegApiPanel() {
       <label>...o escribe el ID de la cuenta</label>
       <input type="text" id="neg-api-account-manual" value="${escapeHtml(a.accountIdManual)}" placeholder="ej. 6862893390" style="width:160px" />
     </div>
+    <div class="field">
+      <label>Periodo</label>
+      <select id="neg-api-period" style="width:190px">
+        ${[['30', 'Últimos 30 días'], ['60', 'Últimos 60 días'], ['90', 'Últimos 90 días'], ['custom', 'Fechas personalizadas']]
+          .map(([v, label]) => `<option value="${v}" ${(a.period || '30') === v ? 'selected' : ''}>${label}</option>`).join('')}
+      </select>
+    </div>
+    ${(a.period || '30') === 'custom' ? `
     <div style="display:flex;gap:24px;flex-wrap:nowrap">
       <div class="field">
         <label>Desde</label>
@@ -3772,8 +3792,8 @@ function renderNegApiPanel() {
         <label>Hasta</label>
         <input type="date" id="neg-api-date-to" value="${escapeHtml(a.dateTo)}" />
       </div>
-    </div>
-    <button class="btn-accent" data-action="neg-api-fetch">Traer términos de Google Ads</button>
+    </div>` : `<div class="field"><p class="footnote" style="margin:0">${escapeHtml(a.dateFrom)} a ${escapeHtml(a.dateTo)}</p></div>`}
+    <button class="btn-accent" data-action="${fetchAction}">${fetchLabel}</button>
     ${a.error ? `<div class="error-panel" style="margin-top:10px"><strong>No se pudo traer el reporte.</strong> ${escapeHtml(a.error)}</div>` : ''}
   `;
 }
@@ -4040,6 +4060,18 @@ function runNegAnalysisFromApiRows(apiRows, fileName) {
   render();
 }
 
+// Periodo rápido (30, 60 o 90 días): termina ayer, porque el día en curso viene incompleto.
+function negApplyPeriod(period) {
+  const a = state.neg.api;
+  a.period = period;
+  if (period === 'custom') return;
+  const pad = (n) => String(n).padStart(2, '0');
+  const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const to = new Date(); to.setDate(to.getDate() - 1);
+  const from = new Date(to); from.setDate(from.getDate() - (Number(period) - 1));
+  a.dateFrom = iso(from); a.dateTo = iso(to);
+}
+
 function ensureNegGoogleAdsStatusLoaded() {
   const a = state.neg.api;
   if (a.statusChecked) return;
@@ -4059,13 +4091,7 @@ function loadNegGoogleAdsAccounts() {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
       a.accounts = data.accounts || [];
       a.simulated = !!data.simulated;
-      if (!a.dateFrom || !a.dateTo) {
-        const today = new Date();
-        const monthAgo = new Date(today);
-        monthAgo.setDate(monthAgo.getDate() - 30);
-        a.dateTo = today.toISOString().slice(0, 10);
-        a.dateFrom = monthAgo.toISOString().slice(0, 10);
-      }
+      if (!a.dateFrom || !a.dateTo) negApplyPeriod(a.period || '30');
       a.accountsStatus = 'ready';
       render();
     })
@@ -4162,6 +4188,395 @@ function pushNegativeKeywords(preview) {
       s.push.error = err.message || String(err);
       render();
     });
+}
+
+// ---------------------------------------------------------------------------
+// Negativización — pestaña "Con IA" (en afinado: solo super admin).
+//
+// La IA (Claude) lee los términos de búsqueda y dice qué negativizar —agrupado
+// por tema, con la palabra o frase negativa propuesta—, qué dejar y qué
+// revisar. El servidor valida lo que contesta con código (negativos_ia.py):
+// choques con términos que convierten o de marca, palabras genéricas,
+// negativas que ya existen. Subir a Google Ads usa el mismo flujo de vista
+// previa y confirmar que la vista de reglas.
+// ---------------------------------------------------------------------------
+
+function negAiFresh() {
+  return {
+    ctx: { marca: '', destino: '', ofrece: '', no_ofrece: '' },
+    rowsStatus: 'idle', rowsError: null, rows: null, rowsLabel: '', customerId: '',
+    status: 'idle', error: null, result: null,
+    selected: new Set(), // "n:<id de negativa>" | "e:<id de tema>"
+    push: { status: 'idle', preview: null, result: null, error: null },
+  };
+}
+
+function negAiCustomerId() {
+  const a = state.neg.api;
+  return (a.accountIdManual || '').replace(/[^0-9]/g, '') || a.accountId;
+}
+
+function resetNegAiResult() {
+  const ai = state.neg.ai;
+  ai.status = 'idle'; ai.error = null; ai.result = null;
+  ai.selected = new Set();
+  ai.push = { status: 'idle', preview: null, result: null, error: null };
+}
+
+function negAiSetRows(rows, label, customerId) {
+  const ai = state.neg.ai;
+  ai.rows = rows; ai.rowsLabel = label; ai.customerId = customerId || '';
+  ai.rowsStatus = 'ready'; ai.rowsError = null;
+  resetNegAiResult();
+  render();
+}
+
+function fetchNegAiTerms() {
+  const s = state.neg;
+  const a = s.api;
+  const ai = s.ai;
+  const customerId = negAiCustomerId();
+  if (!customerId && !a.simulated) { a.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
+  if (!a.dateFrom || !a.dateTo) { a.error = 'Elige el rango de fechas primero.'; render(); return; }
+  a.error = null;
+  ai.rowsStatus = 'loading'; ai.rowsError = null;
+  render();
+  const params = new URLSearchParams({ customer_id: customerId || '', date_from: a.dateFrom, date_to: a.dateTo });
+  fetch(`/api/google-ads/search-terms?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.simulated = !!data.simulated;
+      const account = a.accounts.find((acc) => acc.id === customerId);
+      const label = a.simulated
+        ? `Google Ads (simulado) — ${a.dateFrom} a ${a.dateTo}`
+        : `Google Ads — ${account ? account.name : customerId} — ${a.dateFrom} a ${a.dateTo}`;
+      negAiSetRows(engine.loadSearchTermsFromApi(data.rows || []), label, customerId);
+    })
+    .catch((err) => { ai.rowsStatus = 'idle'; a.error = err.message || String(err); render(); });
+}
+
+function runNegAiAnalysis() {
+  const ai = state.neg.ai;
+  if (!ai.rows || !ai.rows.length) { ai.error = 'Primero trae los términos de búsqueda.'; ai.status = 'error'; render(); return; }
+  if (!ai.ctx.marca.trim()) { ai.error = 'Escribe el nombre del hotel o la marca: sirve para que la IA nunca niegue búsquedas de tu propia marca.'; ai.status = 'error'; render(); return; }
+  ai.status = 'loading'; ai.error = null; ai.result = null;
+  ai.selected = new Set(); ai.push = { status: 'idle', preview: null, result: null, error: null };
+  render();
+  fetch('/api/ai/analizar-negativos', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customer_id: ai.customerId,
+      contexto: ai.ctx,
+      rows: ai.rows.map((r) => ({
+        term: r.term, campaign_id: r.campaign_id, campaign_name: r.campaign_name,
+        clicks: r.clicks, impr: r.impr, cost: r.cost_na ? 0 : r.cost, conversions: r.conversions, is_category: !!r.is_category,
+      })),
+    }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      ai.result = data; ai.status = 'ready';
+      // Por defecto se marcan las palabras de riesgo bajo que aún no existen en la cuenta.
+      (data.temas || []).forEach((t) => t.negativas.forEach((n) => {
+        if (negAiIsSafeDefault(n)) ai.selected.add(`n:${n.id}`);
+      }));
+      render();
+    })
+    .catch((err) => { ai.status = 'error'; ai.error = err.message || String(err); render(); });
+}
+
+// Lo marcado, listo para subir: [{ campaign_id, campaign_name, term, match_type }] sin repetidos.
+function negAiSelectedItems() {
+  const ai = state.neg.ai;
+  const items = []; const seen = new Set();
+  const add = (camps, term, matchType) => (camps || []).forEach((c) => {
+    const key = `${c.id}|${term}|${matchType}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push({ campaign_id: c.id, campaign_name: c.name, term, match_type: matchType });
+  });
+  ((ai.result && ai.result.temas) || []).forEach((t) => {
+    t.negativas.forEach((n) => { if (ai.selected.has(`n:${n.id}`)) add(n.campanias, n.texto, n.concordancia === 'FRASE' ? 'PHRASE' : 'EXACT'); });
+    if (ai.selected.has(`e:${t.id}`)) t.exactas.forEach((e) => add(e.campanias, e.term, 'EXACT'));
+  });
+  return items;
+}
+
+function pushNegAi(preview) {
+  const ai = state.neg.ai;
+  const items = negAiSelectedItems();
+  if (!items.length) { ai.push.status = 'error'; ai.push.error = 'Marca al menos una palabra negativa con campañas donde subirla.'; render(); return; }
+  ai.push.status = preview ? 'previewing' : 'pushing'; ai.push.error = null;
+  render();
+  fetch('/api/google-ads/negative-keywords', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customer_id: ai.customerId,
+      items: items.map((i) => ({ campaign_id: i.campaign_id, term: i.term, match_type: i.match_type })),
+      validate_only: preview,
+    }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      if (preview) { ai.push.status = 'preview_ready'; ai.push.preview = { ...data, items }; }
+      else { ai.push.status = 'done'; ai.push.result = data; ai.selected = new Set(); }
+      render();
+    })
+    .catch((err) => { ai.push.status = 'error'; ai.push.error = err.message || String(err); render(); });
+}
+
+function downloadNegAiCsv() {
+  const ai = state.neg.ai;
+  const rows = [['Palabra negativa', 'Concordancia', 'Campaña', 'Tema']];
+  ((ai.result && ai.result.temas) || []).forEach((t) => {
+    t.negativas.forEach((n) => {
+      if (!ai.selected.has(`n:${n.id}`)) return;
+      const camps = n.campanias.length ? n.campanias : [{ name: '' }];
+      camps.forEach((c) => rows.push([n.texto, n.concordancia === 'FRASE' ? 'Frase' : 'Exacta', c.name, t.tema]));
+    });
+    if (ai.selected.has(`e:${t.id}`)) t.exactas.forEach((e) => {
+      const camps = e.campanias.length ? e.campanias : [{ name: '' }];
+      camps.forEach((c) => rows.push([e.term, 'Exacta', c.name, t.tema]));
+    });
+  });
+  engine.downloadCsv('negativas_ia.csv', rows);
+}
+
+// Se marcan solas las de riesgo bajo que aún no existen y que bloquean gasto real: una negativa que no
+// frena ni un centavo solo ensucia la cuenta; sigue disponible para marcarla a mano.
+function negAiIsSafeDefault(n) {
+  return n.riesgo === 'bajo' && !n.ya_existe && n.bloquea.costo > 0;
+}
+
+function negAiRiskBadge(risk) {
+  if (risk === 'alto') return '<span class="delta-badge bad">riesgo alto</span>';
+  if (risk === 'medio') return '<span class="delta-badge warn">riesgo medio</span>';
+  return '<span class="delta-badge good">riesgo bajo</span>';
+}
+
+function negAiTermsTable(terms, limit) {
+  const shown = terms.slice(0, limit);
+  return `
+    <div class="table-scroll" style="max-height:260px">
+      <table>
+        <thead><tr><th>Término</th><th>Clics</th><th>Costo</th><th>Conv.</th></tr></thead>
+        <tbody>${shown.map((t) => `<tr><td>${escapeHtml(t.term)}</td><td>${fmtInt(t.clicks)}</td><td>${fmtMoney(t.cost)}</td><td>${fmtInt(t.conversions)}</td></tr>`).join('')}</tbody>
+      </table>
+    </div>
+    ${terms.length > shown.length ? `<p class="footnote">Mostrando ${shown.length} de ${terms.length}.</p>` : ''}`;
+}
+
+function renderNegAiTema(t, canPush) {
+  const ai = state.neg.ai;
+  const negRows = t.negativas.map((n) => {
+    const choques = n.choques.length ? `
+      <div style="margin-top:4px;font-size:12px;color:var(--danger)">Choca con: ${n.choques.map((c) => `"${escapeHtml(c.term)}" (${c.motivo === 'convierte' ? `convierte: ${fmtInt(c.conversions)} conv.` : c.motivo === 'marca' ? 'lleva la marca' : 'la IA lo dejó'})`).join(', ')}${n.choques_total > n.choques.length ? ` y ${n.choques_total - n.choques.length} más` : ''}.</div>` : '';
+    const extra = n.extra.terminos ? `
+      <div style="margin-top:4px;font-size:12px;color:var(--color-text-muted)">También bloquea ${n.extra.terminos} término${n.extra.terminos === 1 ? '' : 's'} que la IA no revisó (${fmtMoney(n.extra.costo)}): ${n.extra.ejemplos.map((e) => `"${escapeHtml(e)}"`).join(', ')}.</div>` : '';
+    const disabled = n.ya_existe;
+    return `
+      <tr>
+        <td><input type="checkbox" data-neg-ai-sel="n:${escapeHtml(n.id)}" ${ai.selected.has(`n:${n.id}`) ? 'checked' : ''} ${disabled ? 'disabled' : ''} /></td>
+        <td><strong>${escapeHtml(n.texto)}</strong> <span class="delta-badge neutral">${n.concordancia === 'FRASE' ? 'frase' : 'exacta'}</span>${choques}${extra}</td>
+        <td>${fmtInt(n.bloquea.terminos)} término${n.bloquea.terminos === 1 ? '' : 's'}<div style="margin:2px 0 0;font-size:11.5px;color:var(--color-text-muted)">${fmtMoney(n.bloquea.costo)} · ${fmtInt(n.bloquea.clics)} clics</div></td>
+        <td>${negAiRiskBadge(n.riesgo)}</td>
+        <td>${n.ya_existe ? '<span class="footnote">ya existe en las campañas</span>' : (canPush ? `${n.campanias.length} campaña${n.campanias.length === 1 ? '' : 's'}` : '<span class="footnote">—</span>')}</td>
+      </tr>`;
+  }).join('');
+  const exactasCost = t.exactas.reduce((sum, e) => sum + e.cost, 0);
+  const exactasRow = t.exactas.length ? `
+    <label style="display:flex;gap:8px;align-items:center;margin-top:10px;font-size:13px">
+      <input type="checkbox" data-neg-ai-sel="e:${escapeHtml(t.id)}" ${ai.selected.has(`e:${t.id}`) ? 'checked' : ''} />
+      <span>Alternativa segura: subir solo estos ${t.exactas.length} término${t.exactas.length === 1 ? '' : 's'} como negativas exactas (sin los que convierten) · ${fmtMoney(exactasCost)}</span>
+    </label>` : '';
+  return `
+    <div class="card table-panel" style="margin-bottom:16px">
+      <div class="table-panel-head">
+        <h3>${escapeHtml(t.tema)}</h3>
+        <span class="footnote">${fmtInt(t.total.terminos)} término${t.total.terminos === 1 ? '' : 's'} · ${fmtMoney(t.total.costo)} · ${fmtInt(t.total.clics)} clics</span>
+      </div>
+      <p style="margin:0 0 12px;font-size:13px">${escapeHtml(t.razon)}</p>
+      ${t.negativas.length ? `
+        <div class="table-scroll" style="max-height:480px"><table>
+          <thead><tr><th></th><th>Palabra negativa propuesta</th><th>Bloquearía</th><th>Riesgo</th><th>Campañas</th></tr></thead>
+          <tbody>${negRows}</tbody>
+        </table></div>` : '<p class="footnote">La IA no propuso una palabra negativa válida para este tema; puedes usar la alternativa de abajo.</p>'}
+      ${exactasRow}
+      <details style="margin-top:12px"><summary style="cursor:pointer;font-size:13px">Ver los ${t.terminos.length} término${t.terminos.length === 1 ? '' : 's'} de este tema</summary>${negAiTermsTable(t.terminos, 50)}</details>
+    </div>`;
+}
+
+function renderNegAiPushPanel() {
+  const ai = state.neg.ai;
+  const p = ai.push;
+  const items = negAiSelectedItems();
+  const busy = p.status === 'previewing' || p.status === 'pushing';
+  const selectedNeg = []; let exactasCount = 0;
+  ((ai.result && ai.result.temas) || []).forEach((t) => {
+    t.negativas.forEach((n) => { if (ai.selected.has(`n:${n.id}`)) selectedNeg.push(n); });
+    if (ai.selected.has(`e:${t.id}`)) exactasCount += t.exactas.length;
+  });
+  // Unión de términos: dos negativas que bloquean el mismo término (p. ej. con y sin tilde) cuentan una vez.
+  const blockedByKey = new Map();
+  selectedNeg.forEach((n) => (n.bloqueados || []).forEach(([key, cost, conv]) => blockedByKey.set(key, [cost, conv])));
+  ((ai.result && ai.result.temas) || []).forEach((t) => {
+    if (ai.selected.has(`e:${t.id}`)) t.exactas.forEach((e) => blockedByKey.set(e.key, [e.cost, 0]));
+  });
+  let savings = 0; let convAtRisk = 0;
+  blockedByKey.forEach(([cost, conv]) => { savings += cost; convAtRisk += conv; });
+  const highRisk = selectedNeg.filter((n) => n.riesgo === 'alto');
+  const canPush = !!ai.customerId;
+  const campaigns = new Set(items.map((i) => i.campaign_id)).size;
+
+  return `
+    <div class="card table-panel" style="margin-bottom:20px">
+      <h3 class="dense-chart-title">Lo que vas a subir</h3>
+      <p style="margin:0 0 12px;font-size:12.5px;color:var(--color-text-muted)">
+        ${canPush
+          ? 'Cada palabra se agrega como negativa en las campañas donde aparecieron sus términos. La vista previa valida contra Google Ads sin aplicar nada; solo al confirmar queda escrito en la cuenta.'
+          : 'Con un archivo no hay campañas asociadas a cada término, así que no se puede subir directo. Descarga el CSV con lo marcado y súbelo desde Google Ads Editor.'}
+      </p>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+        <button class="btn-outline sm" data-action="neg-ai-select-safe">Marcar las de riesgo bajo con gasto</button>
+        <button class="btn-outline sm" data-action="neg-ai-select-none">Quitar todas</button>
+        <button class="btn-outline sm" data-action="neg-ai-csv" ${selectedNeg.length || exactasCount ? '' : 'disabled'}>Descargar CSV de lo marcado</button>
+        <span style="font-size:12.5px;color:var(--color-text-muted)">${selectedNeg.length} palabra${selectedNeg.length === 1 ? '' : 's'}${exactasCount ? ` + ${exactasCount} exacta${exactasCount === 1 ? '' : 's'}` : ''}${canPush ? ` · ${items.length} negativa${items.length === 1 ? '' : 's'} en ${campaigns} campaña${campaigns === 1 ? '' : 's'}` : ''}</span>
+      </div>
+      ${selectedNeg.length ? `<div class="ok-panel" style="margin-bottom:12px"><strong>Gasto de los términos que bloquearían: ${fmtMoney(savings)}</strong> (gasto ya hecho en el periodo; el ahorro real depende de que esas búsquedas se repitan).</div>` : ''}
+      ${highRisk.length ? `<div class="error-panel" style="margin-bottom:12px"><strong>Ojo:</strong> ${highRisk.length === 1 ? 'una palabra marcada choca' : `${highRisk.length} palabras marcadas chocan`} con términos que convierten o llevan la marca${convAtRisk > 0 ? ` (${fmtInt(convAtRisk)} conversión${convAtRisk === 1 ? '' : 'es'} en juego)` : ''}. Revisa el detalle de cada una o usa la alternativa segura.</div>` : ''}
+      ${canPush && (p.status === 'idle' || p.status === 'error') ? `
+        <button class="btn-accent" data-action="neg-ai-push-preview" ${items.length === 0 || busy ? 'disabled' : ''}>Vista previa</button>
+        ${p.error ? `<div class="error-panel" style="margin-top:10px">${escapeHtml(p.error)}</div>` : ''}` : ''}
+      ${busy ? `<p class="footnote">${p.status === 'previewing' ? 'Validando con Google Ads (vista previa, no aplica nada todavía)…' : 'Subiendo negativas a Google Ads…'}</p>` : ''}
+      ${p.status === 'preview_ready' && p.preview ? `
+        <div class="ok-panel" style="margin:10px 0">
+          <strong>Vista previa lista.</strong> Google Ads validó ${p.preview.created} de ${p.preview.items.length} sin problema — nada se aplicó todavía.
+          ${p.preview.failed && p.preview.failed.length ? `<div style="margin-top:6px"><strong>${p.preview.failed.length} no pasaron la validación:</strong><br>${p.preview.failed.map((m) => escapeHtml(m)).join('<br>')}</div>` : ''}
+        </div>
+        <button class="btn-accent" data-action="neg-ai-push-confirm">Confirmar y subir a Google Ads</button>
+        <button class="btn-outline" data-action="neg-ai-push-cancel">Cancelar</button>` : ''}
+      ${p.status === 'done' && p.result ? `
+        <div class="ok-panel" style="margin:10px 0"><strong>Listo.</strong> Se ${p.result.created === 1 ? 'subió' : 'subieron'} ${p.result.created} negativa${p.result.created === 1 ? '' : 's'} a Google Ads.
+          ${p.result.failed && p.result.failed.length ? `<div style="margin-top:6px"><strong>${p.result.failed.length} fallaron:</strong><br>${p.result.failed.map((m) => escapeHtml(m)).join('<br>')}</div>` : ''}
+        </div>` : ''}
+    </div>`;
+}
+
+function renderNegAiResult() {
+  const ai = state.neg.ai;
+  const r = ai.result;
+  const rs = r.resumen;
+  const canPush = !!ai.customerId;
+  const avisos = (r.avisos || []).length ? `
+    <div class="card" style="margin-bottom:16px;padding:14px 18px">
+      <strong style="font-size:13px">Lo que el código corrigió o descartó de la propuesta de la IA</strong>
+      <ul style="margin:8px 0 0 18px;font-size:12.5px">${r.avisos.map((a) => `<li>${escapeHtml(a)}</li>`).join('')}</ul>
+    </div>` : '';
+  const keep = (r.mantener || []).map((g) => `
+    <div class="card table-panel" style="margin-bottom:12px">
+      <div class="table-panel-head"><h3>${escapeHtml(g.grupo)}</h3><span class="footnote">${fmtInt(g.total.terminos)} término${g.total.terminos === 1 ? '' : 's'} · ${fmtMoney(g.total.costo)} · ${fmtInt(g.total.conversiones)} conv.</span></div>
+      <p style="margin:0 0 8px;font-size:13px">${escapeHtml(g.razon)}</p>
+      <details><summary style="cursor:pointer;font-size:13px">Ver los términos</summary>${negAiTermsTable(g.terminos, 40)}</details>
+    </div>`).join('');
+  const review = (r.revisar || []).length ? `
+    <div class="card table-panel" style="margin-bottom:16px">
+      <div class="table-panel-head"><h3>Revisar antes de decidir (${r.revisar.length})</h3></div>
+      <div class="table-scroll" style="max-height:360px"><table>
+        <thead><tr><th>Término</th><th>Clics</th><th>Costo</th><th>Conv.</th><th>Qué hay que decidir</th></tr></thead>
+        <tbody>${r.revisar.slice(0, 60).map((t) => `<tr><td>${escapeHtml(t.term)}</td><td>${fmtInt(t.clicks)}</td><td>${fmtMoney(t.cost)}</td><td>${fmtInt(t.conversions)}</td><td>${escapeHtml(t.pregunta)}</td></tr>`).join('')}</tbody>
+      </table></div>
+      ${r.revisar.length > 60 ? `<p class="footnote">Mostrando 60 de ${r.revisar.length}.</p>` : ''}
+    </div>` : '';
+
+  return `
+    <div class="stat-grid">
+      <div class="card stat-card danger">
+        <div class="stat-label">Negativizar</div>
+        <div class="stat-value lg">${fmtInt(rs.negativizar.terminos)}</div>
+        <div class="stat-sub">${fmtMoney(rs.negativizar.costo)} · ${fmtInt(rs.negativizar.clics)} clics</div>
+      </div>
+      <div class="card stat-card">
+        <div class="stat-label">Dejar</div>
+        <div class="stat-value lg">${fmtInt(rs.mantener.terminos)}</div>
+        <div class="stat-sub">${fmtMoney(rs.mantener.costo)} · ${fmtInt(rs.mantener.conversiones)} conversiones</div>
+      </div>
+      <div class="card stat-card accent">
+        <div class="stat-label">Revisar</div>
+        <div class="stat-value lg">${fmtInt(rs.revisar.terminos)}</div>
+        <div class="stat-sub">${fmtMoney(rs.revisar.costo)} · ${fmtInt(rs.revisar.clics)} clics</div>
+      </div>
+    </div>
+    <p class="footnote" style="margin:-4px 0 16px">La IA revisó ${fmtInt(rs.analizados)} de ${fmtInt(rs.terminos_total)} términos (los de más gasto y todos los que convierten).${rs.no_analizados ? ` Los otros ${fmtInt(rs.no_analizados)} (${fmtMoney(rs.costo_no_analizado)}) son cola larga: no se clasificaron, pero cada palabra negativa se midió contra ellos y se avisa si los bloquea.` : ''}${r.negativas_existentes ? ` Se tuvieron en cuenta las ${fmtInt(r.negativas_existentes)} negativas que la cuenta ya tiene.` : ''}</p>
+    ${avisos}
+    <h3 style="margin:18px 0 10px">Qué negativizar, por tema</h3>
+    ${(r.temas || []).length ? r.temas.map((t) => renderNegAiTema(t, canPush)).join('') : '<div class="card state-panel idle"><p>La IA no encontró términos para negativizar en este periodo.</p></div>'}
+    ${(r.temas || []).length ? renderNegAiPushPanel() : ''}
+    <h3 style="margin:18px 0 10px">Qué dejar</h3>
+    ${keep || '<p class="footnote">La IA no marcó términos para dejar.</p>'}
+    ${review}
+    <p class="footnote">La IA propone y el código verifica, pero la decisión es tuya: nunca subas negativas sin revisar las de riesgo medio o alto. Las negativas no cubren variantes cercanas (plurales, errores de escritura), por eso a veces hay dos formas de la misma palabra.</p>`;
+}
+
+function renderNegAiTab() {
+  const s = state.neg;
+  const ai = s.ai;
+  const ctxField = (id, label, placeholder, hint, rows) => `
+    <div class="field" style="flex:1;min-width:240px">
+      <label>${label}</label>
+      <textarea id="${id}" rows="${rows}" style="width:100%;resize:vertical" placeholder="${placeholder}">${escapeHtml(ai.ctx[id.replace('neg-ai-', '')])}</textarea>
+      ${hint ? `<p class="field-hint">${hint}</p>` : ''}
+    </div>`;
+
+  const sourcePanel = `
+    <div class="card control-panel align-end" style="margin-top:-8px">
+      <div class="seg-control">
+        <button class="seg-btn ${s.source === 'file' ? 'active' : ''}" data-action="neg-source-file">Subir archivo</button>
+        <button class="seg-btn ${s.source === 'api' ? 'active' : ''}" data-action="neg-source-api">Conectar Google Ads</button>
+      </div>
+      ${s.source === 'file' ? `
+        <div class="field">
+          <label>Export de "Términos de búsqueda" (CSV)</label>
+          <input type="file" id="neg-ai-file" accept=".csv" />
+        </div>` : renderNegApiPanel('neg-ai-fetch', 'Traer términos de Google Ads')}
+    </div>`;
+
+  let termsBox = '';
+  if (ai.rowsStatus === 'loading') termsBox = '<div class="card state-panel loading"><div class="spinner"></div><p>Trayendo los términos de búsqueda…</p></div>';
+  else if (ai.rowsError) termsBox = `<div class="error-panel">${escapeHtml(ai.rowsError)}</div>`;
+  else if (ai.rows) {
+    const real = ai.rows.filter((r) => !r.is_category);
+    const cost = real.reduce((sum, r) => sum + (r.cost || 0), 0);
+    const uniq = new Set(real.map((r) => r.term.toLowerCase())).size;
+    termsBox = `
+      <div class="card" style="padding:16px 20px;margin-bottom:16px">
+        <strong>${fmtInt(uniq)} términos de búsqueda cargados</strong> · ${fmtMoney(cost)} de gasto · ${escapeHtml(ai.rowsLabel)}
+        ${ai.rows.length !== real.length ? `<div class="footnote">${ai.rows.length - real.length} categorías de Performance Max se dejan fuera: no traen el texto exacto de la búsqueda.</div>` : ''}
+        <div style="margin-top:12px"><button class="btn-accent" data-action="neg-ai-run" ${ai.status === 'loading' ? 'disabled' : ''}>${ai.result ? 'Volver a analizar con IA' : 'Analizar con IA'}</button>
+        <span class="footnote" style="margin-left:10px">Usa Claude; hay un tope de análisis por hora.</span></div>
+      </div>`;
+  }
+
+  let body = '';
+  if (ai.status === 'loading') body = '<div class="card state-panel loading"><div class="spinner"></div><p>La IA está revisando los términos… puede tardar hasta un par de minutos.</p></div>';
+  else if (ai.status === 'error') body = `<div class="error-panel"><strong>No se pudo analizar.</strong> ${escapeHtml(ai.error)}</div>`;
+  else if (ai.status === 'ready' && ai.result) body = renderNegAiResult();
+  else if (!ai.rows && ai.rowsStatus === 'idle') body = `<div class="card state-panel idle">${icon('sparkles', 30)}<p>Cuéntale a la IA qué es el hotel, trae los términos de búsqueda y te dirá cuáles negativizar (agrupados por tema), cuáles dejar y cuáles revisar.</p></div>`;
+
+  return `
+    <div class="card control-panel">
+      ${ctxField('neg-ai-marca', 'Hotel o marca (lo que NUNCA se debe negativizar)', 'ej. estelar&#10;hotel estelar cartagena', 'Una por línea. Ningún término que lleve estas palabras se recomendará negativizar, y ninguna negativa puede ser igual a ellas.', 3)}
+      ${ctxField('neg-ai-destino', 'Destino o ciudad', 'ej. cartagena&#10;manzanillo', 'Una por línea. Sirve para detectar búsquedas de otras ciudades.', 3)}
+      ${ctxField('neg-ai-ofrece', 'Qué ofrece (opcional)', 'ej. hotel frente al mar, todo incluido, para familias', '', 3)}
+      ${ctxField('neg-ai-no_ofrece', 'Qué NO ofrece o no quieres atraer (opcional)', 'ej. hostales, apartamentos por días, eventos corporativos', '', 3)}
+    </div>
+    ${sourcePanel}
+    ${termsBox}
+    ${body}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -11455,6 +11870,34 @@ function bindEvents() {
     });
   });
 
+  // Negativización — pestaña "Con IA"
+  ['marca', 'destino', 'ofrece', 'no_ofrece'].forEach((key) => {
+    const el = document.getElementById(`neg-ai-${key}`);
+    if (el) el.addEventListener('input', (e) => { state.neg.ai.ctx[key] = e.target.value; });
+  });
+  const negAiFile = document.getElementById('neg-ai-file');
+  if (negAiFile) negAiFile.addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    state.neg.ai.rowsStatus = 'loading'; state.neg.ai.rowsError = null;
+    render();
+    const reader = new FileReader();
+    reader.onload = () => {
+      try { negAiSetRows(engine.loadSearchTerms(decodeFileText(reader.result)), file.name, ''); }
+      catch (err) { state.neg.ai.rowsStatus = 'idle'; state.neg.ai.rowsError = (err && err.message) || 'No se pudo leer el archivo.'; render(); }
+    };
+    reader.onerror = () => { state.neg.ai.rowsStatus = 'idle'; state.neg.ai.rowsError = 'No se pudo leer el archivo.'; render(); };
+    reader.readAsArrayBuffer(file);
+  });
+  document.querySelectorAll('[data-neg-ai-sel]').forEach((box) => {
+    box.addEventListener('change', () => {
+      const ai = state.neg.ai;
+      if (box.checked) ai.selected.add(box.dataset.negAiSel); else ai.selected.delete(box.dataset.negAiSel);
+      if (ai.push.status !== 'idle') ai.push = { status: 'idle', preview: null, result: null, error: null };
+      render();
+    });
+  });
+
   // Negativización
   const negCoreInput = document.getElementById('neg-core');
   if (negCoreInput) negCoreInput.addEventListener('input', (e) => { state.neg.core = e.target.value; });
@@ -11484,6 +11927,11 @@ function bindEvents() {
   if (negMccFilter) negMccFilter.addEventListener('input', (e) => { state.neg.api.mcc.filter = e.target.value; render(); });
   document.querySelectorAll('[data-neg-mcc-pick]').forEach((btn) => {
     btn.addEventListener('click', () => applyNegMccFilter(btn.dataset.negMccPick, btn.dataset.negMccPickName));
+  });
+  const negApiPeriod = document.getElementById('neg-api-period');
+  if (negApiPeriod) negApiPeriod.addEventListener('change', (e) => {
+    negApplyPeriod(e.target.value);
+    render();
   });
   const negApiDateFrom = document.getElementById('neg-api-date-from');
   if (negApiDateFrom) negApiDateFrom.addEventListener('change', (e) => { state.neg.api.dateFrom = e.target.value; });
@@ -12057,6 +12505,28 @@ function handleAction(action) {
     case 'neg-mcc-load': loadNegMccGroups(); break;
     case 'neg-mcc-clear': clearNegMccFilter(); break;
     case 'neg-api-fetch': fetchGoogleAdsSearchTerms(); break;
+    case 'neg-tab-reglas': state.neg.tab = 'reglas'; render(); break;
+    case 'neg-tab-ia': state.neg.tab = 'ia'; render(); break;
+    case 'neg-ai-fetch': fetchNegAiTerms(); break;
+    case 'neg-ai-run': runNegAiAnalysis(); break;
+    case 'neg-ai-select-safe': {
+      const ai = state.neg.ai;
+      ai.selected = new Set();
+      ((ai.result && ai.result.temas) || []).forEach((t) => t.negativas.forEach((n) => { if (negAiIsSafeDefault(n)) ai.selected.add(`n:${n.id}`); }));
+      ai.push = { status: 'idle', preview: null, result: null, error: null };
+      render();
+      break;
+    }
+    case 'neg-ai-select-none': {
+      const ai = state.neg.ai;
+      ai.selected = new Set(); ai.push = { status: 'idle', preview: null, result: null, error: null };
+      render();
+      break;
+    }
+    case 'neg-ai-csv': downloadNegAiCsv(); break;
+    case 'neg-ai-push-preview': pushNegAi(true); break;
+    case 'neg-ai-push-confirm': pushNegAi(false); break;
+    case 'neg-ai-push-cancel': state.neg.ai.push = { status: 'idle', preview: null, result: null, error: null }; render(); break;
 
     case 'neg-push-select-all': {
       const candidates = getNegFilteredRows().filter((r) => r.clasificacion === 'negativizar');

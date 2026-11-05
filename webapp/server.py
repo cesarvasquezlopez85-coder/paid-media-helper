@@ -44,6 +44,7 @@ from urllib.parse import parse_qs, urlparse
 import account_audit
 import bigquery_client
 import claude_client
+import negativos_ia
 import google_ads_client
 
 PORT = int(os.environ.get("PORT", 8642))
@@ -767,6 +768,11 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_ai_analizar_rendimiento(payload)
+        elif path == "/api/ai/analizar-negativos":
+            # En afinado (2026-11-05): solo super admin, como Hoteles. Luego se abre con _require_auth_json.
+            if not self._require_super_admin_json():
+                return
+            self._handle_ai_analizar_negativos(payload)
         elif path == "/api/ai/generar-copys":
             # Solo administradores mientras se afinan los textos (2026-11-01); luego se abre con _require_auth_json.
             if not self._require_admin_json():
@@ -2171,6 +2177,55 @@ class Handler(SimpleHTTPRequestHandler):
             print(f"[claude-error] {e}", flush=True)
             self._send_json(502, {"error": "No se pudo generar el análisis con IA. Intenta de nuevo en unos minutos."})
 
+    def _handle_ai_analizar_negativos(self, payload):
+        user = self._get_current_user()
+        if not claude_client.is_configured():
+            self._send_json(503, {"error": "La integración con Claude no está configurada en el servidor (falta ANTHROPIC_API_KEY)."})
+            return
+        rows = payload.get("rows")
+        if not isinstance(rows, list) or not rows:
+            self._send_json(400, {"error": "Primero trae los términos de búsqueda: no hay nada que analizar."})
+            return
+        if len(rows) > negativos_ia.MAX_ROWS_ACCEPTED:
+            self._send_json(400, {"error": f"Demasiados términos ({len(rows)}). Acorta el rango de fechas o elige una campaña."})
+            return
+        raw_ctx = payload.get("contexto") if isinstance(payload.get("contexto"), dict) else {}
+        ctx = {k: str(raw_ctx.get(k) or "")[:600] for k in ("marca", "destino", "ofrece", "no_ofrece")}
+        if not negativos_ia.split_lines(ctx["marca"]):
+            self._send_json(400, {"error": "Escribe el nombre del hotel o la marca: se usa para que la IA nunca niegue búsquedas de tu propia marca."})
+            return
+        try:
+            terms = negativos_ia.aggregate_terms(rows)
+        except (TypeError, ValueError):
+            self._send_json(400, {"error": "Los términos traen valores inválidos (clics, costo o conversiones)."})
+            return
+        if not terms:
+            self._send_json(400, {"error": "No hay términos de búsqueda reales para analizar (las categorías de Performance Max no se analizan)."})
+            return
+        if not _ai_limiter.allow(f"user:{user['id']}", *AI_RATE_LIMIT):
+            self._send_json(429, {"error": "Alcanzaste el límite de análisis con IA por esta hora. Intenta más tarde."})
+            return
+
+        # Las negativas que la cuenta ya tiene (solo con Google Ads real y acceso a la cuenta): la IA no las repite
+        # y el resultado omite las que ya existen en cada campaña.
+        existing = []
+        customer_id = str(payload.get("customer_id") or "").strip()
+        if google_ads_client.is_configured() and customer_id.isdigit() and self._user_can_access_account(user, customer_id):
+            try:
+                existing = google_ads_client.fetch_account_negative_keywords(customer_id)
+            except Exception as e:  # noqa: BLE001 — sin esto el análisis igual sirve
+                print(f"[neg-ia] no se pudieron leer las negativas existentes: {' '.join(str(e).split())[:200]}", flush=True)
+        try:
+            chosen = negativos_ia.select_for_ai(terms)
+            user_content = negativos_ia.build_user_content(ctx, chosen, sorted({e["text"] for e in existing}))
+            ai = claude_client.analizar_negativos(user_content)
+            result = negativos_ia.build_result(ai, terms, chosen, ctx, existing)
+            result["negativas_existentes"] = len(existing)
+            self._send_json(200, result)
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            print(f"[claude-error] neg-ia: {' '.join(str(e).split())[:300]}", flush=True)
+            self._send_json(502, {"error": "No se pudo generar el análisis con IA. Intenta de nuevo en unos minutos."})
+
     def _handle_ai_generar_copys(self, payload):
         user = self._get_current_user()
         if not claude_client.is_configured():
@@ -2228,6 +2283,9 @@ class Handler(SimpleHTTPRequestHandler):
         for item in items:
             if not isinstance(item, dict) or not item.get("campaign_id") or not item.get("term"):
                 self._send_json(400, {"error": "Cada término debe traer campaign_id y term."})
+                return
+            if item.get("match_type", "EXACT") not in ("EXACT", "PHRASE"):
+                self._send_json(400, {"error": "match_type debe ser EXACT o PHRASE."})
                 return
 
         if not google_ads_client.is_configured():

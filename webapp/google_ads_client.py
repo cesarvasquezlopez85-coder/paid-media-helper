@@ -1362,8 +1362,9 @@ def fetch_account_negative_keywords(customer_id):
 
 
 def push_negative_keywords(customer_id, items, validate_only=True):
-    """Sube palabras clave negativas de concordancia exacta a nivel de
-    campaña. items: lista de {"campaign_id": ..., "term": ...}.
+    """Sube palabras clave negativas a nivel de campaña (concordancia exacta
+    por defecto; "match_type": "PHRASE" en el item la pasa a frase).
+    items: lista de {"campaign_id": ..., "term": ..., "match_type"?: ...}.
 
     validate_only=True (vista previa): Google valida la operación sin
     aplicarla — nada cambia en la cuenta real. Solo con validate_only=False
@@ -1379,7 +1380,7 @@ def push_negative_keywords(customer_id, items, validate_only=True):
         "create": {
             "campaign": f"customers/{customer_id}/campaigns/{item['campaign_id']}",
             "negative": True,
-            "keyword": {"text": item["term"], "matchType": "EXACT"},
+            "keyword": {"text": item["term"], "matchType": item.get("match_type") if item.get("match_type") in ("EXACT", "PHRASE") else "EXACT"},
         }
     } for item in items]
 

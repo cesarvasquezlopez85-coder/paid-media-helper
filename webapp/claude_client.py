@@ -367,3 +367,118 @@ def generar_copys(formato, signals, idioma="es", keywords=""):
             "need_short": g.get("need_short"),
         })
     return {"formato": formato, "label": spec["label"], "note": spec.get("note", ""), "groups": out_groups}
+
+
+# ---------------------------------------------------------------------------
+# Negativización con IA — Claude decide qué negativizar, qué dejar y qué
+# revisar; negativos_ia.py valida con código lo que devuelve (choques con
+# términos que convierten, marca, palabras genéricas) antes de mostrarlo.
+# ---------------------------------------------------------------------------
+NEG_MAX_TOKENS = 16000
+NEG_TIMEOUT_SECONDS = 240
+
+NEG_SYSTEM_PROMPT = (
+    "Eres un estratega senior de Google Ads especializado en hoteles. Revisas los términos de búsqueda de una "
+    "cuenta y decides cuáles conviene negativizar, cuáles dejar y cuáles revisar a mano.\n\n"
+    "Recibes un JSON con: el contexto del hotel (nombre o marca, destino, qué ofrece y qué no), las palabras "
+    "negativas que ya existen en la cuenta y una lista de términos con id, clics, impresiones, costo y "
+    "conversiones del periodo.\n\n"
+    "Criterios:\n"
+    "- Negativizar es para búsquedas SIN intención de reservar este hotel o este destino: empleo y trabajo, "
+    "gratis, otras ciudades o destinos que el hotel no atiende, información o trámites sin relación, servicios "
+    "que el hotel no ofrece. Para las marcas de otros hoteles: negativiza solo si hay gasto sin conversiones; "
+    "si no, ponlas en revisar.\n"
+    "- Nunca negativices un término que tenga conversiones ni uno que contenga el nombre o la marca del hotel.\n"
+    "- Con pocos datos (menos de unos 20 clics, sin conversiones) y una intención que podría ser de reserva, no "
+    "negativices: deja o revisa. No negativices solo porque no haya convertido todavía.\n"
+    "- Agrupa lo que negativizas por tema (por ejemplo: Empleo, Gratis, Otras ciudades, Competencia, "
+    "Información). Por cada tema propón las palabras o frases negativas MÁS CORTAS que cubran las variantes sin "
+    "bloquear búsquedas buenas. Usa concordancia FRASE para un tema amplio (una palabra que siempre indica mala "
+    "intención) y EXACTA para un término puntual. Las negativas NO cubren variantes cercanas (plurales, "
+    "errores de escritura): si hace falta, propón las dos formas.\n"
+    "- Nunca propongas como negativa una palabra genérica de hotel (hotel, reserva, precio, cerca, barato, "
+    "habitación…), el nombre del hotel ni el destino del hotel.\n"
+    "- Todos los términos de la lista deben terminar en exactamente un grupo: dentro de un tema a negativizar, "
+    "en mantener, o en revisar. Revisar es para lo dudoso, con la pregunta concreta que debe resolver la "
+    "persona.\n"
+    "- En mantener agrupa por motivo (marca, intención clara de reserva, destino correcto…), con una razón "
+    "breve.\n"
+    "- Las razones son de una o dos frases, en español, concretas y sin relleno.\n\n"
+    "Responde SOLO con un JSON válido, sin texto antes ni después, con esta forma exacta:\n"
+    "{\"temas\": [{\"tema\": \"...\", \"razon\": \"...\", \"negativas\": [{\"texto\": \"...\", \"concordancia\": "
+    "\"FRASE\" o \"EXACTA\"}], \"terminos\": [ids]}], "
+    "\"mantener\": [{\"grupo\": \"...\", \"razon\": \"...\", \"terminos\": [ids]}], "
+    "\"revisar\": [{\"pregunta\": \"...\", \"terminos\": [ids]}]}\n"
+    "En revisar agrupa los términos que comparten la misma duda y escribe la pregunta una sola vez por grupo."
+)
+
+_NEG_INT_LIST = {"type": "array", "items": {"type": "integer"}}
+# Salida estructurada: garantiza JSON válido con esta forma. Sin ella, la respuesta sin razonamiento
+# extendido llegó una vez con un corchete mal cerrado.
+NEG_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "temas": {"type": "array", "items": {"type": "object", "properties": {
+            "tema": {"type": "string"}, "razon": {"type": "string"},
+            "negativas": {"type": "array", "items": {"type": "object", "properties": {
+                "texto": {"type": "string"}, "concordancia": {"type": "string", "enum": ["FRASE", "EXACTA"]}},
+                "required": ["texto", "concordancia"], "additionalProperties": False}},
+            "terminos": _NEG_INT_LIST},
+            "required": ["tema", "razon", "negativas", "terminos"], "additionalProperties": False}},
+        "mantener": {"type": "array", "items": {"type": "object", "properties": {
+            "grupo": {"type": "string"}, "razon": {"type": "string"}, "terminos": _NEG_INT_LIST},
+            "required": ["grupo", "razon", "terminos"], "additionalProperties": False}},
+        "revisar": {"type": "array", "items": {"type": "object", "properties": {
+            "pregunta": {"type": "string"}, "terminos": _NEG_INT_LIST},
+            "required": ["pregunta", "terminos"], "additionalProperties": False}},
+    },
+    "required": ["temas", "mantener", "revisar"], "additionalProperties": False,
+}
+
+
+def _neg_http(user_content):
+    body = {
+        "model": MODEL,
+        "max_tokens": NEG_MAX_TOKENS,
+        # Sin razonamiento extendido: con él la respuesta tardaba ~2 min y se cortaba por tamaño; las
+        # decisiones de riesgo no dependen del modelo, las valida negativos_ia.py con código.
+        "thinking": {"type": "disabled"},
+        "output_config": {"effort": "low", "format": {"type": "json_schema", "schema": NEG_SCHEMA}},
+        "system": NEG_SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": user_content}],
+    }
+    req = urllib.request.Request(
+        API_URL, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=NEG_TIMEOUT_SECONDS) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Claude API respondió {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"No se pudo conectar a la API de Claude: {e.reason}") from e
+    if payload.get("stop_reason") == "refusal":
+        raise RuntimeError("Claude no generó una respuesta para estos términos (refusal).")
+    if payload.get("stop_reason") == "max_tokens":
+        raise RuntimeError("La respuesta de Claude se cortó por tamaño; prueba con un periodo más corto.")
+    text = "\n".join(b.get("text", "") for b in payload.get("content", []) if b.get("type") == "text").strip()
+    if not text:
+        raise RuntimeError("Claude no devolvió texto en la respuesta.")
+    return text
+
+
+def analizar_negativos(user_content):
+    """user_content: el JSON armado por negativos_ia.build_user_content.
+    Devuelve el dict que respondió Claude (sin validar: eso lo hace negativos_ia)."""
+    text = _neg_http(user_content)
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise RuntimeError("La respuesta de Claude no trae un JSON válido.")
+    try:
+        data = json.loads(text[start:end + 1])
+    except ValueError as e:
+        raise RuntimeError("La respuesta de Claude no es un JSON válido.") from e
+    if not isinstance(data, dict):
+        raise RuntimeError("La respuesta de Claude no trae el formato esperado.")
+    return data
