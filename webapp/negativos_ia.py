@@ -195,6 +195,15 @@ def build_result(ai, all_terms, chosen, ctx, existing_negatives):
     def has_brand(t):
         return any(_contains_phrase(t["tokens"], p) for p in marca)
 
+    def selectable_view(t):
+        """Un término que la persona puede marcar para negativizar (en "revisar" o en "dejar"): se manda la
+        clave, si lleva la marca (para avisar) y las campañas donde aún no existe esa negativa exacta."""
+        return {
+            **_term_view(t), "key": t["key"], "es_marca": has_brand(t),
+            "campanias": [{"id": cid, "name": name} for cid, name in t["campaigns"].items()
+                          if not _existing_covers(existing, t["tokens"], "EXACT", cid)],
+        }
+
     # 1) Un término, un solo grupo: lo que diga la IA, con las reglas duras encima.
     bucket = {}       # id -> ("neg", idx_tema) | ("keep", idx_grupo) | ("review", pregunta)
     seen_ids = {}
@@ -358,7 +367,7 @@ def build_result(ai, all_terms, chosen, ctx, existing_negatives):
             _add_metrics(total_keep, t)
         keep_out.append({
             "grupo": str(grupo.get("grupo") or "Sin nombre")[:120], "razon": str(grupo.get("razon") or "")[:400],
-            "terminos": [_term_view(t) for t in sorted(own, key=lambda x: -x["cost"])], "total": _round_metrics(m),
+            "terminos": [selectable_view(t) for t in sorted(own, key=lambda x: -x["cost"])], "total": _round_metrics(m),
         })
     keep_out.sort(key=lambda x: -x["total"]["costo"])
 
@@ -371,11 +380,7 @@ def build_result(ai, all_terms, chosen, ctx, existing_negatives):
         _add_metrics(total_review, t)
         # Cada término a revisar se puede marcar para subirlo como negativa exacta: se manda la clave, si lleva
         # la marca (para avisar) y las campañas donde aún no existe esa exacta.
-        review_out.append({
-            **_term_view(t), "key": t["key"], "es_marca": has_brand(t), "pregunta": w[1],
-            "campanias": [{"id": cid, "name": name} for cid, name in t["campaigns"].items()
-                          if not _existing_covers(existing, t["tokens"], "EXACT", cid)],
-        })
+        review_out.append({**selectable_view(t), "pregunta": w[1]})
     review_out.sort(key=lambda x: -x["cost"])
 
     analyzed = {t["key"] for t in chosen}

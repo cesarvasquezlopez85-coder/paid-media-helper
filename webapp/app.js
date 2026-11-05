@@ -4288,6 +4288,16 @@ function runNegAiAnalysis() {
     .catch((err) => { ai.status = 'error'; ai.error = err.message || String(err); render(); });
 }
 
+// Términos sueltos marcados en "Revisar" (r:) o en "Qué dejar" (k:), con su origen.
+function negAiMarkedTerms() {
+  const ai = state.neg.ai;
+  const res = ai.result || {};
+  const out = [];
+  (res.revisar || []).forEach((t) => { if (ai.selected.has(`r:${t.key}`)) out.push({ ...t, from: 'revisar' }); });
+  (res.mantener || []).forEach((g) => g.terminos.forEach((t) => { if (ai.selected.has(`k:${t.key}`)) out.push({ ...t, from: 'dejar' }); }));
+  return out;
+}
+
 // Lo marcado, listo para subir: [{ campaign_id, campaign_name, term, match_type }] sin repetidos.
 function negAiSelectedItems() {
   const ai = state.neg.ai;
@@ -4302,7 +4312,7 @@ function negAiSelectedItems() {
     t.negativas.forEach((n) => { if (ai.selected.has(`n:${n.id}`)) add(n.campanias, n.texto, n.concordancia === 'FRASE' ? 'PHRASE' : 'EXACT'); });
     if (ai.selected.has(`e:${t.id}`)) t.exactas.forEach((e) => add(e.campanias, e.term, 'EXACT'));
   });
-  ((ai.result && ai.result.revisar) || []).forEach((r) => { if (ai.selected.has(`r:${r.key}`)) add(r.campanias, r.term, 'EXACT'); });
+  negAiMarkedTerms().forEach((t) => add(t.campanias, t.term, 'EXACT'));
   return items;
 }
 
@@ -4345,10 +4355,9 @@ function downloadNegAiCsv() {
       camps.forEach((c) => rows.push([e.term, 'Exacta', c.name, t.tema]));
     });
   });
-  ((ai.result && ai.result.revisar) || []).forEach((r) => {
-    if (!ai.selected.has(`r:${r.key}`)) return;
-    const camps = r.campanias.length ? r.campanias : [{ name: '' }];
-    camps.forEach((c) => rows.push([r.term, 'Exacta', c.name, 'Revisar']));
+  negAiMarkedTerms().forEach((t) => {
+    const camps = t.campanias.length ? t.campanias : [{ name: '' }];
+    camps.forEach((c) => rows.push([t.term, 'Exacta', c.name, t.from === 'dejar' ? 'Dejar' : 'Revisar']));
   });
   engine.downloadCsv('negativas_ia.csv', rows);
 }
@@ -4427,7 +4436,7 @@ function renderNegAiPushPanel() {
     t.negativas.forEach((n) => { if (ai.selected.has(`n:${n.id}`)) selectedNeg.push(n); });
     if (ai.selected.has(`e:${t.id}`)) exactasCount += t.exactas.length;
   });
-  const selectedReview = ((ai.result && ai.result.revisar) || []).filter((r) => ai.selected.has(`r:${r.key}`));
+  const selectedReview = negAiMarkedTerms(); // sueltos de "revisar" y de "dejar"
   const reviewBrand = selectedReview.filter((r) => r.es_marca).length;
   // Unión de términos: dos negativas que bloquean el mismo término (p. ej. con y sin tilde) cuentan una vez.
   const blockedByKey = new Map();
@@ -4454,7 +4463,7 @@ function renderNegAiPushPanel() {
         <button class="btn-outline sm" data-action="neg-ai-select-safe">Marcar las de riesgo bajo con gasto</button>
         <button class="btn-outline sm" data-action="neg-ai-select-none">Quitar todas</button>
         <button class="btn-outline sm" data-action="neg-ai-csv" ${selectedNeg.length || exactasCount || selectedReview.length ? '' : 'disabled'}>Descargar CSV de lo marcado</button>
-        <span style="font-size:12.5px;color:var(--color-text-muted)">${selectedNeg.length} palabra${selectedNeg.length === 1 ? '' : 's'}${exactasCount ? ` + ${exactasCount} exacta${exactasCount === 1 ? '' : 's'}` : ''}${selectedReview.length ? ` + ${selectedReview.length} de "revisar"` : ''}${canPush ? ` · ${items.length} negativa${items.length === 1 ? '' : 's'} en ${campaigns} campaña${campaigns === 1 ? '' : 's'}` : ''}</span>
+        <span style="font-size:12.5px;color:var(--color-text-muted)">${selectedNeg.length} palabra${selectedNeg.length === 1 ? '' : 's'}${exactasCount ? ` + ${exactasCount} exacta${exactasCount === 1 ? '' : 's'}` : ''}${selectedReview.length ? ` + ${selectedReview.length} término${selectedReview.length === 1 ? '' : 's'} suelto${selectedReview.length === 1 ? '' : 's'}` : ''}${canPush ? ` · ${items.length} negativa${items.length === 1 ? '' : 's'} en ${campaigns} campaña${campaigns === 1 ? '' : 's'}` : ''}</span>
       </div>
       ${selectedNeg.length ? `<div class="ok-panel" style="margin-bottom:12px"><strong>Gasto de los términos que bloquearían: ${fmtMoney(savings)}</strong> (gasto ya hecho en el periodo; el ahorro real depende de que esas búsquedas se repitan).</div>` : ''}
       ${reviewBrand ? `<div class="error-panel" style="margin-bottom:12px"><strong>Ojo:</strong> ${reviewBrand === 1 ? 'marcaste un término que lleva' : `marcaste ${reviewBrand} términos que llevan`} el nombre del hotel o la marca: al negativizarlos dejarías de aparecer en esas búsquedas propias.</div>` : ''}
@@ -4477,41 +4486,52 @@ function renderNegAiPushPanel() {
     </div>`;
 }
 
-// Los términos a revisar agrupados por la pregunta que les hizo la IA, del grupo con más gasto al de menos.
-// `seguros` = los que la casilla del grupo puede marcar sin riesgo: no convierten, no llevan la marca y
-// todavía no existen como negativa exacta (o no hay campañas, en modo archivo).
-function negAiReviewGroups(revisar, canPush) {
-  const byQuestion = new Map();
-  (revisar || []).forEach((t) => {
-    if (!byQuestion.has(t.pregunta)) byQuestion.set(t.pregunta, []);
-    byQuestion.get(t.pregunta).push(t);
-  });
-  return [...byQuestion.entries()].map(([pregunta, terms]) => ({
-    pregunta, terms,
-    cost: terms.reduce((sum, t) => sum + t.cost, 0),
-    conversions: terms.reduce((sum, t) => sum + t.conversions, 0),
-    seguros: terms.filter((t) => t.conversions === 0 && !t.es_marca && (t.campanias.length || !canPush)),
+// Grupos de términos con casilla, de dos orígenes: "r" = lo que la IA puso a revisar (agrupado por su pregunta)
+// y "k" = lo que la IA dejaría (agrupado por motivo). Ordenados del grupo con más gasto al de menos.
+// `seguros` = los que la casilla del grupo puede marcar: no convierten y todavía no existen como negativa
+// exacta (o no hay campañas, en modo archivo). En "revisar" tampoco se marcan en bloque los que llevan la
+// marca; en "dejar" sí, porque casi todo lo de ahí es de marca y la persona ya decidió mirarlo.
+function negAiTermGroups(kind, result, canPush) {
+  let raw;
+  if (kind === 'r') {
+    const byQuestion = new Map();
+    ((result && result.revisar) || []).forEach((t) => {
+      if (!byQuestion.has(t.pregunta)) byQuestion.set(t.pregunta, []);
+      byQuestion.get(t.pregunta).push(t);
+    });
+    raw = [...byQuestion.entries()].map(([title, terms]) => ({ title, subtitle: '', terms }));
+  } else {
+    raw = ((result && result.mantener) || []).map((g) => ({ title: g.grupo, subtitle: g.razon, terms: g.terminos }));
+  }
+  return raw.map((g) => ({
+    ...g,
+    cost: g.terms.reduce((sum, t) => sum + t.cost, 0),
+    conversions: g.terms.reduce((sum, t) => sum + t.conversions, 0),
+    seguros: g.terms.filter((t) => t.conversions === 0 && (kind === 'k' || !t.es_marca) && (t.campanias.length || !canPush)),
   })).sort((x, y) => y.cost - x.cost);
 }
 
-function renderNegAiReviewGroup(g, idx, canPush) {
+function renderNegAiTermGroup(g, idx, kind, canPush) {
   const ai = state.neg.ai;
-  const marked = g.seguros.filter((t) => ai.selected.has(`r:${t.key}`)).length;
+  const marked = g.seguros.filter((t) => ai.selected.has(`${kind}:${t.key}`)).length;
   const state3 = g.seguros.length === 0 ? 'none' : marked === g.seguros.length ? 'all' : marked > 0 ? 'some' : 'off';
   const excluded = g.terms.length - g.seguros.length;
+  const brandCount = g.terms.filter((t) => t.es_marca).length;
+  const why = kind === 'r' ? 'convierten, llevan la marca o ya existen' : 'convierten o ya existen';
   return `
     <div style="border:1px solid var(--color-border);border-radius:var(--radius-sm);padding:12px 14px;margin-bottom:12px">
       <label style="display:flex;gap:10px;align-items:flex-start;font-size:13.5px;${g.seguros.length ? 'cursor:pointer' : ''}">
-        <input type="checkbox" data-neg-ai-review-group="${idx}" data-state="${state3}" ${state3 === 'all' ? 'checked' : ''} ${g.seguros.length ? '' : 'disabled'} style="margin-top:3px" />
+        <input type="checkbox" data-neg-ai-group="${kind}:${idx}" data-state="${state3}" ${state3 === 'all' ? 'checked' : ''} ${g.seguros.length ? '' : 'disabled'} style="margin-top:3px" />
         <span>
-          <strong>${escapeHtml(g.pregunta)}</strong>
-          <span class="footnote" style="display:block;margin:2px 0 0">${fmtInt(g.terms.length)} término${g.terms.length === 1 ? '' : 's'} · ${fmtMoney(g.cost)} · ${fmtInt(g.conversions)} conv.${g.seguros.length ? ` · la casilla marca ${fmtInt(g.seguros.length)}${excluded ? ` (los otros ${fmtInt(excluded)} convierten, llevan la marca o ya existen: márcalos a mano si quieres)` : ''}` : ' · ninguno se puede marcar en bloque (convierten, llevan la marca o ya existen)'}</span>
+          <strong>${escapeHtml(g.title)}</strong>
+          ${g.subtitle ? `<span style="display:block;margin:2px 0 0;font-size:13px">${escapeHtml(g.subtitle)}</span>` : ''}
+          <span class="footnote" style="display:block;margin:2px 0 0">${fmtInt(g.terms.length)} término${g.terms.length === 1 ? '' : 's'} · ${fmtMoney(g.cost)} · ${fmtInt(g.conversions)} conv.${g.seguros.length ? ` · la casilla marca ${fmtInt(g.seguros.length)}${excluded ? ` (los otros ${fmtInt(excluded)} ${why}: márcalos a mano si quieres)` : ''}` : ` · ninguno se puede marcar en bloque (${why})`}${kind === 'k' && brandCount ? ` · ${fmtInt(brandCount)} llevan la marca: negativizarlos te sacaría de esas búsquedas propias` : ''}</span>
         </span>
       </label>
       <div class="table-scroll" style="max-height:260px;margin-top:8px"><table>
         <thead><tr><th></th><th>Término</th><th>Clics</th><th>Costo</th><th>Conv.</th></tr></thead>
         <tbody>${g.terms.map((t) => `<tr>
-          <td><input type="checkbox" data-neg-ai-sel="r:${escapeHtml(t.key)}" ${ai.selected.has(`r:${t.key}`) ? 'checked' : ''} ${t.campanias.length || !canPush ? '' : 'disabled title="Ya existe como negativa exacta en sus campañas"'} /></td>
+          <td><input type="checkbox" data-neg-ai-sel="${kind}:${escapeHtml(t.key)}" ${ai.selected.has(`${kind}:${t.key}`) ? 'checked' : ''} ${t.campanias.length || !canPush ? '' : 'disabled title="Ya existe como negativa exacta en sus campañas"'} /></td>
           <td>${escapeHtml(t.term)}${t.es_marca ? ' <span class="delta-badge warn">lleva la marca</span>' : ''}${t.conversions > 0 ? ' <span class="delta-badge bad">convierte</span>' : ''}</td>
           <td>${fmtInt(t.clicks)}</td><td>${fmtMoney(t.cost)}</td><td>${fmtInt(t.conversions)}</td></tr>`).join('')}</tbody>
       </table></div>
@@ -4528,12 +4548,12 @@ function renderNegAiResult() {
       <strong style="font-size:13px">Lo que el código corrigió o descartó de la propuesta de la IA</strong>
       <ul style="margin:8px 0 0 18px;font-size:12.5px">${r.avisos.map((a) => `<li>${escapeHtml(a)}</li>`).join('')}</ul>
     </div>` : '';
-  const keep = (r.mantener || []).map((g) => `
-    <div class="card table-panel" style="margin-bottom:12px">
-      <div class="table-panel-head"><h3>${escapeHtml(g.grupo)}</h3><span class="footnote">${fmtInt(g.total.terminos)} término${g.total.terminos === 1 ? '' : 's'} · ${fmtMoney(g.total.costo)} · ${fmtInt(g.total.conversiones)} conv.</span></div>
-      <p style="margin:0 0 8px;font-size:13px">${escapeHtml(g.razon)}</p>
-      <details><summary style="cursor:pointer;font-size:13px">Ver los términos</summary>${negAiTermsTable(g.terminos, 40)}</details>
-    </div>`).join('');
+  const keepGroups = negAiTermGroups('k', r, canPush);
+  const keep = keepGroups.length ? `
+    <div class="card table-panel" style="margin-bottom:16px">
+      <p style="margin:0 0 10px;font-size:12.5px;color:var(--color-text-muted)">Esto es lo que la IA dejaría. Si algún término te parece demasiado genérico o no te sirve, márcalo (o marca el grupo) para negativizarlo: se sube como negativa <strong>exacta</strong>, con el resto de lo marcado.</p>
+      ${keepGroups.map((g, idx) => renderNegAiTermGroup(g, idx, 'k', canPush)).join('')}
+    </div>` : '';
   const review = (r.revisar || []).length ? `
     <div class="card table-panel" style="margin-bottom:16px">
       <div class="table-panel-head">
@@ -4544,7 +4564,7 @@ function renderNegAiResult() {
         </span>
       </div>
       <p style="margin:0 0 10px;font-size:12.5px;color:var(--color-text-muted)">Están agrupados por la duda que tuvo la IA. La casilla de cada grupo marca de una vez los términos seguros del grupo; también puedes marcar uno por uno. Se suben como negativas <strong>exactas</strong> en las campañas donde aparecieron, junto con el resto de lo marcado más arriba.</p>
-      ${negAiReviewGroups(r.revisar, canPush).map((g, idx) => renderNegAiReviewGroup(g, idx, canPush)).join('')}
+      ${negAiTermGroups('r', r, canPush).map((g, idx) => renderNegAiTermGroup(g, idx, 'r', canPush)).join('')}
     </div>` : '';
 
   return `
@@ -11943,15 +11963,16 @@ function bindEvents() {
     reader.onerror = () => { state.neg.ai.rowsStatus = 'idle'; state.neg.ai.rowsError = 'No se pudo leer el archivo.'; render(); };
     reader.readAsArrayBuffer(file);
   });
-  document.querySelectorAll('[data-neg-ai-review-group]').forEach((box) => {
+  document.querySelectorAll('[data-neg-ai-group]').forEach((box) => {
     box.indeterminate = box.dataset.state === 'some';
     box.addEventListener('change', () => {
       const ai = state.neg.ai;
-      const g = negAiReviewGroups(ai.result && ai.result.revisar, !!ai.customerId)[Number(box.dataset.negAiReviewGroup)];
+      const [kind, idx] = box.dataset.negAiGroup.split(':');
+      const g = negAiTermGroups(kind, ai.result, !!ai.customerId)[Number(idx)];
       if (!g) return;
       // Si ya estaban todos marcados se quitan; en cualquier otro caso se marcan los seguros del grupo.
-      const allMarked = g.seguros.length > 0 && g.seguros.every((t) => ai.selected.has(`r:${t.key}`));
-      g.seguros.forEach((t) => { if (allMarked) ai.selected.delete(`r:${t.key}`); else ai.selected.add(`r:${t.key}`); });
+      const allMarked = g.seguros.length > 0 && g.seguros.every((t) => ai.selected.has(`${kind}:${t.key}`));
+      g.seguros.forEach((t) => { if (allMarked) ai.selected.delete(`${kind}:${t.key}`); else ai.selected.add(`${kind}:${t.key}`); });
       if (ai.push.status !== 'idle') ai.push = { status: 'idle', preview: null, result: null, error: null };
       render();
     });
