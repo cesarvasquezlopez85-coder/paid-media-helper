@@ -2079,15 +2079,14 @@ function deltaBadge(pct, mode) {
 // el gasto total. Solo con varias cuentas de Google Ads, donde cada hotel es una cuenta sin ambigüedad. Con una sola
 // cuenta o con archivos NO se muestra: el hotel solo se podría deducir del nombre de la campaña, y en la prueba con
 // el archivo de ejemplo eso daba "Search", "Performance Max" y "Display", que son tipos de campaña y no hoteles.
-function renderCompareHotelSummary() {
+function compareHotelData() {
   const { currentRows, previousRows } = getCompareFilteredRows(true);
   const all = [...currentRows, ...previousRows];
   const hotels = [...new Set(all.map(compareHotelOf).filter(Boolean))];
   const byName = state.compare.hotelBy === 'nombre';
   const campaignCount = new Set(all.map((r) => r.campaign)).size;
   // Por nombre: si cada campaña sería su propio "hotel" (ninguna comparte prefijo), el corte no agrupa nada.
-  if (hotels.length < 2 || (byName && hotels.length >= campaignCount)) return '';
-
+  if (hotels.length < 2 || (byName && hotels.length >= campaignCount)) return null;
   const groups = hotels.map((h) => {
     const cur = currentRows.filter((r) => compareHotelOf(r) === h);
     const prev = previousRows.filter((r) => compareHotelOf(r) === h);
@@ -2095,7 +2094,13 @@ function renderCompareHotelSummary() {
     return { hotel: h, cur, prev, cs, ps, d: engine.compareSummaries(cs, ps), campaigns: new Set(cur.map((r) => r.campaign)).size };
   }).sort((x, y) => y.cs.total_cost - x.cs.total_cost);
   const total = engine.summarize(currentRows); const totalPrev = engine.summarize(previousRows);
-  const totalD = engine.compareSummaries(total, totalPrev);
+  return { groups, total, totalPrev, totalD: engine.compareSummaries(total, totalPrev), byName };
+}
+
+function renderCompareHotelSummary() {
+  const hd = compareHotelData();
+  if (!hd) return '';
+  const { groups, total, totalD, byName } = hd;
   const roasText = (sm) => (sm.roas != null ? `${(sm.roas * 100).toFixed(0)}%` : 'N/D');
   const cpaText = (sm) => (sm.avg_cpa_weighted != null ? fmtMoney(sm.avg_cpa_weighted) : 'N/D');
   const share = (sm) => (total.total_cost > 0 ? `${((sm.total_cost / total.total_cost) * 100).toFixed(0)}% del gasto` : '');
@@ -2114,7 +2119,7 @@ function renderCompareHotelSummary() {
   }).join('');
   return `
     <div class="card chart-card" style="margin-top:16px">
-      <h3 class="dense-chart-title">Resumen por hotel (${hotels.length})</h3>
+      <h3 class="dense-chart-title">Resumen por hotel (${groups.length})</h3>
       <div style="overflow-x:auto">
         <table>
           <thead><tr><th>Hotel</th><th>Gasto</th><th>Conversiones</th><th>CPA</th><th>ROAS</th></tr></thead>
@@ -2125,6 +2130,157 @@ function renderCompareHotelSummary() {
       </div>
       <p class="footnote" style="margin-top:10px">Cifras del periodo actual; las flechas comparan con el periodo anterior. ${byName ? 'El hotel se toma de lo que va antes del primer " - " en el nombre de la campaña.' : 'Cada hotel es una de las cuentas elegidas.'}</p>
     </div>`;
+}
+
+// Todo lo que se ve en pantalla en Comparar periodos (con los filtros aplicados), para armar los informes.
+function compareResultData() {
+  const s = state.compare;
+  const { currentRows, previousRows } = getCompareFilteredRows();
+  const currentSummary = engine.summarize(currentRows);
+  const previousSummary = engine.summarize(previousRows);
+  const { matched, onlyCurrent, onlyPrevious } = engine.compareCampaignPeriods(currentRows, previousRows);
+  const filters = [];
+  if (s.hotelFilter !== 'all') filters.push(['Hotel', s.hotelFilter]);
+  if (s.campaignTypeFilter !== 'all') filters.push(['Tipo de campaña', engine.CAMPAIGN_TYPE_LABELS[s.campaignTypeFilter] || s.campaignTypeFilter]);
+  if (s.campaignFilter !== 'all') filters.push(['Campaña', s.campaignFilter]);
+  return {
+    currentLabel: s.current.fileName || 'Periodo actual', previousLabel: s.previous.fileName || 'Periodo anterior',
+    currentSummary, previousSummary, deltas: engine.compareSummaries(currentSummary, previousSummary),
+    matched, onlyCurrent, onlyPrevious, trendRecs: engine.generateTrendRecommendations(matched),
+    hotel: compareHotelData(), filters, currency: s.source === 'api' ? s.api.currency : '',
+  };
+}
+
+const COMPARE_NOTE = 'Las campañas se emparejan por nombre exacto entre los dos periodos: si una campaña se renombró, aparece como "nueva" en un lado y "ya no aparece" en el otro. '
+  + 'Los cambios comparan el periodo actual contra el anterior; en Gasto no se juzga bueno o malo porque subir puede ser intencional. '
+  + 'Umbrales de la recomendación por tendencia: CPA +20%, CTR -20%, conversiones -20%, o gasto +30% sin que suban las conversiones.';
+
+function compareReportBodyHtml() {
+  const d = compareResultData();
+  const e = escapeHtml;
+  const pct1 = (v) => (v == null || Number.isNaN(v) ? 'N/D' : `${(v * 100).toFixed(1)}%`);
+  const pct0 = (v) => (v == null || Number.isNaN(v) ? 'N/D' : `${(v * 100).toFixed(0)}%`);
+  // Variación coloreada: verde mejora, rojo empeora (según la métrica), gris neutral.
+  const delta = (pct, mode) => {
+    if (pct == null) return '<span style="color:#6b7280">—</span>';
+    const up = pct > 0; const flat = pct === 0;
+    let color = '#6b7280';
+    if (mode === 'good_up') color = flat ? '#6b7280' : (up ? '#1d6b41' : '#b3261e');
+    else if (mode === 'good_down') color = flat ? '#6b7280' : (up ? '#b3261e' : '#1d6b41');
+    return `<span style="color:${color};font-weight:600">${flat ? '—' : (up ? '▲' : '▼')} ${Math.abs(pct * 100).toFixed(0)}%</span>`;
+  };
+  const metric = (label, value, deltaHtml, prev) => `<div class="ar-metric"><div class="ar-metric-l">${e(label)}</div><div class="ar-metric-v">${e(value)}</div><div style="font-size:12px;color:#6b7280;margin-top:3px">${deltaHtml} vs. ${e(prev)}</div></div>`;
+  const cs = d.currentSummary; const ps = d.previousSummary; const dl = d.deltas;
+  const na = (v, f) => (v != null ? f(v) : 'N/D');
+  const small = (t) => `<div style="font-weight:400;font-size:11.5px;color:#6b7280;margin-top:2px">${e(t)}</div>`;
+
+  const hotelBlock = d.hotel ? (() => {
+    const { groups, total, totalD, byName } = d.hotel;
+    const share = (sm) => (total.total_cost > 0 ? `${((sm.total_cost / total.total_cost) * 100).toFixed(0)}% del gasto` : '');
+    const cpa = (sm) => (sm.avg_cpa_weighted != null ? fmtMoney(sm.avg_cpa_weighted) : 'N/D');
+    const rows = groups.map((g) => `<tr>
+      <td><strong>${e(g.hotel)}</strong>${small(`${g.campaigns} campaña${g.campaigns === 1 ? '' : 's'}${!g.prev.length ? ' · nuevo' : ''}${!g.cur.length ? ' · sin datos en el periodo actual' : ''}`)}</td>
+      <td>${e(fmtMoney(g.cs.total_cost))} ${delta(g.d.delta_cost, 'neutral')}${small(share(g.cs))}</td>
+      <td>${e(fmtInt(g.cs.total_conversions))} ${delta(g.d.delta_conversions, 'good_up')}</td>
+      <td>${e(cpa(g.cs))} ${delta(g.d.delta_cpa, 'good_down')}</td>
+      <td>${e(pct0(g.cs.roas))} ${delta(g.d.delta_roas, 'good_up')}</td></tr>`).join('');
+    return `<div class="ar-block"><h2 class="ar-h2">Resumen por hotel (${groups.length})<small>${byName ? 'El hotel se toma de lo que va antes del primer " - " en el nombre de la campaña.' : 'Cada hotel es una de las cuentas elegidas.'}</small></h2>
+      <div class="ar-card"><div class="ar-tw"><table class="ar-tbl ar-compact"><thead><tr><th>Hotel</th><th>Gasto</th><th>Conversiones</th><th>CPA</th><th>ROAS</th></tr></thead>
+      <tbody>${rows}<tr><td><strong>Total</strong></td><td><strong>${e(fmtMoney(total.total_cost))}</strong> ${delta(totalD.delta_cost, 'neutral')}</td><td><strong>${e(fmtInt(total.total_conversions))}</strong> ${delta(totalD.delta_conversions, 'good_up')}</td><td><strong>${e(cpa(total))}</strong> ${delta(totalD.delta_cpa, 'good_down')}</td><td><strong>${e(pct0(total.roas))}</strong> ${delta(totalD.delta_roas, 'good_up')}</td></tr></tbody></table></div></div></div>`;
+  })() : '';
+
+  const recsHtml = d.trendRecs.length
+    ? d.trendRecs.map((r) => `<div class="ar-card" style="margin-bottom:10px"><div><strong>${e(r.campaign)}</strong> · <span style="color:#6b7280">${e(r.categoria)}</span> · impacto ${(r.impacto_gasto * 100).toFixed(0)}%</div><div style="margin-top:6px">${e(r.hallazgo)}</div><div style="margin-top:6px"><strong>➜</strong> ${e(r.recomendacion)}</div></div>`).join('')
+    : '<div class="ar-card">No se detectaron caídas ni subidas fuertes entre los dos periodos con los umbrales actuales.</div>';
+
+  const rows = d.matched.map((m) => `<tr>
+    <td>${e(m.campaign)}</td>
+    <td>${e(fmtMoney(m.current.cost))} ${delta(m.delta_cost, 'neutral')}</td>
+    <td>${e(pct1(m.current.cpa_pct))} ${delta(m.delta_cpa_pct, 'good_down')}</td>
+    <td>${e(Number.isNaN(m.current.ctr) ? 'N/D' : (m.current.ctr * 100).toFixed(2) + '%')} ${delta(m.delta_ctr, 'good_up')}</td>
+    <td>${e(fmtInt(m.current.conversions))} ${delta(m.delta_conversions, 'good_up')}</td></tr>`).join('');
+  const onlyList = (title, list) => (list.length ? `<div class="ar-block"><h2 class="ar-h2">${e(title)} (${list.length})</h2><div class="ar-card"><table class="ar-tbl ar-compact"><tbody>${list.map((r) => `<tr><td>${e(r.campaign)}</td><td style="text-align:right">${e(fmtMoney(r.cost))}</td></tr>`).join('')}</tbody></table></div></div>` : '');
+
+  return `
+    <div class="ar">
+      <div class="ar-eyebrow">Comparar periodos</div>
+      <div class="ar-title">Cómo cambiaron las campañas entre dos periodos</div>
+      <div class="ar-sub">Actual: <strong>${e(d.currentLabel)}</strong><br>Anterior: <strong>${e(d.previousLabel)}</strong>${d.currency ? `<br>Moneda: <strong>${e(d.currency)}</strong>` : ''}${d.filters.length ? `<br>Filtros: ${d.filters.map(([k, v]) => `${e(k)}: <strong>${e(v)}</strong>`).join(' · ')}` : ''} · Generado ${new Date().toISOString().slice(0, 10)}</div>
+      <div class="ar-block"><div class="ar-grid">
+        ${metric('Gasto total', fmtMoney(cs.total_cost), delta(dl.delta_cost, 'neutral'), fmtMoney(ps.total_cost))}
+        ${metric('Conversiones', fmtInt(cs.total_conversions), delta(dl.delta_conversions, 'good_up'), fmtInt(ps.total_conversions))}
+        ${metric('CPA promedio (ponderado)', na(cs.avg_cpa_weighted, fmtMoney), delta(dl.delta_cpa, 'good_down'), na(ps.avg_cpa_weighted, fmtMoney))}
+        ${metric('ROAS', pct0(cs.roas), delta(dl.delta_roas, 'good_up'), pct0(ps.roas))}
+        ${metric('Valor de conversión', na(cs.total_conv_value, fmtMoney), delta(dl.delta_conv_value, 'good_up'), na(ps.total_conv_value, fmtMoney))}
+        ${metric('CPA %', pct1(cs.cpa_pct), delta(dl.delta_cpa_pct, 'good_down'), pct1(ps.cpa_pct))}
+      </div></div>
+      ${hotelBlock}
+      <div class="ar-block"><h2 class="ar-h2">Recomendaciones por tendencia (${d.trendRecs.length})</h2>${recsHtml}</div>
+      <div class="ar-block"><h2 class="ar-h2">Campañas comparadas (${d.matched.length})</h2>
+      <div class="ar-card"><div class="ar-tw"><table class="ar-tbl ar-compact"><thead><tr><th style="min-width:200px">Campaña</th><th>Gasto</th><th>CPA %</th><th>CTR</th><th>Conversiones</th></tr></thead><tbody>${rows}</tbody></table></div></div></div>
+      ${onlyList('Campañas nuevas en el periodo actual', d.onlyCurrent)}
+      ${onlyList('Campañas que no aparecen en el periodo actual', d.onlyPrevious)}
+      <div class="ar-note">${e(COMPARE_NOTE)}</div>
+      <div class="ar-foot">Generado con Paid Media Helper a partir de datos de Google Ads o de los archivos subidos. Las cifras son las que reporta Google Ads: no verifican reservas reales ni ingresos finales del hotel.</div>
+    </div>`;
+}
+
+function buildCompareHtml() {
+  return withMoneyCurrency(state.compare.source === 'api' ? state.compare.api.currency : null, () => `<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Comparar periodos</title>
+${themedFontsLink(PLUS_JAKARTA_HREF)}
+<style>body{margin:0;padding:40px 20px;background:#f4f5f8}@media print{body{background:#fff;padding:0}@page{margin:14mm}}${AUDIT_REPORT_CSS}.ar-compact th,.ar-compact td{padding:7px 6px;font-size:12.5px}</style>
+</head><body>${compareReportBodyHtml()}</body></html>`);
+}
+
+function buildCompareMarkdown() {
+  return withMoneyCurrency(state.compare.source === 'api' ? state.compare.api.currency : null, () => {
+    const d = compareResultData();
+    const pct1 = (v) => (v == null || Number.isNaN(v) ? 'N/D' : `${(v * 100).toFixed(1)}%`);
+    const pct0 = (v) => (v == null || Number.isNaN(v) ? 'N/D' : `${(v * 100).toFixed(0)}%`);
+    const dm = (pct) => (pct == null ? '—' : pct === 0 ? '—' : `${pct > 0 ? '▲' : '▼'} ${Math.abs(pct * 100).toFixed(0)}%`);
+    const cs = d.currentSummary; const ps = d.previousSummary; const dl = d.deltas;
+    const na = (v, f) => (v != null ? f(v) : 'N/D');
+    const cell = (t) => String(t).replace(/\|/g, '\\|');
+    const lines = [];
+    lines.push('# Comparar periodos', '');
+    lines.push(`- Periodo actual: ${d.currentLabel}`);
+    lines.push(`- Periodo anterior: ${d.previousLabel}`);
+    if (d.currency) lines.push(`- Moneda: ${d.currency}`);
+    if (d.filters.length) lines.push(`- Filtros: ${d.filters.map(([k, v]) => `${k}: ${v}`).join(' · ')}`);
+    lines.push(`- Generado: ${new Date().toISOString().slice(0, 10)}`, '');
+    lines.push('## Cifras del periodo', '', '| Métrica | Actual | Anterior | Cambio |', '|---|---|---|---|');
+    lines.push(`| Gasto total | ${fmtMoney(cs.total_cost)} | ${fmtMoney(ps.total_cost)} | ${dm(dl.delta_cost)} |`);
+    lines.push(`| Conversiones | ${fmtInt(cs.total_conversions)} | ${fmtInt(ps.total_conversions)} | ${dm(dl.delta_conversions)} |`);
+    lines.push(`| CPA promedio (ponderado) | ${na(cs.avg_cpa_weighted, fmtMoney)} | ${na(ps.avg_cpa_weighted, fmtMoney)} | ${dm(dl.delta_cpa)} |`);
+    lines.push(`| ROAS | ${pct0(cs.roas)} | ${pct0(ps.roas)} | ${dm(dl.delta_roas)} |`);
+    lines.push(`| Valor de conversión | ${na(cs.total_conv_value, fmtMoney)} | ${na(ps.total_conv_value, fmtMoney)} | ${dm(dl.delta_conv_value)} |`);
+    lines.push(`| CPA % | ${pct1(cs.cpa_pct)} | ${pct1(ps.cpa_pct)} | ${dm(dl.delta_cpa_pct)} |`);
+    if (d.hotel) {
+      const { groups, total, totalD, byName } = d.hotel;
+      const cpa = (sm) => (sm.avg_cpa_weighted != null ? fmtMoney(sm.avg_cpa_weighted) : 'N/D');
+      lines.push('', `## Resumen por hotel (${groups.length})`, '', byName ? 'El hotel se toma de lo que va antes del primer " - " en el nombre de la campaña.' : 'Cada hotel es una de las cuentas elegidas.', '');
+      lines.push('| Hotel | Campañas | Gasto | Cambio | % del gasto | Conversiones | Cambio | CPA | Cambio | ROAS | Cambio |', '|---|---|---|---|---|---|---|---|---|---|---|');
+      groups.forEach((g) => lines.push(`| ${cell(g.hotel)}${!g.prev.length ? ' (nuevo)' : ''}${!g.cur.length ? ' (sin datos en el periodo actual)' : ''} | ${g.campaigns} | ${fmtMoney(g.cs.total_cost)} | ${dm(g.d.delta_cost)} | ${total.total_cost > 0 ? ((g.cs.total_cost / total.total_cost) * 100).toFixed(0) + '%' : 'N/D'} | ${fmtInt(g.cs.total_conversions)} | ${dm(g.d.delta_conversions)} | ${cpa(g.cs)} | ${dm(g.d.delta_cpa)} | ${pct0(g.cs.roas)} | ${dm(g.d.delta_roas)} |`));
+      lines.push(`| **Total** | | **${fmtMoney(total.total_cost)}** | ${dm(totalD.delta_cost)} | 100% | **${fmtInt(total.total_conversions)}** | ${dm(totalD.delta_conversions)} | **${cpa(total)}** | ${dm(totalD.delta_cpa)} | **${pct0(total.roas)}** | ${dm(totalD.delta_roas)} |`);
+    }
+    lines.push('', `## Recomendaciones por tendencia (${d.trendRecs.length})`, '');
+    if (d.trendRecs.length) {
+      d.trendRecs.forEach((r) => lines.push(`### ${r.campaign}`, '', `**${r.categoria}** · impacto ${(r.impacto_gasto * 100).toFixed(0)}%`, '', r.hallazgo, '', `➜ ${r.recomendacion}`, ''));
+    } else lines.push('No se detectaron caídas ni subidas fuertes entre los dos periodos con los umbrales actuales.');
+    lines.push('', `## Campañas comparadas (${d.matched.length})`, '', '| Campaña | Gasto | Cambio | CPA % | Cambio | CTR | Cambio | Conversiones | Cambio |', '|---|---|---|---|---|---|---|---|---|');
+    d.matched.forEach((m) => lines.push(`| ${cell(m.campaign)} | ${fmtMoney(m.current.cost)} | ${dm(m.delta_cost)} | ${pct1(m.current.cpa_pct)} | ${dm(m.delta_cpa_pct)} | ${Number.isNaN(m.current.ctr) ? 'N/D' : (m.current.ctr * 100).toFixed(2) + '%'} | ${dm(m.delta_ctr)} | ${fmtInt(m.current.conversions)} | ${dm(m.delta_conversions)} |`));
+    const onlyList = (title, list) => { if (list.length) { lines.push('', `## ${title} (${list.length})`, '', ...list.map((r) => `- ${r.campaign}: ${fmtMoney(r.cost)}`)); } };
+    onlyList('Campañas nuevas en el periodo actual', d.onlyCurrent);
+    onlyList('Campañas que no aparecen en el periodo actual', d.onlyPrevious);
+    lines.push('', '---', COMPARE_NOTE, '', 'Informe generado con Paid Media Helper. Las cifras son las que reporta Google Ads o los archivos subidos: no verifican reservas reales ni ingresos finales del hotel.');
+    return lines.join('\n');
+  });
+}
+
+function compareFileName(ext) {
+  return `comparar-periodos_${new Date().toISOString().slice(0, 10)}.${ext}`;
 }
 
 function renderComparePage() {
@@ -2318,6 +2474,10 @@ function renderComparePageBody() {
   return `
     ${uploadPanel}
     ${campaignFilterHtml}
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:10px">
+      <button class="btn-outline sm" data-action="compare-download-html">Descargar informe (HTML)</button>
+      <button class="btn-outline sm" data-action="compare-download-md">Descargar Markdown</button>
+    </div>
     ${statGrid}
     ${hotelSummaryHtml}
     <div style="margin-top:16px">
@@ -13132,6 +13292,8 @@ function handleAction(action) {
     case 'neg-mcc-clear': clearNegMccFilter(); break;
     case 'neg-api-fetch': fetchGoogleAdsSearchTerms(); break;
     case 'neg-tab-reglas': state.neg.tab = 'reglas'; render(); break;
+    case 'compare-download-html': downloadTextFile(buildCompareHtml(), compareFileName('html'), 'text/html'); break;
+    case 'compare-download-md': downloadTextFile(buildCompareMarkdown(), compareFileName('md'), 'text/markdown'); break;
     case 'admin-ai-usage-7': state.admin.usage.days = 7; loadAdminAiUsage(); break;
     case 'admin-ai-usage-30': state.admin.usage.days = 30; loadAdminAiUsage(); break;
     case 'admin-ai-usage-90': state.admin.usage.days = 90; loadAdminAiUsage(); break;
