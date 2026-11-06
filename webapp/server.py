@@ -421,6 +421,38 @@ def init_db():
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_history_customer ON audit_history(customer_id, created_at)")
+        # Historial de negativas subidas desde la plataforma: una fila por subida y una por negativa creada (con su
+        # resource_name de Google Ads), para poder ver qué se subió, quién y cuándo, y deshacerlo.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS neg_uploads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at REAL NOT NULL,
+                user_id INTEGER,
+                customer_id TEXT NOT NULL,
+                origen TEXT NOT NULL DEFAULT 'reglas',
+                created INTEGER NOT NULL DEFAULT 0,
+                undone_at REAL,
+                undone_by INTEGER
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS neg_upload_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                upload_id INTEGER NOT NULL,
+                campaign_id TEXT NOT NULL,
+                campaign_name TEXT,
+                text TEXT NOT NULL,
+                match_type TEXT NOT NULL,
+                resource_name TEXT NOT NULL,
+                removed_at REAL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_neg_uploads_customer ON neg_uploads(customer_id, created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_neg_upload_items_upload ON neg_upload_items(upload_id)")
         # Consumo de la IA (Claude) por usuario, por día y por función: llamados, tokens y costo estimado en USD.
         # El día es el de Colombia (UTC-5), no el del servidor.
         conn.execute(
@@ -489,6 +521,27 @@ def track_ai_usage(user_id, feature):
                 store_ai_usage(user_id, feature, rec["calls"], rec["input"], rec["output"], rec["cost_usd"])
             except Exception as e:  # noqa: BLE001
                 print(f"[ai-usage] no se pudo guardar el consumo: {' '.join(str(e).split())[:200]}", flush=True)
+
+
+def store_neg_upload(user_id, customer_id, origen, created_items):
+    """Guarda una subida de negativas con cada negativa creada. Devuelve el id, o None si no había nada."""
+    if not created_items:
+        return None
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            "INSERT INTO neg_uploads (created_at, user_id, customer_id, origen, created) VALUES (?, ?, ?, ?, ?)",
+            (time.time(), user_id, str(customer_id), origen, len(created_items)),
+        )
+        upload_id = cur.lastrowid
+        conn.executemany(
+            "INSERT INTO neg_upload_items (upload_id, campaign_id, campaign_name, text, match_type, resource_name) VALUES (?, ?, ?, ?, ?, ?)",
+            [(upload_id, str(i["campaign_id"]), i.get("campaign_name") or "", i["term"], i["match_type"], i["resource_name"]) for i in created_items],
+        )
+        conn.commit()
+        return upload_id
+    finally:
+        conn.close()
 
 
 def hash_password(password, salt_hex=None):
@@ -644,6 +697,13 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_hotel_modifiers(parse_qs(parsed.query))
             return
 
+        # Historial de negativas subidas desde la plataforma (en afinado: solo super admin).
+        if path == "/api/google-ads/negative-uploads":
+            if not self._require_super_admin_json():
+                return
+            self._handle_negative_uploads(parse_qs(parsed.query))
+            return
+
         if path == "/api/google-ads/recommendations":
             if not self._require_auth_json():
                 return
@@ -770,6 +830,10 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_google_ads_roas_adjust(payload)
+        elif path == "/api/google-ads/negative-uploads/undo":
+            if not self._require_super_admin_json():
+                return
+            self._handle_negative_uploads_undo(payload)
         elif path == "/api/google-ads/hotel-modifiers-apply":
             if not self._require_super_admin_json():
                 return
@@ -838,6 +902,11 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_super_admin_json():
                 return
             self._handle_ai_analizar_negativos(payload)
+        elif path == "/api/negativos/palabras":
+            # Sin IA ni costo; en afinado (2026-11-05): solo super admin, como la pestaña "Con IA".
+            if not self._require_super_admin_json():
+                return
+            self._handle_negativos_palabras(payload)
         elif path == "/api/ai/generar-copys":
             # Solo administradores mientras se afinan los textos (2026-11-01); luego se abre con _require_auth_json.
             if not self._require_admin_json():
@@ -2284,6 +2353,47 @@ class Handler(SimpleHTTPRequestHandler):
             print(f"[claude-error] {e}", flush=True)
             self._send_json(502, {"error": "No se pudo generar el análisis con IA. Intenta de nuevo en unos minutos."})
 
+    def _handle_negativos_palabras(self, payload):
+        user = self._get_current_user()
+        rows = payload.get("rows")
+        if not isinstance(rows, list) or not rows:
+            self._send_json(400, {"error": "Primero trae los términos de búsqueda: no hay nada que analizar."})
+            return
+        if len(rows) > negativos_ia.MAX_ROWS_ACCEPTED:
+            self._send_json(400, {"error": f"Demasiados términos ({len(rows)}). Acorta el rango de fechas o elige una campaña."})
+            return
+        raw_ctx = payload.get("contexto") if isinstance(payload.get("contexto"), dict) else {}
+        ctx = {k: str(raw_ctx.get(k) or "")[:600] for k in ("marca", "destino")}
+        if not negativos_ia.split_lines(ctx["marca"]):
+            self._send_json(400, {"error": "Escribe el nombre del hotel o la marca: se usa para que ninguna palabra sugerida la incluya."})
+            return
+        existing = negativos_ia.ExistingNegatives()
+        positives = None
+        customer_id = str(payload.get("customer_id") or "").strip()
+        if google_ads_client.is_configured() and customer_id.isdigit() and self._user_can_access_account(user, customer_id):
+            try:
+                existing = negativos_ia.ExistingNegatives.from_sources(google_ads_client.fetch_negative_keyword_sources(customer_id))
+            except Exception as e:  # noqa: BLE001
+                print(f"[neg-palabras] no se pudieron leer las negativas existentes: {' '.join(str(e).split())[:200]}", flush=True)
+            try:
+                positives = negativos_ia.PositiveKeywords.from_rows(google_ads_client.fetch_positive_keywords(customer_id))
+            except Exception as e:  # noqa: BLE001
+                print(f"[neg-palabras] no se pudieron leer las palabras clave positivas: {' '.join(str(e).split())[:200]}", flush=True)
+        try:
+            kept, dropped_rows = negativos_ia.drop_blocked(rows, existing)
+            terms = negativos_ia.aggregate_terms(kept)
+        except (TypeError, ValueError):
+            self._send_json(400, {"error": "Los términos traen valores inválidos (clics, costo o conversiones)."})
+            return
+        if not terms:
+            self._send_json(400, {"error": "No hay términos de búsqueda reales para analizar."})
+            return
+        result = negativos_ia.ngram_report(terms, ctx, existing, positives)
+        result["negativas_existentes"] = existing.total()
+        result["negativas_fuentes"] = {**existing.counts, "errores": 0}
+        result["ya_bloqueados"] = negativos_ia.summarize_dropped(dropped_rows)
+        self._send_json(200, result)
+
     def _handle_ai_analizar_negativos(self, payload):
         user = self._get_current_user()
         if not claude_client.is_configured():
@@ -2304,6 +2414,7 @@ class Handler(SimpleHTTPRequestHandler):
         # Las negativas que la cuenta ya tiene (solo con Google Ads real y acceso a la cuenta): la IA no las repite,
         # el resultado omite las que ya existen en cada campaña y los términos que ya bloquean se sacan de la lista.
         existing = negativos_ia.ExistingNegatives()
+        positives = None
         neg_errors = []
         customer_id = str(payload.get("customer_id") or "").strip()
         if google_ads_client.is_configured() and customer_id.isdigit() and self._user_can_access_account(user, customer_id):
@@ -2316,6 +2427,12 @@ class Handler(SimpleHTTPRequestHandler):
                 neg_errors = ["no se pudieron leer las negativas existentes"]
             for msg in neg_errors:
                 print(f"[neg-ia] {msg}", flush=True)
+            # Palabras clave positivas activas: para avisar si una negativa bloquearía alguna de las tuyas.
+            try:
+                positives = negativos_ia.PositiveKeywords.from_rows(google_ads_client.fetch_positive_keywords(customer_id))
+            except Exception as e:  # noqa: BLE001 — sin esto el análisis igual sirve, pero sin esta comprobación
+                print(f"[neg-ia] no se pudieron leer las palabras clave positivas: {' '.join(str(e).split())[:200]}", flush=True)
+                positives = None
         try:
             rows, dropped_rows = negativos_ia.drop_blocked(rows, existing)
             terms = negativos_ia.aggregate_terms(rows)
@@ -2336,7 +2453,7 @@ class Handler(SimpleHTTPRequestHandler):
             user_content = negativos_ia.build_user_content(ctx, chosen, existing.texts())
             with track_ai_usage(user["id"], "negativizacion"):
                 ai = claude_client.analizar_negativos(user_content)
-            result = negativos_ia.build_result(ai, terms, chosen, ctx, existing)
+            result = negativos_ia.build_result(ai, terms, chosen, ctx, existing, positives)
             result["negativas_existentes"] = existing.total()
             result["negativas_fuentes"] = {**existing.counts, "errores": len(neg_errors)}
             result["ya_bloqueados"] = negativos_ia.summarize_dropped(dropped_rows)
@@ -2410,6 +2527,7 @@ class Handler(SimpleHTTPRequestHandler):
 
         if not google_ads_client.is_configured():
             result = google_ads_client.simulated_push_negative_keywords(items, validate_only)
+            self._record_neg_upload(user, customer_id, payload, result)
             self._send_json(200, result)
             return
 
@@ -2422,9 +2540,22 @@ class Handler(SimpleHTTPRequestHandler):
 
         try:
             result = google_ads_client.push_negative_keywords(customer_id, items, validate_only)
+            self._record_neg_upload(user, customer_id, payload, result)
             self._send_json(200, result)
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)
+
+    # Guarda en el historial lo que acaba de subir (solo subidas reales). Un fallo al guardar no debe tumbar la
+    # respuesta: las negativas ya están en Google Ads. Siempre se retira created_items de lo que se manda al navegador.
+    def _record_neg_upload(self, user, customer_id, payload, result):
+        created_items = result.pop("created_items", None)
+        if result.get("validate_only") or not created_items:
+            return
+        origen = payload.get("origen") if payload.get("origen") in ("ia", "reglas") else "reglas"
+        try:
+            store_neg_upload(user["id"], customer_id or "simulada", origen, created_items)
+        except Exception as e:  # noqa: BLE001
+            print(f"[neg-historial] no se pudo guardar la subida: {' '.join(str(e).split())[:200]}", flush=True)
 
     # Escritura real sobre la cuenta del cliente — ajusta el ROAS objetivo de
     # una campaña. Igual que negative-keywords, por default (validate_only
@@ -2473,6 +2604,104 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(400, {"error": str(e)})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)
+
+    # ------------------------------------------------ Historial de negativas ---
+    def _handle_negative_uploads(self, query):
+        customer_id = (query.get("customer_id") or [""])[0].strip() or "simulada"
+        if google_ads_client.is_configured():
+            if not customer_id.isdigit():
+                self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+                return
+            user = self._get_current_user()
+            if not self._user_can_access_account(user, customer_id):
+                self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+                return
+        conn = get_db()
+        try:
+            ups = conn.execute(
+                """
+                SELECT u.id, u.created_at, u.origen, u.created, u.undone_at, COALESCE(us.username, '(usuario borrado)') AS username
+                FROM neg_uploads u LEFT JOIN users us ON us.id = u.user_id
+                WHERE u.customer_id = ? ORDER BY u.created_at DESC LIMIT 40
+                """,
+                (customer_id,),
+            ).fetchall()
+            out = []
+            for u in ups:
+                items = conn.execute(
+                    "SELECT campaign_name, campaign_id, text, match_type, removed_at FROM neg_upload_items WHERE upload_id = ? ORDER BY id LIMIT 300",
+                    (u["id"],),
+                ).fetchall()
+                out.append({
+                    "id": u["id"], "created_at": u["created_at"], "username": u["username"], "origen": u["origen"],
+                    "created": u["created"], "undone_at": u["undone_at"],
+                    "activas": sum(1 for i in items if i["removed_at"] is None),
+                    "items": [{"campaign_name": i["campaign_name"], "campaign_id": i["campaign_id"], "text": i["text"],
+                               "match_type": i["match_type"], "removed": i["removed_at"] is not None} for i in items],
+                })
+        finally:
+            conn.close()
+        self._send_json(200, {"uploads": out, "simulated": not google_ads_client.is_configured()})
+
+    def _handle_negative_uploads_undo(self, payload):
+        user = self._get_current_user()
+        if not _write_limiter.allow(f"user:{user['id']}", *WRITE_RATE_LIMIT):
+            self._send_json(429, {"error": "Demasiadas escrituras seguidas. Espera un minuto y vuelve a intentar."})
+            return
+        customer_id = str(payload.get("customer_id") or "").strip() or "simulada"
+        validate_only = payload.get("validate_only", True) is not False
+        try:
+            upload_id = int(payload.get("upload_id"))
+        except (TypeError, ValueError):
+            self._send_json(400, {"error": "Falta el upload_id."})
+            return
+        configured = google_ads_client.is_configured()
+        if configured:
+            if not customer_id.isdigit():
+                self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+                return
+            if not self._user_can_access_account(user, customer_id):
+                self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+                return
+        conn = get_db()
+        try:
+            up = conn.execute("SELECT id FROM neg_uploads WHERE id = ? AND customer_id = ?", (upload_id, customer_id)).fetchone()
+            if not up:
+                self._send_json(404, {"error": "No se encontró esa subida en esta cuenta."})
+                return
+            items = conn.execute(
+                "SELECT id, resource_name FROM neg_upload_items WHERE upload_id = ? AND removed_at IS NULL", (upload_id,)
+            ).fetchall()
+        finally:
+            conn.close()
+        if not items:
+            self._send_json(400, {"error": "Esa subida ya no tiene negativas activas que deshacer."})
+            return
+        try:
+            if configured:
+                result = google_ads_client.remove_campaign_negative_keywords(customer_id, [i["resource_name"] for i in items], validate_only)
+            else:
+                result = {"removed": len(items), "removed_names": [i["resource_name"] for i in items], "failed": [], "validate_only": validate_only, "simulated": True}
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        except Exception as e:  # noqa: BLE001
+            self._send_google_ads_error(e)
+            return
+        if not validate_only and result["removed_names"]:
+            gone = set(result["removed_names"])
+            conn = get_db()
+            try:
+                conn.executemany("UPDATE neg_upload_items SET removed_at = ? WHERE id = ?", [(time.time(), i["id"]) for i in items if i["resource_name"] in gone])
+                left = conn.execute("SELECT COUNT(*) FROM neg_upload_items WHERE upload_id = ? AND removed_at IS NULL", (upload_id,)).fetchone()[0]
+                if left == 0:
+                    conn.execute("UPDATE neg_uploads SET undone_at = ?, undone_by = ? WHERE id = ?", (time.time(), user["id"], upload_id))
+                conn.commit()
+            finally:
+                conn.close()
+            print(f"[neg-historial] user={user['id']} customer={customer_id} upload={upload_id} removed={result['removed']} failed={len(result['failed'])}", flush=True)
+        result.pop("removed_names", None)
+        self._send_json(200, result)
 
     # ------------------------------------------------------- Hoteles ---
     # Modificadores de oferta de campañas de hotel (AdGroupBidModifier). La

@@ -1470,6 +1470,28 @@ def fetch_negative_keyword_sources(customer_id):
     return sources
 
 
+def fetch_positive_keywords(customer_id, limit=60000):
+    """Palabras clave positivas ACTIVAS (campaña, grupo de anuncios y palabra activos) de la cuenta, para
+    comprobar que una negativa propuesta no bloquea tus propias palabras clave (lo que Google llama
+    "conflicto de palabras clave negativas"). Solo Search tiene palabras clave; PMax no."""
+    query = f"""
+        SELECT campaign.id, ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type
+        FROM ad_group_criterion
+        WHERE ad_group_criterion.type = 'KEYWORD'
+          AND ad_group_criterion.negative = false
+          AND ad_group_criterion.status = 'ENABLED'
+          AND ad_group.status = 'ENABLED'
+          AND campaign.status = 'ENABLED'
+        LIMIT {int(limit)}
+    """
+    rows = []
+    for r in _search(customer_id, query):
+        kw = r.get("adGroupCriterion", {}).get("keyword", {})
+        if kw.get("text") and r.get("campaign", {}).get("id") is not None:
+            rows.append({"campaign_id": str(r["campaign"]["id"]), "text": kw["text"], "match_type": kw.get("matchType") or "UNKNOWN"})
+    return rows
+
+
 def push_negative_keywords(customer_id, items, validate_only=True):
     """Sube palabras clave negativas a nivel de campaña (concordancia exacta
     por defecto; "match_type": "PHRASE" en el item la pasa a frase).
@@ -1525,7 +1547,38 @@ def push_negative_keywords(customer_id, items, validate_only=True):
                     failed_messages.append(message)
 
     created = len(items) - len(failed_indices)
-    return {"created": created, "failed": failed_messages, "validate_only": validate_only}
+    result = {"created": created, "failed": failed_messages, "validate_only": validate_only}
+    if not validate_only:
+        # Con partialFailure, "results" trae una entrada por operación (vacía si esa falló): de ahí sale el
+        # resource_name de cada negativa creada, que se guarda para poder deshacer la subida.
+        results = payload.get("results") or []
+        created_items = []
+        for idx, item in enumerate(items):
+            rn = (results[idx] or {}).get("resourceName") if idx < len(results) and isinstance(results[idx], dict) else None
+            if rn and idx not in failed_indices:
+                created_items.append({
+                    "campaign_id": str(item["campaign_id"]), "campaign_name": item.get("campaign_name") or "",
+                    "term": item["term"], "match_type": item.get("match_type") if item.get("match_type") in ("EXACT", "PHRASE") else "EXACT",
+                    "resource_name": rn,
+                })
+        result["created_items"] = created_items
+    return result
+
+
+def remove_campaign_negative_keywords(customer_id, resource_names, validate_only=True):
+    """Quita negativas de campaña por su resource_name (customers/ID/campaignCriteria/CAMPAÑA~CRITERIO), para
+    deshacer una subida. Devuelve cuáles se quitaron (`removed_names`) y los fallos."""
+    import re as _re
+    pattern = _re.compile(rf"^customers/{_re.escape(str(customer_id))}/campaignCriteria/\d+~\d+$")
+    clean = [rn for rn in resource_names if isinstance(rn, str) and pattern.match(rn)]
+    if len(clean) != len(resource_names):
+        raise ValueError("Alguna negativa a quitar no es válida para esta cuenta.")
+    if not clean:
+        return {"removed": 0, "removed_names": [], "failed": [], "validate_only": validate_only}
+    payload = _mutate_with_partial_failure(f"{BASE_URL}/customers/{customer_id}/campaignCriteria:mutate", [{"remove": rn} for rn in clean], validate_only)
+    failed_indices, failed_messages = _partial_failures(payload, clean, lambda rn: rn.rsplit("/", 1)[-1])
+    removed_names = [rn for i, rn in enumerate(clean) if i not in failed_indices]
+    return {"removed": len(removed_names), "removed_names": removed_names, "failed": list(dict.fromkeys(failed_messages)), "validate_only": validate_only}
 
 
 # ---------------------------------------------------------------------------
@@ -2572,7 +2625,14 @@ def simulated_remove_ai_max_url_exclusions(resource_names, validate_only=True):
 
 
 def simulated_push_negative_keywords(items, validate_only=True):
-    return {"created": len(items), "failed": [], "validate_only": validate_only, "simulated": True}
+    result = {"created": len(items), "failed": [], "validate_only": validate_only, "simulated": True}
+    if not validate_only:
+        result["created_items"] = [{
+            "campaign_id": str(i["campaign_id"]), "campaign_name": i.get("campaign_name") or "", "term": i["term"],
+            "match_type": i.get("match_type") if i.get("match_type") in ("EXACT", "PHRASE") else "EXACT",
+            "resource_name": f"customers/simulada/campaignCriteria/{i['campaign_id']}~{abs(hash(i['term'])) % 10**9}",
+        } for i in items]
+    return result
 
 
 def simulated_optimization_score():

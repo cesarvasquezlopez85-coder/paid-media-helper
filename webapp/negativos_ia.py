@@ -194,6 +194,28 @@ def _term_view(t):
     }
 
 
+def _within_one_edit(a, b):
+    """¿a y b difieren en como máximo una letra (cambiada, añadida o quitada)? Sirve para detectar errores de
+    escritura de la marca ("blu" por "blue")."""
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        return sum(1 for x, y in zip(a, b) if x != y) == 1
+    short, long_ = (a, b) if la < lb else (b, a)
+    i = 0
+    while i < len(short) and short[i] == long_[i]:
+        i += 1
+    return short[i:] == long_[i + 1:]
+
+
+def _brand_lookalike(tokens, brand_words):
+    """Alguna palabra de la búsqueda se parece a una palabra de la marca sin ser igual (probable error de escritura)."""
+    return any(len(w) >= 3 and w not in brand_words and any(_within_one_edit(w, b) for b in brand_words) for w in tokens)
+
+
 class NegIndex:
     """Conjunto de negativas indexado para preguntar rápido "¿alguna bloquea esta búsqueda?" aunque haya miles.
     Exacta: conjunto de tuplas. Frase: conjunto de tuplas, probando las subfrases de la búsqueda. Amplia: se
@@ -317,6 +339,55 @@ class ExistingNegatives:
         return self.counts["campania"] + self.counts["palabras_listas"]
 
 
+class PositiveKeywords:
+    """Las palabras clave positivas activas, por campaña, para detectar si una negativa las bloquearía.
+    Una negativa de FRASE bloquea una palabra clave que contiene esa frase seguida y en orden; una EXACTA, la
+    que tiene exactamente las mismas palabras. Índice por campaña, armado solo cuando se consulta."""
+
+    MAX_PHRASE = 6
+
+    def __init__(self):
+        self._full = {}   # campaign_id -> {tokens: texto}
+        self._sub = {}    # campaign_id -> {subfrase: [textos]} (se arma al primer uso)
+        self.count = 0
+
+    @classmethod
+    def from_rows(cls, rows):
+        pk = cls()
+        for r in rows or []:
+            toks = tuple(_tokens(r.get("text")))
+            if toks:
+                by = pk._full.setdefault(str(r.get("campaign_id")), {})
+                if toks not in by:
+                    by[toks] = r["text"]
+                    pk.count += 1
+        return pk
+
+    def _subphrases(self, cid):
+        if cid not in self._sub:
+            sub = {}
+            for toks, text in self._full.get(cid, {}).items():
+                seen = set()
+                for i in range(len(toks)):
+                    for j in range(i + 1, min(len(toks), i + self.MAX_PHRASE) + 1):
+                        seen.add(toks[i:j])
+                for sp in seen:
+                    sub.setdefault(sp, []).append(text)
+            self._sub[cid] = sub
+        return self._sub[cid]
+
+    def conflicts(self, campaign_id, ntokens, match, limit=3):
+        """Textos de palabras clave activas de esa campaña que la negativa (tokens, concordancia) bloquearía."""
+        cid, tup = str(campaign_id), tuple(ntokens)
+        if match == "EXACT":
+            text = self._full.get(cid, {}).get(tup)
+            return [text] if text else []
+        return self._subphrases(cid).get(tup, [])[:limit]
+
+    def has_exact(self, campaign_id, tokens):
+        return tuple(tokens) in self._full.get(str(campaign_id), {})
+
+
 def as_existing(existing_negatives):
     if isinstance(existing_negatives, ExistingNegatives):
         return existing_negatives
@@ -335,7 +406,7 @@ def _as_int(v):
         return None
 
 
-def build_result(ai, all_terms, chosen, ctx, existing_negatives):
+def build_result(ai, all_terms, chosen, ctx, existing_negatives, positives=None):
     """Convierte lo que dijo la IA en el resultado final validado.
 
     ai: dict ya parseado {"temas": [...], "mantener": [...], "revisar": [...]}.
@@ -353,16 +424,21 @@ def build_result(ai, all_terms, chosen, ctx, existing_negatives):
         # `pmax`: en Performance Max las negativas de frase no están probadas; la pantalla lo avisa.
         return {"id": cid, "name": name, "pmax": cid in pmax_ids}
 
+    brand_words = {w for p in marca for w in p if len(w) >= 4}
+
     def has_brand(t):
         return any(_contains_phrase(t["tokens"], p) for p in marca)
 
     def selectable_view(t):
         """Un término que la persona puede marcar para negativizar (en "revisar" o en "dejar"): se manda la
         clave, si lleva la marca (para avisar) y las campañas donde aún no existe esa negativa exacta."""
+        free = {cid: name for cid, name in t["campaigns"].items()
+                if not _existing_covers(existing, t["tokens"], "EXACT", cid)}
         return {
             **_term_view(t), "key": t["key"], "es_marca": has_brand(t),
-            "campanias": [camp(cid, name) for cid, name in t["campaigns"].items()
-                          if not _existing_covers(existing, t["tokens"], "EXACT", cid)],
+            "campanias": [camp(cid, name) for cid, name in free.items()],
+            # Una negativa exacta de este término bloquearía una palabra clave tuya idéntica.
+            "kw_conflicto": bool(positives) and any(positives.has_exact(cid, t["tokens"]) for cid in free),
         }
 
     # 1) Un término, un solo grupo: lo que diga la IA, con las reglas duras encima.
@@ -462,6 +538,8 @@ def build_result(ai, all_terms, chosen, ctx, existing_negatives):
                     choques.append({"term": t["term"], "motivo": "convierte", "cost": round(t["cost"], 2), "conversions": round(t["conversions"], 2)})
                 elif has_brand(t):
                     choques.append({"term": t["term"], "motivo": "marca", "cost": round(t["cost"], 2), "conversions": 0})
+                elif _brand_lookalike(t["tokens"], brand_words):
+                    choques.append({"term": t["term"], "motivo": "parecida", "cost": round(t["cost"], 2), "conversions": 0})
                 elif t["key"] in own_keys:
                     continue
                 elif bucket_by_key.get(t["key"], ("",))[0] == "keep":
@@ -475,6 +553,14 @@ def build_result(ai, all_terms, chosen, ctx, existing_negatives):
                     if not _existing_covers(existing, ntoks, MATCH_LABEL[match], cid):
                         campaigns[cid] = cname
             ya_existe = bool(blocked) and not campaigns and any(t["campaigns"] for t in blocked)
+            # Choque con tus palabras clave activas en las campañas donde se subiría: es el error más caro.
+            kw_conf = []
+            if positives:
+                for cid, cname in campaigns.items():
+                    for kw in positives.conflicts(cid, ntoks, match):
+                        kw_conf.append({"keyword": kw, "campaign": cname})
+            if kw_conf:
+                risk = "alto"
             negativas.append({
                 "id": f"n{i}_{j}", "texto": text, "concordancia": match,
                 "bloquea": _round_metrics(metrics),
@@ -483,6 +569,7 @@ def build_result(ai, all_terms, chosen, ctx, existing_negatives):
                 "bloqueados": [[t["key"], round(t["cost"], 2), round(t["conversions"], 2)]
                                for t in sorted(blocked, key=lambda x: -x["cost"])[:400]],
                 "choques": choques[:8], "choques_total": len(choques), "riesgo": risk,
+                "conflictos_kw": kw_conf[:5], "conflictos_kw_total": len(kw_conf),
                 "extra": {"terminos": len(extra), "costo": round(sum(t["cost"] for t in extra), 2),
                           "ejemplos": [t["term"] for t in sorted(extra, key=lambda x: -x["cost"])[:5]]},
                 "campanias": [camp(cid, name) for cid, name in campaigns.items()],
@@ -498,7 +585,8 @@ def build_result(ai, all_terms, chosen, ctx, existing_negatives):
                      if not _existing_covers(existing, t["tokens"], "EXACT", cid)}
             if camps:
                 exactas.append({"term": t["term"], "key": t["key"], "cost": round(t["cost"], 2), "clicks": t["clicks"],
-                                "campanias": [camp(cid, name) for cid, name in camps.items()]})
+                                "campanias": [camp(cid, name) for cid, name in camps.items()],
+                                "kw_conflicto": bool(positives) and any(positives.has_exact(cid, t["tokens"]) for cid in camps)})
         own_metrics = _empty_metrics()
         for t in own:
             _add_metrics(own_metrics, t)
@@ -553,4 +641,109 @@ def build_result(ai, all_terms, chosen, ctx, existing_negatives):
             "negativizar": _round_metrics(total_neg), "mantener": _round_metrics(total_keep), "revisar": _round_metrics(total_review),
         },
         "temas": temas_out, "mantener": keep_out, "revisar": review_out, "avisos": avisos,
+        "palabras_clave_activas": positives.count if positives else None,
+    }
+
+
+def ngram_report(all_terms, ctx, existing, positives=None, limit=150, min_terms=2):
+    """Palabras y frases cortas (de 1 a 3 palabras) que se repiten en varios términos de búsqueda, gastan y NO
+    han convertido nunca — sin IA, instantáneo y gratis. Sirve para ver patrones en toda la cola larga, no solo
+    en los 300 términos que ve la IA. Devuelve un resultado con la misma forma que el de la IA (un solo "tema" con
+    sus negativas de frase), para reutilizar la pantalla, la validación de riesgo y la subida.
+
+    Se descartan: palabras genéricas de hotel, la marca y el destino, y lo que aparece en un solo término. Si dos
+    candidatas bloquean exactamente los mismos términos, se deja la más corta."""
+    existing = as_existing(existing)
+    marca = _phrases(split_lines(ctx.get("marca")))
+    destino = _phrases(split_lines(ctx.get("destino")))
+    protegidas = marca + destino
+    pmax_ids = {cid for t in all_terms for cid in t.get("pmax_campaigns", ())}
+    protected_words = {w for p in protegidas for w in p}
+    brand_words = {w for p in marca for w in p if len(w) >= 4}
+
+    def has_brand(t):
+        return any(_contains_phrase(t["tokens"], p) for p in marca)
+
+    index = {}
+    for ti, t in enumerate(all_terms):
+        toks, seen = t["tokens"], set()
+        for size in (1, 2, 3):
+            for i in range(len(toks) - size + 1):
+                g = tuple(toks[i:i + size])
+                if g not in seen:
+                    seen.add(g)
+                    index.setdefault(g, []).append(ti)
+
+    candidates = []
+    for g, tis in index.items():
+        if len(tis) < min_terms:
+            continue
+        if all(w in GENERIC_WORDS for w in g) or (len(g) == 1 and (len(g[0]) < 3 or g[0].isdigit())):
+            continue
+        if any(list(g) == p for p in protegidas) or any(_contains_phrase(list(g), p) for p in marca):
+            continue
+        # Lo que queda al quitar las palabras genéricas no puede ser solo marca o destino: "hotel cartagena" es la
+        # búsqueda principal, no una negativa.
+        core = [w for w in g if w not in GENERIC_WORDS]
+        if all(w in protected_words for w in core):
+            continue
+        terms = [all_terms[i] for i in tis]
+        if sum(t["conversions"] for t in terms) > 0 or sum(t["cost"] for t in terms) <= 0:
+            continue
+        candidates.append((g, tuple(tis), terms))
+
+    # Si dos candidatas bloquean exactamente los mismos términos, se deja la más corta.
+    best = {}
+    for g, key, terms in candidates:
+        cur = best.get(key)
+        if cur is None or (len(g), g) < (len(cur[0]), cur[0]):
+            best[key] = (g, key, terms)
+    ranked = sorted(best.values(), key=lambda c: -sum(t["cost"] for t in c[2]))[:limit]
+
+    negativas, union = [], {}
+    for k, (g, _, terms) in enumerate(ranked):
+        metrics = _empty_metrics()
+        for t in terms:
+            _add_metrics(metrics, t)
+            union[t["key"]] = t
+        brand_hits = [t for t in terms if has_brand(t)]
+        choques = [{"term": t["term"], "motivo": "marca", "cost": round(t["cost"], 2), "conversions": 0} for t in brand_hits]
+        brand_keys = {t["key"] for t in brand_hits}
+        choques += [{"term": t["term"], "motivo": "parecida", "cost": round(t["cost"], 2), "conversions": 0}
+                    for t in terms if t["key"] not in brand_keys and _brand_lookalike(t["tokens"], brand_words)]
+        campaigns = {}
+        for t in terms:
+            for cid, cname in t["campaigns"].items():
+                if not existing.has_same(cid, list(g), "PHRASE"):
+                    campaigns[cid] = cname
+        kw_conf = []
+        if positives:
+            for cid, cname in campaigns.items():
+                for kw in positives.conflicts(cid, list(g), "PHRASE"):
+                    kw_conf.append({"keyword": kw, "campaign": cname})
+        risk = "alto" if (any(c["motivo"] == "marca" for c in choques) or kw_conf) else ("medio" if choques else "bajo")
+        negativas.append({
+            "id": f"p_{k}", "texto": " ".join(g), "concordancia": "FRASE",
+            "bloquea": _round_metrics(metrics),
+            "bloqueados": [[t["key"], round(t["cost"], 2), round(t["conversions"], 2)] for t in sorted(terms, key=lambda x: -x["cost"])[:400]],
+            "choques": choques[:8], "choques_total": len(choques), "riesgo": risk,
+            "conflictos_kw": kw_conf[:5], "conflictos_kw_total": len(kw_conf),
+            "extra": {"terminos": 0, "costo": 0, "ejemplos": []},
+            "ejemplos": [t["term"] for t in sorted(terms, key=lambda x: -x["cost"])[:4]],
+            "campanias": [{"id": cid, "name": name, "pmax": cid in pmax_ids} for cid, name in campaigns.items()],
+            "ya_existe": bool(terms) and not campaigns,
+        })
+    total = _empty_metrics()
+    for t in union.values():
+        _add_metrics(total, t)
+    tema = {
+        "id": "palabras", "tema": "Palabras que más gastan sin convertir",
+        "razon": "Palabras o frases cortas que aparecen en varios términos de búsqueda, suman gasto y nunca han convertido. "
+                 "Mira los ejemplos de cada una: una palabra puede cortar también búsquedas buenas que aún no han tenido conversiones.",
+        "negativas": negativas, "exactas": [], "terminos": [], "total": _round_metrics(total),
+    }
+    return {
+        "resumen": {"terminos_total": len(all_terms), "candidatas": len(negativas)},
+        "temas": [tema] if negativas else [], "mantener": [], "revisar": [], "avisos": [],
+        "palabras_clave_activas": positives.count if positives else None,
     }
