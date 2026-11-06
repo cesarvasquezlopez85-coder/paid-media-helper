@@ -85,6 +85,7 @@ const state = {
     previous: { status: 'idle', error: null, fileName: null, rows: null },
     campaignFilter: 'all',
     campaignTypeFilter: 'all',
+    hotelFilter: 'all',
     brandKeywords: 'marca, brand, branded, brnd',
     source: 'file', // 'file' | 'api'
     api: {
@@ -1687,6 +1688,7 @@ function runCompareAnalysis(which, text, fileName) {
   try {
     const brandKeywords = state.compare.brandKeywords.split(',').map((v) => v.trim()).filter(Boolean);
     const rowsRaw = engine.loadCampaignReport(text, brandKeywords);
+    rowsRaw.forEach((r) => { r.hotel = deriveHotelName(r.campaign); });
     const rows = engine.computeMetrics(rowsRaw);
     Object.assign(slot, { status: 'ready', error: null, rows, fileName });
   } catch (err) {
@@ -1694,6 +1696,7 @@ function runCompareAnalysis(which, text, fileName) {
   }
   state.compare.campaignFilter = 'all';
   state.compare.campaignTypeFilter = 'all';
+  state.compare.hotelFilter = 'all';
   render();
 }
 
@@ -1705,7 +1708,14 @@ function runCompareAnalysisFromApiRows(which, apiRows, fileName) {
     // Con varias cuentas, el nombre de la cuenta va delante: dos hoteles pueden tener una campaña con el mismo
     // nombre y la comparación empareja por nombre. Se pone DESPUÉS de clasificar la campaña, para que una palabra
     // como "marca" en el nombre del hotel no convierta todas sus campañas en de marca.
-    rowsRaw.forEach((r, i) => { if (apiRows[i] && apiRows[i]._account) r.campaign = `${apiRows[i]._account} › ${r.campaign}`; });
+    // `hotel`: con varias cuentas, el nombre de la cuenta; con una sola o con archivo, lo que hay antes del primer " - "
+    // del nombre de la campaña (igual que Oportunidad de ingresos).
+    rowsRaw.forEach((r, i) => {
+      const acct = apiRows[i] && apiRows[i]._account;
+      r.hotel = acct || deriveHotelName(r.campaign);
+      r.hotel_is_account = !!acct;
+      if (acct) r.campaign = `${acct} › ${r.campaign}`;
+    });
     const rows = engine.computeMetrics(rowsRaw);
     Object.assign(slot, { status: 'ready', error: null, rows, fileName });
   } catch (err) {
@@ -1713,10 +1723,16 @@ function runCompareAnalysisFromApiRows(which, apiRows, fileName) {
   }
 }
 
-function getCompareFilteredRows() {
+// ignoreHotel=true: lo que alimenta el resumen por hotel, que debe seguir mostrando a todos los hoteles aunque se
+// haya elegido ver solo uno en el resto de la página.
+function getCompareFilteredRows(ignoreHotel = false) {
   const s = state.compare;
   let currentRows = s.current.rows || [];
   let previousRows = s.previous.rows || [];
+  if (!ignoreHotel && s.hotelFilter !== 'all') {
+    currentRows = currentRows.filter((r) => r.hotel === s.hotelFilter);
+    previousRows = previousRows.filter((r) => r.hotel === s.hotelFilter);
+  }
   if (s.campaignFilter !== 'all') {
     currentRows = currentRows.filter((r) => r.campaign === s.campaignFilter);
     previousRows = previousRows.filter((r) => r.campaign === s.campaignFilter);
@@ -1853,6 +1869,7 @@ function fetchCompareGoogleAdsCampaigns() {
       : null;
     state.compare.campaignFilter = 'all';
     state.compare.campaignTypeFilter = 'all';
+    state.compare.hotelFilter = 'all';
     render();
   }).catch((err) => {
     a.error = err.message || String(err);
@@ -2049,6 +2066,56 @@ function deltaBadge(pct, mode) {
   return `<span class="delta-badge ${cls}">${arrow} ${Math.abs(pct * 100).toFixed(0)}%</span>`;
 }
 
+// Resumen por hotel de los dos periodos: gasto, conversiones, CPA y ROAS de cada uno con su variación y su peso en
+// el gasto total. Solo con varias cuentas de Google Ads, donde cada hotel es una cuenta sin ambigüedad. Con una sola
+// cuenta o con archivos NO se muestra: el hotel solo se podría deducir del nombre de la campaña, y en la prueba con
+// el archivo de ejemplo eso daba "Search", "Performance Max" y "Display", que son tipos de campaña y no hoteles.
+function renderCompareHotelSummary() {
+  const { currentRows, previousRows } = getCompareFilteredRows(true);
+  const all = [...currentRows, ...previousRows];
+  const hotels = [...new Set(all.map((r) => r.hotel))];
+  const byAccount = all.some((r) => r.hotel_is_account);
+  if (!byAccount || hotels.length < 2) return '';
+
+  const groups = hotels.map((h) => {
+    const cur = currentRows.filter((r) => r.hotel === h);
+    const prev = previousRows.filter((r) => r.hotel === h);
+    const cs = engine.summarize(cur); const ps = engine.summarize(prev);
+    return { hotel: h, cur, prev, cs, ps, d: engine.compareSummaries(cs, ps), campaigns: new Set(cur.map((r) => r.campaign)).size };
+  }).sort((x, y) => y.cs.total_cost - x.cs.total_cost);
+  const total = engine.summarize(currentRows); const totalPrev = engine.summarize(previousRows);
+  const totalD = engine.compareSummaries(total, totalPrev);
+  const roasText = (sm) => (sm.roas != null ? `${(sm.roas * 100).toFixed(0)}%` : 'N/D');
+  const cpaText = (sm) => (sm.avg_cpa_weighted != null ? fmtMoney(sm.avg_cpa_weighted) : 'N/D');
+  const share = (sm) => (total.total_cost > 0 ? `${((sm.total_cost / total.total_cost) * 100).toFixed(0)}% del gasto` : '');
+
+  const rows = groups.map((g) => {
+    const onlyPrev = !g.cur.length;
+    const isNew = !g.prev.length;
+    return `
+      <tr>
+        <td><strong>${escapeHtml(g.hotel)}</strong>${isNew ? ' <span class="delta-badge neutral">nuevo</span>' : ''}${onlyPrev ? ' <span class="delta-badge neutral">sin datos en el periodo actual</span>' : ''}<div class="footnote">${g.campaigns} campaña${g.campaigns === 1 ? '' : 's'}</div></td>
+        <td>${fmtMoney(g.cs.total_cost)} ${deltaBadge(g.d.delta_cost, 'neutral')}<div class="footnote">${share(g.cs)}</div></td>
+        <td>${fmtInt(g.cs.total_conversions)} ${deltaBadge(g.d.delta_conversions, 'good_up')}</td>
+        <td>${cpaText(g.cs)} ${deltaBadge(g.d.delta_cpa, 'good_down')}</td>
+        <td>${roasText(g.cs)} ${deltaBadge(g.d.delta_roas, 'good_up')}</td>
+      </tr>`;
+  }).join('');
+  return `
+    <div class="card chart-card" style="margin-top:16px">
+      <h3 class="dense-chart-title">Resumen por hotel (${hotels.length})</h3>
+      <div style="overflow-x:auto">
+        <table>
+          <thead><tr><th>Hotel</th><th>Gasto</th><th>Conversiones</th><th>CPA</th><th>ROAS</th></tr></thead>
+          <tbody>${rows}
+            <tr style="font-weight:600"><td>Total</td><td>${fmtMoney(total.total_cost)} ${deltaBadge(totalD.delta_cost, 'neutral')}</td><td>${fmtInt(total.total_conversions)} ${deltaBadge(totalD.delta_conversions, 'good_up')}</td><td>${cpaText(total)} ${deltaBadge(totalD.delta_cpa, 'good_down')}</td><td>${roasText(total)} ${deltaBadge(totalD.delta_roas, 'good_up')}</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="footnote" style="margin-top:10px">Cifras del periodo actual; las flechas comparan con el periodo anterior. Cada hotel es una de las cuentas elegidas.</p>
+    </div>`;
+}
+
 function renderComparePage() {
   const c = state.compare;
   return withMoneyCurrency(c.source === 'api' ? c.api.currency : null, renderComparePageBody);
@@ -2104,8 +2171,18 @@ function renderComparePageBody() {
 
   const allCampaignNames = [...new Set([...s.current.rows.map((r) => r.campaign), ...s.previous.rows.map((r) => r.campaign)])].sort((a, b) => a.localeCompare(b));
   const allCampaignTypes = [...new Set([...s.current.rows.map((r) => r.campaign_type), ...s.previous.rows.map((r) => r.campaign_type)])].filter(Boolean);
+  const allHotels = [...new Set([...s.current.rows, ...s.previous.rows].map((r) => r.hotel).filter(Boolean))].sort((x, y) => x.localeCompare(y));
+  const showHotelFilter = allHotels.length > 1 && renderCompareHotelSummary() !== '';
   const campaignFilterHtml = `
     <div class="card control-panel align-end">
+      ${showHotelFilter ? `
+      <div class="field">
+        <label>Ver solo este hotel</label>
+        <select id="compare-hotel-filter" style="width:260px">
+          <option value="all" ${s.hotelFilter === 'all' ? 'selected' : ''}>Todos los hoteles</option>
+          ${allHotels.map((h) => `<option value="${escapeHtml(h)}" ${s.hotelFilter === h ? 'selected' : ''}>${escapeHtml(h)}</option>`).join('')}
+        </select>
+      </div>` : ''}
       <div class="field">
         <label>Ver solo esta campaña</label>
         <select id="compare-campaign-filter" style="width:280px">
@@ -2218,7 +2295,8 @@ function renderComparePageBody() {
     ${uploadPanel}
     ${campaignFilterHtml}
     ${statGrid}
-    <div>
+    ${renderCompareHotelSummary()}
+    <div style="margin-top:16px">
       <h2 class="section-title">Recomendaciones por tendencia (${trendRecs.length})</h2>
       ${recsHtml}
     </div>
@@ -11830,6 +11908,12 @@ function bindEvents() {
     render();
     readFileAsCsvText(file).then((text) => runCompareAnalysis('previous', text, file.name))
       .catch((err) => { state.compare.previous.status = 'error'; state.compare.previous.error = err.message || String(err); render(); });
+  });
+  const compareHotelFilter = document.getElementById('compare-hotel-filter');
+  if (compareHotelFilter) compareHotelFilter.addEventListener('change', (e) => {
+    state.compare.hotelFilter = e.target.value;
+    state.compare.campaignFilter = 'all'; // la campaña elegida puede ser de otro hotel
+    render();
   });
   const compareCampaignFilter = document.getElementById('compare-campaign-filter');
   if (compareCampaignFilter) compareCampaignFilter.addEventListener('change', (e) => {
