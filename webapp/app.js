@@ -93,6 +93,8 @@ const state = {
       current: { dateFrom: '', dateTo: '' },
       previous: { dateFrom: '', dateTo: '' },
       onlyActive: false,
+      accountIds: [], accountSearch: '', // varias cuentas (hoteles) para un total combinado
+      partial: [], combinedNote: null,   // cuentas que fallaron y descripción del total mostrado
       simulated: false, error: null,
       mcc: {
         status: 'idle', groups: [], filter: '',
@@ -1683,6 +1685,10 @@ function runCompareAnalysisFromApiRows(which, apiRows, fileName) {
   try {
     const brandKeywords = state.compare.brandKeywords.split(',').map((v) => v.trim()).filter(Boolean);
     const rowsRaw = engine.loadCampaignReportFromApi(apiRows, brandKeywords);
+    // Con varias cuentas, el nombre de la cuenta va delante: dos hoteles pueden tener una campaña con el mismo
+    // nombre y la comparación empareja por nombre. Se pone DESPUÉS de clasificar la campaña, para que una palabra
+    // como "marca" en el nombre del hotel no convierta todas sus campañas en de marca.
+    rowsRaw.forEach((r, i) => { if (apiRows[i] && apiRows[i]._account) r.campaign = `${apiRows[i]._account} › ${r.campaign}`; });
     const rows = engine.computeMetrics(rowsRaw);
     Object.assign(slot, { status: 'ready', error: null, rows, fileName });
   } catch (err) {
@@ -1760,47 +1766,82 @@ function loadCompareGoogleAdsAccounts() {
     });
 }
 
+function compareSelectedCustomerIds() {
+  const a = state.compare.api;
+  const manual = (a.accountIdManual || '').replace(/[^0-9]/g, '');
+  return [...new Set([...a.accountIds, ...(manual ? [manual] : [])])];
+}
+
+// Trae los dos periodos de una o varias cuentas. Con varias, junta las campañas de todas en un solo conjunto
+// (el total combinado) — solo si comparten moneda — y deja fuera las cuentas que fallen en cualquiera de los dos.
 function fetchCompareGoogleAdsCampaigns() {
   const a = state.compare.api;
-  const manualId = (a.accountIdManual || '').replace(/[^0-9]/g, '');
-  const customerId = manualId || a.accountId;
-  if (!customerId && !a.simulated) { a.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
+  const ids = compareSelectedCustomerIds();
+  if (!ids.length && !a.simulated) { a.error = 'Marca al menos una cuenta o escribe su ID primero.'; render(); return; }
+  if (ids.length > OPP_MAX_ACCOUNTS) { a.error = `Elige como máximo ${OPP_MAX_ACCOUNTS} cuentas por comparación (marcaste ${ids.length}).`; render(); return; }
   if (!a.current.dateFrom || !a.current.dateTo || !a.previous.dateFrom || !a.previous.dateTo) {
     a.error = 'Elige el rango de fechas de ambos periodos.'; render(); return;
   }
 
-  a.error = null;
+  a.error = null; a.partial = []; a.combinedNote = null;
   state.compare.current.status = 'loading'; state.compare.current.error = null;
   state.compare.previous.status = 'loading'; state.compare.previous.error = null;
   render();
 
-  const fetchPeriod = (dateFrom, dateTo) => {
-    const params = new URLSearchParams({ customer_id: customerId || '', date_from: dateFrom, date_to: dateTo, only_active: a.onlyActive ? '1' : '0' });
-    return fetch(`/api/google-ads/campaigns?${params.toString()}`).then((r) => r.json().then((data) => ({ ok: r.ok, data })));
+  const targets = ids.length ? ids : [''];
+  const accountName = (id) => { const acc = a.accounts.find((x) => x.id === id); return acc ? acc.name : id; };
+  const fetchPeriod = (id, dateFrom, dateTo) => {
+    const params = new URLSearchParams({ customer_id: id, date_from: dateFrom, date_to: dateTo, only_active: a.onlyActive ? '1' : '0' });
+    return fetch(`/api/google-ads/campaigns?${params.toString()}`)
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => { if (!ok) throw new Error(data.error || 'Error desconocido.'); return data; });
   };
 
-  Promise.all([
-    fetchPeriod(a.current.dateFrom, a.current.dateTo),
-    fetchPeriod(a.previous.dateFrom, a.previous.dateTo),
+  oppMapPool(targets, 4, (id) => Promise.all([
+    fetchPeriod(id, a.current.dateFrom, a.current.dateTo),
+    fetchPeriod(id, a.previous.dateFrom, a.previous.dateTo),
   ])
-    .then(([curResp, prevResp]) => {
-      if (!curResp.ok) throw new Error('Periodo actual: ' + (curResp.data.error || 'Error desconocido.'));
-      if (!prevResp.ok) throw new Error('Periodo anterior: ' + (prevResp.data.error || 'Error desconocido.'));
-      a.simulated = !!curResp.data.simulated || !!prevResp.data.simulated;
-      const account = a.accounts.find((acc) => acc.id === customerId);
-      const accountLabel = a.simulated ? 'Google Ads (simulado)' : `Google Ads — ${account ? account.name : customerId}`;
-      runCompareAnalysisFromApiRows('current', curResp.data.rows || [], `${accountLabel} — ${a.current.dateFrom} a ${a.current.dateTo}`);
-      runCompareAnalysisFromApiRows('previous', prevResp.data.rows || [], `${accountLabel} — ${a.previous.dateFrom} a ${a.previous.dateTo}`);
-      state.compare.campaignFilter = 'all';
-      state.compare.campaignTypeFilter = 'all';
-      render();
-    })
-    .catch((err) => {
-      a.error = err.message || String(err);
-      state.compare.current.status = 'idle';
-      state.compare.previous.status = 'idle';
-      render();
-    });
+    .then(([cur, prev]) => ({ id, cur: cur.rows || [], prev: prev.rows || [], currency: cur.currency || prev.currency || '', simulated: !!cur.simulated || !!prev.simulated }))
+    .catch((err) => ({ id, error: err.message || String(err) }))
+  ).then((results) => {
+    const good = results.filter((r) => !r.error);
+    const bad = results.filter((r) => r.error);
+    if (!good.length) throw new Error(bad[0].error + (bad.length > 1 ? ` (y ${bad.length - 1} cuentas más con error)` : ''));
+    // Un total combinado mezcla las cifras de todas las cuentas: no tiene sentido sumar euros con pesos.
+    const byCurrency = new Map();
+    good.forEach((r) => { if (r.currency) byCurrency.set(r.currency, [...(byCurrency.get(r.currency) || []), accountName(r.id)]); });
+    if (byCurrency.size > 1) {
+      const detail = [...byCurrency.entries()].map(([cur, names]) => `${cur}: ${names.slice(0, 3).join(', ')}${names.length > 3 ? '…' : ''}`).join(' · ');
+      throw new Error(`Las cuentas elegidas usan monedas distintas (${detail}). Un total combinado mezclaría monedas: elige cuentas con la misma.`);
+    }
+    a.simulated = good.some((r) => r.simulated);
+    a.partial = bad.map((r) => `${accountName(r.id)}: ${r.error}`);
+    const multi = good.length > 1;
+    // Si dos cuentas se llaman igual, el id las distingue.
+    const names = good.map((r) => accountName(r.id));
+    const label = (r, i) => (names.filter((n) => n === names[i]).length > 1 ? `${names[i]} (${r.id})` : names[i]);
+    const tag = (rows, r, i) => (multi ? rows.map((row) => ({ ...row, _account: label(r, i) })) : rows);
+    const curRows = good.flatMap((r, i) => tag(r.cur, r, i));
+    const prevRows = good.flatMap((r, i) => tag(r.prev, r, i));
+    const currency = byCurrency.size ? [...byCurrency.keys()][0] : '';
+    let who;
+    if (a.simulated) who = 'Google Ads (simulado)';
+    else if (!multi) who = `Google Ads — ${names[0]}`;
+    else who = `Google Ads — ${good.length} cuentas (${names.slice(0, 3).join(', ')}${good.length > 3 ? '…' : ''})`;
+    runCompareAnalysisFromApiRows('current', curRows, `${who} — ${a.current.dateFrom} a ${a.current.dateTo}`);
+    runCompareAnalysisFromApiRows('previous', prevRows, `${who} — ${a.previous.dateFrom} a ${a.previous.dateTo}`);
+    a.combinedNote = multi
+      ? `Total combinado de ${good.length} cuentas (${names.join(', ')})${currency ? `, todas en ${currency}` : ''}. Cada campaña lleva delante el nombre de su hotel.`
+      : null;
+    state.compare.campaignFilter = 'all';
+    state.compare.campaignTypeFilter = 'all';
+    render();
+  }).catch((err) => {
+    a.error = err.message || String(err);
+    state.compare.current.status = 'idle';
+    state.compare.previous.status = 'idle';
+    render();
+  });
 }
 
 function loadCompareMccGroups() {
@@ -1925,16 +1966,27 @@ function renderCompareApiPanel() {
 
   const mccFilterActive = a.mcc.selectedId && a.mcc.accountIds;
   const visibleAccounts = mccFilterActive ? a.accounts.filter((acc) => a.mcc.accountIds.has(acc.id)) : a.accounts;
-  const accountOptions = ['<option value="">Elige una cuenta…</option>']
-    .concat(visibleAccounts.map((acc) => `<option value="${escapeHtml(acc.id)}" ${a.accountId === acc.id ? 'selected' : ''}>${escapeHtml(acc.name)} (${escapeHtml(acc.id)})</option>`))
-    .join('');
+  const q = (a.accountSearch || '').trim().toLowerCase();
+  const matches = q ? visibleAccounts.filter((acc) => `${acc.name} ${acc.id}`.toLowerCase().includes(q)) : visibleAccounts;
+  const shown = matches.slice(0, 150);
+  const selected = new Set(a.accountIds);
+  const canMarkAll = matches.length > 0 && matches.length <= OPP_MAX_ACCOUNTS;
+  const accountList = shown.length
+    ? shown.map((acc) => `<label style="display:flex;align-items:center;gap:8px;font-weight:400;padding:3px 0;cursor:pointer"><input type="checkbox" data-cmp-acct="${escapeHtml(acc.id)}" ${selected.has(acc.id) ? 'checked' : ''} /><span>${escapeHtml(acc.name)} <span style="opacity:.6">(${escapeHtml(acc.id)})</span></span></label>`).join('')
+    : '<p class="footnote" style="margin:6px 0">Ninguna cuenta coincide.</p>';
 
   return `
     ${simulatedNotice}
     ${renderCompareMccFilterPanel()}
-    <div class="field">
-      <label>Cuenta${mccFilterActive ? ` (${visibleAccounts.length} en "${escapeHtml(a.mcc.selectedName)}")` : ''}</label>
-      <select id="compare-api-account" style="width:320px">${accountOptions}</select>
+    <div class="field" style="min-width:380px">
+      <label>Cuentas (hoteles) a comparar juntas${mccFilterActive ? ` (${visibleAccounts.length} en "${escapeHtml(a.mcc.selectedName)}")` : ''}</label>
+      <input type="text" id="compare-api-account-search" placeholder="Buscar por nombre o ID…" value="${escapeHtml(a.accountSearch || '')}" style="width:380px" />
+      <div style="width:380px;max-height:230px;overflow:auto;border:1px solid var(--gray-200);border-radius:8px;padding:6px 12px;margin-top:6px;background:var(--white)">${accountList}</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px">
+        <button class="btn-outline xs" data-action="cmp-acct-all" ${canMarkAll ? '' : 'disabled'} title="${canMarkAll ? '' : `Se pueden marcar todas solo cuando hay ${OPP_MAX_ACCOUNTS} o menos a la vista`}">Marcar las ${matches.length} a la vista</button>
+        <button class="btn-outline xs" data-action="cmp-acct-none" ${a.accountIds.length ? '' : 'disabled'}>Quitar marcas</button>
+        <span class="footnote">${a.accountIds.length} marcada${a.accountIds.length === 1 ? '' : 's'} · máximo ${OPP_MAX_ACCOUNTS} · con varias se muestra el total combinado (deben compartir moneda)${matches.length > shown.length ? ` · mostrando ${shown.length} de ${matches.length}, afina la búsqueda` : ''}</span>
+      </div>
     </div>
     <div class="field">
       <label>...o escribe el ID de la cuenta</label>
@@ -1962,6 +2014,8 @@ function renderCompareApiPanel() {
     </div>
     <button class="btn-accent" data-action="compare-api-fetch">Traer ambos periodos de Google Ads</button>
     ${a.error ? `<div class="error-panel" style="margin-top:10px"><strong>No se pudo traer el reporte.</strong> ${escapeHtml(a.error)}</div>` : ''}
+    ${a.combinedNote ? `<div class="ok-panel" style="margin-top:10px">${escapeHtml(a.combinedNote)}</div>` : ''}
+    ${a.partial && a.partial.length ? `<div class="error-panel" style="margin-top:10px"><strong>${a.partial.length === 1 ? 'Una cuenta no se pudo traer y quedó fuera de la comparación:' : `${a.partial.length} cuentas no se pudieron traer y quedaron fuera de la comparación:`}</strong><ul style="margin:6px 0 0 18px">${a.partial.map((p) => `<li>${escapeHtml(p)}</li>`).join('')}</ul></div>` : ''}
   `;
 }
 
@@ -11718,8 +11772,16 @@ function bindEvents() {
   const compareBrandInput = document.getElementById('compare-brand-keywords');
   if (compareBrandInput) compareBrandInput.addEventListener('input', (e) => { state.compare.brandKeywords = e.target.value; });
 
-  const compareApiAccount = document.getElementById('compare-api-account');
-  if (compareApiAccount) compareApiAccount.addEventListener('change', (e) => { state.compare.api.accountId = e.target.value; });
+  const compareAcctSearch = document.getElementById('compare-api-account-search');
+  if (compareAcctSearch) compareAcctSearch.addEventListener('input', (e) => { state.compare.api.accountSearch = e.target.value; render(); hotelRefocus('compare-api-account-search'); });
+  document.querySelectorAll('[data-cmp-acct]').forEach((box) => {
+    box.addEventListener('change', (e) => {
+      const api = state.compare.api;
+      const id = e.target.dataset.cmpAcct;
+      api.accountIds = e.target.checked ? [...new Set([...api.accountIds, id])] : api.accountIds.filter((x) => x !== id);
+      render();
+    });
+  });
   const compareApiAccountManual = document.getElementById('compare-api-account-manual');
   if (compareApiAccountManual) compareApiAccountManual.addEventListener('input', (e) => { state.compare.api.accountIdManual = e.target.value; });
   const compareMccFilter = document.getElementById('compare-mcc-filter');
@@ -12615,6 +12677,17 @@ function handleAction(action) {
       break;
     }
     case 'opp-acct-none': state.opportunity.api.accountIds = []; render(); break;
+    case 'cmp-acct-all': {
+      const api = state.compare.api;
+      const mccOn = api.mcc.selectedId && api.mcc.accountIds;
+      const pool = mccOn ? api.accounts.filter((acc) => api.mcc.accountIds.has(acc.id)) : api.accounts;
+      const q = (api.accountSearch || '').trim().toLowerCase();
+      const vis = q ? pool.filter((acc) => `${acc.name} ${acc.id}`.toLowerCase().includes(q)) : pool;
+      if (vis.length && vis.length <= OPP_MAX_ACCOUNTS) api.accountIds = [...new Set([...api.accountIds, ...vis.map((acc) => acc.id)])].slice(0, OPP_MAX_ACCOUNTS);
+      render();
+      break;
+    }
+    case 'cmp-acct-none': state.compare.api.accountIds = []; render(); break;
     case 'opp-download': downloadOpportunityResult(); break;
     case 'opp-download-html': downloadOpportunityHtml(); break;
 

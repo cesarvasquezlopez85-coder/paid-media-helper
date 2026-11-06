@@ -251,6 +251,24 @@ def _micros_to_units(v):
     return None if v is None else v / MICROS
 
 
+_CURRENCY_CACHE = {}
+
+
+def fetch_customer_currency(customer_id):
+    """Moneda de la cuenta (código ISO, p. ej. EUR o COP), en caché. Devuelve "" si no se pudo leer: un total
+    combinado de varias cuentas solo es válido si comparten moneda."""
+    customer_id = str(customer_id)
+    if customer_id in _CURRENCY_CACHE:
+        return _CURRENCY_CACHE[customer_id]
+    try:
+        rows = _search(customer_id, "SELECT customer.currency_code FROM customer LIMIT 1")
+    except RuntimeError:
+        return ""
+    currency = (rows[0].get("customer", {}).get("currencyCode") if rows else "") or ""
+    _CURRENCY_CACHE[customer_id] = currency
+    return currency
+
+
 def fetch_campaign_rows(customer_id, date_from, date_to, only_active=False):
     """Reporte de campañas del rango de fechas, ya en el mismo formato de
     fila que consume engine.js → loadCampaignReportFromApi (ver ahí para el

@@ -1947,7 +1947,7 @@ class Handler(SimpleHTTPRequestHandler):
         date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
         if not google_ads_client.is_configured():
-            self._send_json(200, {"rows": google_ads_client.simulated_campaign_rows(only_active), "simulated": True})
+            self._send_json(200, {"rows": google_ads_client.simulated_campaign_rows(only_active), "simulated": True, "currency": "USD"})
             return
 
         if not customer_id.isdigit():
@@ -1967,7 +1967,8 @@ class Handler(SimpleHTTPRequestHandler):
 
         try:
             rows = google_ads_client.fetch_campaign_rows(customer_id, date_from, date_to, only_active)
-            self._send_json(200, {"rows": rows, "simulated": False})
+            # La moneda se manda para que la comparación de varias cuentas no mezcle euros con pesos.
+            self._send_json(200, {"rows": rows, "simulated": False, "currency": google_ads_client.fetch_customer_currency(customer_id)})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)
 
