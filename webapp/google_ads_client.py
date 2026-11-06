@@ -36,6 +36,7 @@ import calendar
 import datetime
 import json
 import os
+import re
 import time
 from collections import Counter
 import urllib.error
@@ -788,6 +789,729 @@ def fetch_account_campaigns(customer_id, only_active=True):
             "name": c.get("name") or "(sin nombre)",
         })
     return campaigns
+
+
+def fetch_campaigns_overview(customer_id, date_from, date_to):
+    """Todas las campañas de la cuenta (activas y pausadas, no las eliminadas) con sus métricas del rango, para
+    la sección Campañas. Son dos consultas a propósito: la lista sale de `campaign` sin fechas, para que una
+    campaña pausada o sin impresiones en el rango aparezca igual (si no, no se podría volver a activar), y las
+    métricas se cruzan por id."""
+    list_query = """
+        SELECT
+          campaign.id,
+          campaign.name,
+          campaign.status,
+          campaign.advertising_channel_type,
+          campaign.bidding_strategy_type,
+          campaign.target_roas.target_roas,
+          campaign.maximize_conversion_value.target_roas,
+          campaign.target_cpa.target_cpa_micros,
+          campaign.maximize_conversions.target_cpa_micros,
+          campaign_budget.amount_micros
+        FROM campaign
+        WHERE campaign.status != 'REMOVED'
+    """
+    metrics_query = f"""
+        SELECT
+          campaign.id,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros,
+          metrics.conversions,
+          metrics.conversions_value
+        FROM campaign
+        WHERE segments.date BETWEEN '{date_from}' AND '{date_to}'
+          AND campaign.status != 'REMOVED'
+    """
+    # Impression Share va en su propia consulta: pedirlo junto al resto de métricas hace que Google devuelva solo
+    # campañas Search (mismo motivo que en fetch_campaign_rows). Solo existe para Search; las demás quedan en None.
+    share_query = f"""
+        SELECT
+          campaign.id,
+          metrics.search_impression_share,
+          metrics.search_top_impression_share,
+          metrics.search_budget_lost_impression_share,
+          metrics.search_rank_lost_impression_share
+        FROM campaign
+        WHERE segments.date BETWEEN '{date_from}' AND '{date_to}'
+          AND campaign.status != 'REMOVED'
+    """
+    share_by_id = {}
+    for r in _search(customer_id, share_query):
+        m = r.get("metrics", {})
+        share_by_id[str(r.get("campaign", {}).get("id"))] = {
+            "impr_share": _float_or_none(m.get("searchImpressionShare")),
+            "top_impr_share": _float_or_none(m.get("searchTopImpressionShare")),
+            "lost_is_budget": _float_or_none(m.get("searchBudgetLostImpressionShare")),
+            "lost_is_rank": _float_or_none(m.get("searchRankLostImpressionShare")),
+        }
+    no_share = {"impr_share": None, "top_impr_share": None, "lost_is_budget": None, "lost_is_rank": None}
+    metrics_by_id = {}
+    for r in _search(customer_id, metrics_query):
+        m = r.get("metrics", {})
+        metrics_by_id[str(r.get("campaign", {}).get("id"))] = {
+            "impressions": _int_or_none(m.get("impressions")) or 0,
+            "clicks": _int_or_none(m.get("clicks")) or 0,
+            "cost": _micros_to_units(_int_or_none(m.get("costMicros"))) or 0.0,
+            "conversions": _float_or_none(m.get("conversions")) or 0.0,
+            "conv_value": _float_or_none(m.get("conversionsValue")) or 0.0,
+        }
+    empty = {"impressions": 0, "clicks": 0, "cost": 0.0, "conversions": 0.0, "conv_value": 0.0}
+    out = []
+    for r in _search(customer_id, list_query):
+        c = r.get("campaign", {})
+        cid = str(c.get("id"))
+        target_roas = c.get("targetRoas", {}).get("targetRoas")
+        if target_roas is None:
+            target_roas = c.get("maximizeConversionValue", {}).get("targetRoas")
+        target_cpa = c.get("targetCpa", {}).get("targetCpaMicros")
+        if target_cpa is None:
+            target_cpa = c.get("maximizeConversions", {}).get("targetCpaMicros")
+        row = {
+            "campaign_id": cid,
+            "campaign_name": c.get("name") or "(sin nombre)",
+            "status": c.get("status"),
+            "channel_type": c.get("advertisingChannelType") or "",
+            "bidding_strategy_type": c.get("biddingStrategyType") or "",
+            "target_roas": _float_or_none(target_roas),
+            "target_cpa": _micros_to_units(_int_or_none(target_cpa)),
+            "budget": _micros_to_units(_int_or_none(r.get("campaignBudget", {}).get("amountMicros"))),
+        }
+        row.update(metrics_by_id.get(cid, empty))
+        row.update(share_by_id.get(cid, no_share))
+        out.append(row)
+    return out
+
+
+def fetch_campaign_daily(customer_id, campaign_id, date_from, date_to):
+    """Serie día a día de una campaña, para las gráficas del detalle en Campañas. Dos consultas: las métricas
+    normales y las cuotas de impresiones, que van aparte porque pedirlas juntas deja fuera lo que no es Search
+    (mismo motivo que en fetch_campaign_rows). Los días sin datos no vienen de Google: el cliente los rellena."""
+    campaign_id = int(campaign_id)
+    metrics_query = f"""
+        SELECT
+          segments.date,
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros,
+          metrics.conversions,
+          metrics.conversions_value,
+          campaign_budget.amount_micros
+        FROM campaign
+        WHERE campaign.id = {campaign_id}
+          AND segments.date BETWEEN '{date_from}' AND '{date_to}'
+        ORDER BY segments.date
+    """
+    share_query = f"""
+        SELECT
+          segments.date,
+          metrics.search_impression_share,
+          metrics.search_top_impression_share,
+          metrics.search_budget_lost_impression_share,
+          metrics.search_rank_lost_impression_share
+        FROM campaign
+        WHERE campaign.id = {campaign_id}
+          AND segments.date BETWEEN '{date_from}' AND '{date_to}'
+        ORDER BY segments.date
+    """
+    days = {}
+    for r in _search(customer_id, metrics_query):
+        date = r.get("segments", {}).get("date")
+        if not date:
+            continue
+        m = r.get("metrics", {})
+        days[date] = {
+            "date": date,
+            "impressions": _int_or_none(m.get("impressions")) or 0,
+            "clicks": _int_or_none(m.get("clicks")) or 0,
+            "cost": _micros_to_units(_int_or_none(m.get("costMicros"))) or 0.0,
+            "conversions": _float_or_none(m.get("conversions")) or 0.0,
+            "conv_value": _float_or_none(m.get("conversionsValue")) or 0.0,
+            "budget": _micros_to_units(_int_or_none(r.get("campaignBudget", {}).get("amountMicros"))),
+        }
+    try:
+        share_rows = _search(customer_id, share_query)
+    except RuntimeError:
+        # Sin cuotas el resto de las gráficas sirve igual: el detalle no debe caerse por esto.
+        share_rows = []
+    for r in share_rows:
+        date = r.get("segments", {}).get("date")
+        if not date:
+            continue
+        m = r.get("metrics", {})
+        day = days.setdefault(date, {"date": date, "impressions": 0, "clicks": 0, "cost": 0.0, "conversions": 0.0, "conv_value": 0.0, "budget": None})
+        day["impr_share"] = _float_or_none(m.get("searchImpressionShare"))
+        day["top_impr_share"] = _float_or_none(m.get("searchTopImpressionShare"))
+        day["lost_is_budget"] = _float_or_none(m.get("searchBudgetLostImpressionShare"))
+        day["lost_is_rank"] = _float_or_none(m.get("searchRankLostImpressionShare"))
+    out = []
+    for date in sorted(days):
+        d = days[date]
+        for k in ("impr_share", "top_impr_share", "lost_is_budget", "lost_is_rank"):
+            d.setdefault(k, None)
+        out.append(d)
+    return out
+
+
+_PROXIMITY_UNITS_ES = {"KILOMETERS": "km", "MILES": "mi"}
+
+
+def _in_list(values):
+    return ", ".join("'" + str(v).replace("'", "") + "'" for v in values)
+
+
+def _metrics_block(m):
+    return {
+        "impressions": _int_or_none(m.get("impressions")) or 0,
+        "clicks": _int_or_none(m.get("clicks")) or 0,
+        "cost": _micros_to_units(_int_or_none(m.get("costMicros"))) or 0.0,
+        "conversions": _float_or_none(m.get("conversions")) or 0.0,
+        "conv_value": _float_or_none(m.get("conversionsValue")) or 0.0,
+    }
+
+
+_EMPTY_METRICS = {"impressions": 0, "clicks": 0, "cost": 0.0, "conversions": 0.0, "conv_value": 0.0}
+_METRIC_FIELDS = """
+          metrics.impressions,
+          metrics.clicks,
+          metrics.cost_micros,
+          metrics.conversions,
+          metrics.conversions_value"""
+
+
+def fetch_campaign_groups(customer_id, campaign_id, channel_type, date_from, date_to):
+    """Grupos activos de la campaña con sus KPIs del rango: grupos de anuncios, o grupos de recursos si es
+    Performance Max (que no tiene grupos de anuncios). La lista sale sin fechas y las métricas se cruzan por id,
+    para que un grupo activo sin impresiones en el rango aparezca igual."""
+    campaign_id = int(campaign_id)
+    if channel_type == "PERFORMANCE_MAX":
+        kind, table, prefix = "asset_group", "asset_group", "asset_group"
+        list_fields = "asset_group.id, asset_group.name, asset_group.status"
+    else:
+        kind, table, prefix = "ad_group", "ad_group", "ad_group"
+        list_fields = "ad_group.id, ad_group.name, ad_group.status, ad_group.type"
+    list_query = f"""
+        SELECT {list_fields}
+        FROM {table}
+        WHERE campaign.id = {campaign_id} AND {prefix}.status = 'ENABLED'
+    """
+    metrics_query = f"""
+        SELECT {prefix}.id,{_METRIC_FIELDS}
+        FROM {table}
+        WHERE campaign.id = {campaign_id} AND {prefix}.status = 'ENABLED'
+          AND segments.date BETWEEN '{date_from}' AND '{date_to}'
+    """
+    metrics_by_id = {}
+    for r in _search(customer_id, metrics_query):
+        metrics_by_id[str(r.get(_camel(prefix), {}).get("id"))] = _metrics_block(r.get("metrics", {}))
+    groups = []
+    for r in _search(customer_id, list_query):
+        g = r.get(_camel(prefix), {})
+        gid = str(g.get("id"))
+        row = {"id": gid, "name": g.get("name") or "(sin nombre)", "type": g.get("type") or ""}
+        row.update(metrics_by_id.get(gid, _EMPTY_METRICS))
+        groups.append(row)
+    groups.sort(key=lambda x: -x["cost"])
+    return {"kind": kind, "groups": groups}
+
+
+def _camel(snake):
+    head, *rest = snake.split("_")
+    return head + "".join(w.capitalize() for w in rest)
+
+
+def fetch_campaign_location_metrics(customer_id, campaign_id, date_from, date_to):
+    """KPIs del rango por ubicación configurada, con el recurso de la ubicación como llave."""
+    out = {}
+    for r in _search(customer_id, f"""
+        SELECT campaign_criterion.location.geo_target_constant,{_METRIC_FIELDS}
+        FROM location_view
+        WHERE campaign.id = {int(campaign_id)} AND segments.date BETWEEN '{date_from}' AND '{date_to}'
+    """):
+        res = r.get("campaignCriterion", {}).get("location", {}).get("geoTargetConstant")
+        if res:
+            out[res] = _metrics_block(r.get("metrics", {}))
+    return out
+
+
+def fetch_campaign_targeting(customer_id, campaign_id, date_from, date_to):
+    """A dónde se dirige la campaña: ubicaciones (países, regiones, ciudades…, incluidas o excluidas) con sus
+    KPIs del rango, radios alrededor de un punto e idiomas. Los nombres salen de geo_target_constant y
+    language_constant; los KPIs de location_view, que solo existe para ubicaciones."""
+    campaign_id = int(campaign_id)
+    crit_query = f"""
+        SELECT
+          campaign_criterion.type,
+          campaign_criterion.negative,
+          campaign_criterion.location.geo_target_constant,
+          campaign_criterion.language.language_constant,
+          campaign_criterion.proximity.radius,
+          campaign_criterion.proximity.radius_units,
+          campaign_criterion.proximity.address.city_name,
+          campaign_criterion.proximity.address.street_address
+        FROM campaign_criterion
+        WHERE campaign.id = {campaign_id}
+          AND campaign_criterion.type IN ('LOCATION', 'PROXIMITY', 'LANGUAGE')
+    """
+    setting_query = f"""
+        SELECT campaign.geo_target_type_setting.positive_geo_target_type
+        FROM campaign
+        WHERE campaign.id = {campaign_id}
+    """
+    locations, proximities, language_ids = {}, [], []
+    for r in _search(customer_id, crit_query):
+        crit = r.get("campaignCriterion", {})
+        ctype = crit.get("type")
+        if ctype == "LOCATION":
+            res = crit.get("location", {}).get("geoTargetConstant")
+            if res:
+                locations[res] = {"resource": res, "excluded": bool(crit.get("negative"))}
+        elif ctype == "LANGUAGE":
+            res = crit.get("language", {}).get("languageConstant")
+            if res:
+                language_ids.append(res)
+        elif ctype == "PROXIMITY":
+            px = crit.get("proximity", {})
+            where = (px.get("address", {}) or {})
+            place = where.get("cityName") or where.get("streetAddress") or ""
+            units = _PROXIMITY_UNITS_ES.get(px.get("radiusUnits"), px.get("radiusUnits") or "")
+            try:
+                label = f"Radio de {float(px.get('radius')):g} {units}"
+            except (TypeError, ValueError):
+                label = "Radio"
+            proximities.append({"name": label + (f" alrededor de {place}" if place else ""), "excluded": bool(crit.get("negative"))})
+
+    # Nombres de las ubicaciones, en bloques para no pasarse de largo en la consulta.
+    res_list = list(locations)
+    for i in range(0, len(res_list), 150):
+        chunk = res_list[i:i + 150]
+        for r in _search(customer_id, f"""
+            SELECT geo_target_constant.resource_name, geo_target_constant.name, geo_target_constant.canonical_name,
+                   geo_target_constant.target_type, geo_target_constant.country_code
+            FROM geo_target_constant
+            WHERE geo_target_constant.resource_name IN ({_in_list(chunk)})
+        """):
+            gc = r.get("geoTargetConstant", {})
+            loc = locations.get(gc.get("resourceName"))
+            if loc is not None:
+                loc.update({"name": gc.get("name") or "", "canonical": gc.get("canonicalName") or "",
+                            "target_type": gc.get("targetType") or "", "country_code": gc.get("countryCode") or ""})
+
+    # KPIs por ubicación (solo las que Google devuelve con actividad en el rango).
+    try:
+        for res, m in fetch_campaign_location_metrics(customer_id, campaign_id, date_from, date_to).items():
+            if res in locations:
+                locations[res]["metrics"] = m
+    except RuntimeError:
+        pass  # sin KPIs por ubicación, la lista de a dónde se dirige sigue sirviendo
+
+    languages = []
+    for i in range(0, len(language_ids), 150):
+        chunk = language_ids[i:i + 150]
+        for r in _search(customer_id, f"""
+            SELECT language_constant.resource_name, language_constant.name, language_constant.code
+            FROM language_constant
+            WHERE language_constant.resource_name IN ({_in_list(chunk)})
+        """):
+            languages.append(r.get("languageConstant", {}).get("name") or "")
+
+    geo_type = None
+    try:
+        rows = _search(customer_id, setting_query)
+        if rows:
+            geo_type = rows[0].get("campaign", {}).get("geoTargetTypeSetting", {}).get("positiveGeoTargetType")
+    except RuntimeError:
+        pass
+
+    out_locations = []
+    for loc in locations.values():
+        m = loc.get("metrics") or _EMPTY_METRICS
+        out_locations.append({
+            "resource": loc["resource"], "name": loc.get("name") or loc["resource"], "canonical": loc.get("canonical", ""),
+            "target_type": loc.get("target_type", ""), "country_code": loc.get("country_code", ""),
+            "excluded": loc["excluded"], **m,
+        })
+    out_locations.sort(key=lambda x: (x["excluded"], -x["cost"], x["name"]))
+    return {"locations": out_locations, "radii": proximities, "languages": sorted(l for l in languages if l), "geo_target_type": geo_type}
+
+
+# ---- Detalle de campaña: contexto (resumen y comparación), segmentos, palabras clave, posición en la subasta ----
+
+_SHARE_FIELDS = {
+    "impr_share": "searchImpressionShare", "top_impr_share": "searchTopImpressionShare",
+    "lost_is_budget": "searchBudgetLostImpressionShare", "lost_is_rank": "searchRankLostImpressionShare",
+}
+_POSITION_FIELDS = {
+    **_SHARE_FIELDS,
+    "abs_top_impr_share": "searchAbsoluteTopImpressionShare",
+    "lost_top_budget": "searchBudgetLostTopImpressionShare", "lost_top_rank": "searchRankLostTopImpressionShare",
+    "lost_abs_top_budget": "searchBudgetLostAbsoluteTopImpressionShare", "lost_abs_top_rank": "searchRankLostAbsoluteTopImpressionShare",
+    "click_share": "searchClickShare", "exact_impr_share": "searchExactMatchImpressionShare",
+}
+
+
+def _campaign_shares(customer_id, campaign_id, date_from, date_to, fields):
+    """Cuotas de impresiones del rango para una campaña (todas None si Google no las da para su tipo)."""
+    metric_names = ", ".join("metrics." + re.sub(r"(?<!^)(?=[A-Z])", "_", v).lower() for v in fields.values())
+    rows = _search(customer_id, f"""
+        SELECT campaign.id, {metric_names}
+        FROM campaign
+        WHERE campaign.id = {int(campaign_id)} AND segments.date BETWEEN '{date_from}' AND '{date_to}'
+    """)
+    m = rows[0].get("metrics", {}) if rows else {}
+    return {k: _float_or_none(m.get(v)) for k, v in fields.items()}
+
+
+def _campaign_period(customer_id, campaign_id, date_from, date_to):
+    rows = _search(customer_id, f"""
+        SELECT campaign.id,{_METRIC_FIELDS}
+        FROM campaign
+        WHERE campaign.id = {int(campaign_id)} AND segments.date BETWEEN '{date_from}' AND '{date_to}'
+    """)
+    out = dict(_metrics_block(rows[0].get("metrics", {}))) if rows else dict(_EMPTY_METRICS)
+    try:
+        out.update(_campaign_shares(customer_id, campaign_id, date_from, date_to, _SHARE_FIELDS))
+    except RuntimeError:
+        out.update({k: None for k in _SHARE_FIELDS})
+    return out
+
+
+_CHANGE_FIELD_LABELS = {
+    "status": ("Estado", "status"),
+    "amountMicros": ("Presupuesto diario", "money_micros"),
+    "name": ("Nombre", "text"),
+    "biddingStrategyType": ("Estrategia de puja", "bid_strategy"),
+    "maximizeConversionValue.targetRoas": ("ROAS objetivo", "roas"),
+    "targetRoas.targetRoas": ("ROAS objetivo", "roas"),
+    "maximizeConversions.targetCpaMicros": ("CPA objetivo", "money_micros"),
+    "targetCpa.targetCpaMicros": ("CPA objetivo", "money_micros"),
+    "cpcBidMicros": ("Puja máxima de CPC", "money_micros"),
+    "targetCpaMicros": ("CPA objetivo", "money_micros"),
+    "bidModifier": ("Modificador de puja", "number"),
+    "responsiveSearchAd.headlines": ("Titulares del anuncio", "text"),
+    "responsiveSearchAd.descriptions": ("Descripciones del anuncio", "text"),
+    "finalUrls": ("URL final", "text"),
+    "responsiveSearchAd.path1": ("Ruta 1 de la URL", "text"),
+    "responsiveSearchAd.path2": ("Ruta 2 de la URL", "text"),
+    "startDate": ("Fecha de inicio", "text"),
+    "endDate": ("Fecha de fin", "text"),
+}
+_CHANGE_RESOURCE_LABELS = {
+    "CAMPAIGN": "Campaña", "CAMPAIGN_BUDGET": "Presupuesto", "AD_GROUP": "Grupo de anuncios", "AD_GROUP_AD": "Anuncio",
+    "AD": "Anuncio", "AD_GROUP_CRITERION": "Palabra clave o segmentación de grupo", "CAMPAIGN_CRITERION": "Segmentación o negativa de campaña",
+    "AD_GROUP_BID_MODIFIER": "Modificador de puja", "CAMPAIGN_ASSET": "Recurso de campaña", "ASSET_GROUP": "Grupo de recursos",
+    "ASSET_GROUP_ASSET": "Recurso de grupo", "CAMPAIGN_SHARED_SET": "Lista compartida", "AD_GROUP_ASSET": "Recurso de grupo de anuncios",
+    "CUSTOMER_ASSET": "Recurso de cuenta", "ASSET": "Recurso",
+}
+_CHANGE_OPERATION_LABELS = {"CREATE": "Creó", "UPDATE": "Cambió", "REMOVE": "Eliminó"}
+
+
+def _dig(resource, path):
+    """Valor en `path` (con puntos, camelCase) dentro del recurso de un change_event, que viene envuelto en una
+    clave con el tipo del recurso (p. ej. {"campaign": {...}})."""
+    if not isinstance(resource, dict) or not resource:
+        return None
+    node = next(iter(resource.values()))
+    for part in path.split("."):
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    return node
+
+
+def _humanize_path(path):
+    last = path.split(".")[-1]
+    words = re.sub(r"(?<!^)(?=[A-Z])", " ", last).lower()
+    return words[:1].upper() + words[1:]
+
+
+def _describe_change(event):
+    """Qué cambió, en datos simples: lista de {label, old, new, kind} más un texto corto para altas y bajas."""
+    op = event.get("resourceChangeOperation")
+    rtype = event.get("changeResourceType")
+    old_r, new_r = event.get("oldResource"), event.get("newResource")
+    items = []
+    text = None
+    if op == "UPDATE":
+        for path in [f for f in (event.get("changedFields") or "").split(",") if f]:
+            label, kind = _CHANGE_FIELD_LABELS.get(path, (_humanize_path(path), "text"))
+            old, new = _dig(old_r, path), _dig(new_r, path)
+            if kind == "money_micros":
+                old = None if old is None else int(old) / MICROS
+                new = None if new is None else int(new) / MICROS
+                kind = "money"
+            elif kind in ("roas", "number"):
+                old = None if old is None else float(old)
+                new = None if new is None else float(new)
+            elif not isinstance(old, (str, int, float, type(None))) or not isinstance(new, (str, int, float, type(None))):
+                old = new = None  # estructuras largas (textos de un anuncio…): se avisa del cambio sin detallarlo
+            items.append({"label": label, "old": old, "new": new, "kind": kind})
+    else:
+        res = new_r if op == "CREATE" else old_r
+        kw = _dig(res, "keyword")
+        if isinstance(kw, dict) and kw.get("text"):
+            neg = _dig(res, "negative")
+            text = f"{'Palabra clave negativa' if neg else 'Palabra clave'} «{kw['text']}» ({(kw.get('matchType') or '').lower()})"
+        elif rtype == "CAMPAIGN_CRITERION" and isinstance(_dig(res, "location"), dict):
+            text = f"Ubicación {'excluida' if _dig(res, 'negative') else 'añadida'}"
+        elif rtype == "CAMPAIGN_CRITERION" and isinstance(_dig(res, "language"), dict):
+            text = "Idioma"
+    return {"items": items, "text": text}
+
+
+def _change_row(e):
+    when = (e.get("changeDateTime") or "")[:19]
+    desc = _describe_change(e)
+    return {
+        "when": when, "date": when[:10], "user": e.get("userEmail") or "",
+        "client": e.get("clientType") or "", "resource": e.get("changeResourceType") or "",
+        "resource_label": _CHANGE_RESOURCE_LABELS.get(e.get("changeResourceType"), (e.get("changeResourceType") or "").replace("_", " ").lower()),
+        "operation": e.get("resourceChangeOperation") or "",
+        "operation_label": _CHANGE_OPERATION_LABELS.get(e.get("resourceChangeOperation"), ""),
+        "items": desc["items"], "text": desc["text"],
+    }
+
+
+def _search_change_events(customer_id, fields, extra_where, days, limit):
+    """change_event de los últimos `days` días (máximo 30). Google rechaza (START_DATE_TOO_OLD) un inicio que caiga
+    justo en los 30 días cuando la zona horaria de la cuenta va por detrás de la del servidor; en ese caso se reintenta
+    un día más tarde."""
+    today = datetime.date.today()
+    for back in (days - 1, days - 2):
+        start = (today - datetime.timedelta(days=max(back, 0))).isoformat()
+        try:
+            return _search(customer_id, f"""
+                SELECT {fields}
+                FROM change_event
+                WHERE change_event.change_date_time >= '{start}' AND change_event.change_date_time <= '{today.isoformat()} 23:59:59'
+                  {extra_where}
+                ORDER BY change_event.change_date_time DESC
+                LIMIT {limit}
+            """)
+        except RuntimeError as e:
+            if "START_DATE_TOO_OLD" not in str(e) or back <= 0 or back == days - 2:
+                raise
+    return []
+
+
+def fetch_campaign_changes(customer_id, campaign_id, days=30):
+    """Cambios de los últimos 30 días en la campaña y lo que cuelga de ella (change_event; Google solo guarda 30)."""
+    rows = _search_change_events(
+        customer_id,
+        """change_event.change_date_time, change_event.user_email, change_event.client_type,
+           change_event.change_resource_type, change_event.resource_change_operation, change_event.changed_fields,
+           change_event.old_resource, change_event.new_resource""",
+        f"AND change_event.campaign = 'customers/{customer_id}/campaigns/{int(campaign_id)}'", days, 300)
+    return [_change_row(r.get("changeEvent", {})) for r in rows]
+
+
+ACCOUNT_CHANGES_LIMIT = 3000
+
+
+def _id_from_resource(name):
+    """'customers/1/campaigns/22' -> '22' (vacío si no hay recurso)."""
+    return (name or "").rsplit("/", 1)[-1] if name else ""
+
+
+def fetch_account_changes(customer_id, days=30):
+    """Historial de cambios de toda la cuenta (change_event): quién, desde dónde, qué y en qué campaña. Google solo
+    guarda 30 días y deja traer 10.000 filas como máximo; aquí se piden ACCOUNT_CHANGES_LIMIT y, si se llega al tope,
+    se avisa con `truncated` (los más recientes son los que quedan). Los nombres de campaña y de grupo se resuelven
+    con consultas aparte; si fallan, se muestra el id."""
+    days = max(1, min(int(days), 30))
+    rows = _search_change_events(
+        customer_id,
+        """change_event.change_date_time, change_event.user_email, change_event.client_type,
+           change_event.change_resource_type, change_event.resource_change_operation, change_event.changed_fields,
+           change_event.campaign, change_event.ad_group, change_event.old_resource, change_event.new_resource""",
+        "", days, ACCOUNT_CHANGES_LIMIT)
+    camp_names, group_names, errors = {}, {}, {}
+    try:
+        for r in _search(customer_id, "SELECT campaign.id, campaign.name FROM campaign"):
+            c = r.get("campaign", {})
+            camp_names[str(c.get("id"))] = c.get("name") or ""
+    except RuntimeError as e:
+        errors["campaigns"] = str(e)
+    try:
+        for r in _search(customer_id, "SELECT ad_group.id, ad_group.name FROM ad_group"):
+            g = r.get("adGroup", {})
+            group_names[str(g.get("id"))] = g.get("name") or ""
+    except RuntimeError as e:
+        errors["ad_groups"] = str(e)
+    out = []
+    for r in rows:
+        e = r.get("changeEvent", {})
+        row = _change_row(e)
+        cid, gid = _id_from_resource(e.get("campaign")), _id_from_resource(e.get("adGroup"))
+        row["campaign_id"] = cid
+        row["campaign_name"] = camp_names.get(cid) or (f"Campaña {cid}" if cid else "")
+        row["ad_group_name"] = group_names.get(gid) or (f"Grupo {gid}" if gid else "")
+        out.append(row)
+    return {"changes": out, "truncated": len(rows) >= ACCOUNT_CHANGES_LIMIT, "days": days, "errors": errors}
+
+
+def fetch_campaign_context(customer_id, campaign_id, date_from, date_to, prev_from, prev_to):
+    """Resumen de la campaña con la comparación del periodo anterior, su estado en Google (y por qué está limitada)
+    y los cambios de los últimos 30 días. El resumen es obligatorio; el estado y los cambios fallan por separado."""
+    out = {
+        "current": _campaign_period(customer_id, campaign_id, date_from, date_to),
+        "previous": _campaign_period(customer_id, campaign_id, prev_from, prev_to) if prev_from and prev_to else None,
+        "status": None, "changes": None, "errors": {},
+    }
+    try:
+        rows = _search(customer_id, f"""
+            SELECT campaign.primary_status, campaign.primary_status_reasons, campaign.bidding_strategy_system_status,
+                   campaign_budget.amount_micros, campaign_budget.explicitly_shared,
+                   campaign_budget.has_recommended_budget, campaign_budget.recommended_budget_amount_micros
+            FROM campaign
+            WHERE campaign.id = {int(campaign_id)}
+        """)
+        if rows:
+            c, b = rows[0].get("campaign", {}), rows[0].get("campaignBudget", {})
+            out["status"] = {
+                "primary_status": c.get("primaryStatus"), "reasons": c.get("primaryStatusReasons") or [],
+                "bidding_system_status": c.get("biddingStrategySystemStatus"),
+                "budget": _micros_to_units(_int_or_none(b.get("amountMicros"))), "shared_budget": bool(b.get("explicitlyShared")),
+                "recommended_budget": _micros_to_units(_int_or_none(b.get("recommendedBudgetAmountMicros"))) if b.get("hasRecommendedBudget") else None,
+            }
+    except RuntimeError as e:
+        out["errors"]["status"] = " ".join(str(e).split())[:300]
+    try:
+        out["changes"] = fetch_campaign_changes(customer_id, campaign_id)
+    except RuntimeError as e:
+        out["errors"]["changes"] = " ".join(str(e).split())[:300]
+    return out
+
+
+def _segment_rows(customer_id, campaign_id, date_from, date_to, segment_field, key):
+    rows = _search(customer_id, f"""
+        SELECT campaign.id, {segment_field},{_METRIC_FIELDS}
+        FROM campaign
+        WHERE campaign.id = {int(campaign_id)} AND segments.date BETWEEN '{date_from}' AND '{date_to}'
+    """)
+    out = []
+    for r in rows:
+        seg = r.get("segments", {})
+        row = {"key": seg.get(key) or ""}
+        row.update(_metrics_block(r.get("metrics", {})))
+        out.append(row)
+    return out
+
+
+def fetch_campaign_segments(customer_id, campaign_id, date_from, date_to):
+    """Cortes de la campaña: dispositivo, día de la semana, acción de conversión y países desde los que se ve."""
+    out = {"device": None, "weekday": None, "conversions": None, "countries": None, "errors": {}}
+    for name, field, key in (("device", "segments.device", "device"), ("weekday", "segments.day_of_week", "dayOfWeek")):
+        try:
+            out[name] = _segment_rows(customer_id, campaign_id, date_from, date_to, field, key)
+        except RuntimeError as e:
+            out["errors"][name] = " ".join(str(e).split())[:300]
+    # Google no deja pedir las conversiones por acción junto a impresiones, clics o costo: solo sus dos métricas.
+    try:
+        rows = _search(customer_id, f"""
+            SELECT campaign.id, segments.conversion_action_name, segments.conversion_action_category,
+                   metrics.conversions, metrics.conversions_value
+            FROM campaign
+            WHERE campaign.id = {int(campaign_id)} AND segments.date BETWEEN '{date_from}' AND '{date_to}'
+        """)
+        acc = {}
+        for r in rows:
+            seg, m = r.get("segments", {}), r.get("metrics", {})
+            name = seg.get("conversionActionName") or "(sin nombre)"
+            a = acc.setdefault(name, {"name": name, "category": seg.get("conversionActionCategory") or "", "conversions": 0.0, "conv_value": 0.0})
+            a["conversions"] += _float_or_none(m.get("conversions")) or 0.0
+            a["conv_value"] += _float_or_none(m.get("conversionsValue")) or 0.0
+        out["conversions"] = sorted(acc.values(), key=lambda x: -x["conversions"])
+    except RuntimeError as e:
+        out["errors"]["conversions"] = " ".join(str(e).split())[:300]
+    try:
+        rows = _search(customer_id, f"""
+            SELECT campaign.id, geographic_view.country_criterion_id, geographic_view.location_type,{_METRIC_FIELDS}
+            FROM geographic_view
+            WHERE campaign.id = {int(campaign_id)} AND segments.date BETWEEN '{date_from}' AND '{date_to}'
+        """)
+        countries = {}
+        for r in rows:
+            gv = r.get("geographicView", {})
+            if gv.get("locationType") != "LOCATION_OF_PRESENCE" or not gv.get("countryCriterionId"):
+                continue
+            countries[gv["countryCriterionId"]] = {"id": gv["countryCriterionId"], **_metrics_block(r.get("metrics", {}))}
+        ids = list(countries)
+        for i in range(0, len(ids), 150):
+            chunk = ids[i:i + 150]
+            for r in _search(customer_id, f"""
+                SELECT geo_target_constant.id, geo_target_constant.name, geo_target_constant.country_code
+                FROM geo_target_constant
+                WHERE geo_target_constant.resource_name IN ({_in_list(['geoTargetConstants/' + c for c in chunk])})
+            """):
+                gc = r.get("geoTargetConstant", {})
+                if str(gc.get("id")) in countries:
+                    countries[str(gc["id"])].update({"name": gc.get("name") or "", "country_code": gc.get("countryCode") or ""})
+        out["countries"] = sorted(({"name": c.get("name") or f"País {c['id']}", **{k: v for k, v in c.items() if k != "id"}} for c in countries.values()), key=lambda x: -x["cost"])
+    except RuntimeError as e:
+        out["errors"]["countries"] = " ".join(str(e).split())[:300]
+    return out
+
+
+def fetch_campaign_keywords(customer_id, campaign_id, date_from, date_to, limit=60):
+    """Palabras clave de mayor gasto con su Nivel de calidad y los tres componentes (solo campañas Search)."""
+    rows = _search(customer_id, f"""
+        SELECT ad_group.name, ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type,
+               ad_group_criterion.status, ad_group_criterion.quality_info.quality_score,
+               ad_group_criterion.quality_info.creative_quality_score, ad_group_criterion.quality_info.post_click_quality_score,
+               ad_group_criterion.quality_info.search_predicted_ctr,{_METRIC_FIELDS}
+        FROM keyword_view
+        WHERE campaign.id = {int(campaign_id)} AND segments.date BETWEEN '{date_from}' AND '{date_to}'
+          AND ad_group_criterion.status != 'REMOVED' AND ad_group_criterion.negative = FALSE
+        ORDER BY metrics.cost_micros DESC
+        LIMIT {int(limit)}
+    """)
+    out = []
+    for r in rows:
+        crit = r.get("adGroupCriterion", {})
+        kw, q = crit.get("keyword", {}), crit.get("qualityInfo", {})
+        row = {
+            "text": kw.get("text") or "", "match_type": kw.get("matchType") or "", "status": crit.get("status") or "",
+            "ad_group": r.get("adGroup", {}).get("name") or "",
+            "quality_score": q.get("qualityScore"), "ad_relevance": q.get("creativeQualityScore"),
+            "landing_page": q.get("postClickQualityScore"), "expected_ctr": q.get("searchPredictedCtr"),
+        }
+        row.update(_metrics_block(r.get("metrics", {})))
+        out.append(row)
+    return out
+
+
+def fetch_campaign_position(customer_id, campaign_id, date_from, date_to, prev_from, prev_to):
+    """Posición en la subasta: cuotas de impresiones superior y absoluta, lo perdido por presupuesto y ranking, cuota
+    de clics y de coincidencia exacta. Los competidores (información de subastas) Google no los entrega a este
+    token de desarrollador, así que no se piden."""
+    out = {"current": _campaign_shares(customer_id, campaign_id, date_from, date_to, _POSITION_FIELDS), "previous": None}
+    if prev_from and prev_to:
+        out["previous"] = _campaign_shares(customer_id, campaign_id, prev_from, prev_to, _POSITION_FIELDS)
+    return out
+
+
+CAMPAIGN_STATUS_VALUES = ("ENABLED", "PAUSED")
+
+
+def update_campaign_status(customer_id, campaign_id, status, validate_only=True):
+    """Pausa o activa una campaña (campaign.status). Solo ENABLED y PAUSED: eliminar no se ofrece desde la
+    plataforma. validate_only=True: Google valida sin aplicar; el cambio queda escrito solo con False."""
+    if status not in CAMPAIGN_STATUS_VALUES:
+        raise ValueError("El estado debe ser ENABLED o PAUSED.")
+    url = f"{BASE_URL}/customers/{customer_id}/campaigns:mutate"
+    body = {
+        "operations": [{
+            "update": {
+                "resourceName": f"customers/{customer_id}/campaigns/{campaign_id}",
+                "status": status,
+            },
+            "updateMask": "status",
+        }],
+        "validateOnly": validate_only,
+    }
+    _post_json(url, body)
+    return {"validate_only": validate_only, "applied": not validate_only, "status": status}
 
 
 def fetch_impression_share_daily(customer_id, date_from, date_to):
@@ -2404,6 +3128,204 @@ def simulated_ai_max_status(only_active=False):
             "final_url_expansion": "OPTED_IN" if entry["enabled"] else "OPTED_OUT",
         })
     return out
+
+
+def simulated_campaigns_overview():
+    out = []
+    for c in SIMULATED_CAMPAIGNS:
+        out.append({
+            "campaign_id": _SIMULATED_CAMPAIGN_IDS_BY_NAME.get(c["campaign"], c["campaign"]),
+            "campaign_name": c["campaign"],
+            "status": c["status"],
+            "channel_type": {"performance max": "PERFORMANCE_MAX", "search": "SEARCH", "display": "DISPLAY"}.get(c["channel_type_raw"], "SEARCH"),
+            "budget": c["budget"], "impressions": c["impressions"], "clicks": c["clicks"], "cost": c["cost"],
+            "conversions": c["conversions"], "conv_value": c["conv_value"],
+            "bidding_strategy_type": c["bid_strategy"],
+            "target_roas": 4.0 if c["bid_strategy"] == "TARGET_ROAS" else None, "target_cpa": None,
+            "impr_share": c["impr_share"], "top_impr_share": None if c["impr_share"] is None else round(c["impr_share"] * 0.6, 3),
+            "lost_is_budget": c["lost_is_budget"], "lost_is_rank": c["lost_is_rank"],
+        })
+    return out
+
+
+def simulated_campaign_daily(campaign_id, date_from, date_to):
+    """Serie diaria de ejemplo: el promedio de la campaña simulada con una variación fija por fecha."""
+    import math
+    camp = next((c for c in simulated_campaigns_overview() if c["campaign_id"] == str(campaign_id)), None)
+    if camp is None:
+        return []
+    start, end = datetime.date.fromisoformat(date_from), datetime.date.fromisoformat(date_to)
+    n = max(1, (end - start).days + 1)
+    out = []
+    for i in range(n):
+        d = start + datetime.timedelta(days=i)
+        wave = 1 + 0.25 * math.sin(d.toordinal() * 0.9) + (0.15 if d.weekday() >= 4 else 0)
+        impressions = int(camp["impressions"] / n * wave)
+        clicks = int(camp["clicks"] / n * wave)
+        cost = round(camp["cost"] / n * wave, 2)
+        conv = round(camp["conversions"] / n * wave * (1 + 0.3 * math.cos(d.toordinal())), 1)
+        def share(v, amp=0.08):
+            return None if v is None else max(0.0, min(1.0, round(v + amp * math.sin(d.toordinal() * 1.3), 3)))
+        out.append({
+            "date": d.isoformat(), "impressions": impressions, "clicks": clicks, "cost": cost, "conversions": conv,
+            "conv_value": round(camp["conv_value"] / n * wave, 2), "budget": camp["budget"],
+            "impr_share": share(camp["impr_share"]), "top_impr_share": share(camp["top_impr_share"]),
+            "lost_is_budget": share(camp["lost_is_budget"], 0.05), "lost_is_rank": share(camp["lost_is_rank"], 0.05),
+        })
+    return out
+
+
+def simulated_campaign_breakdown(campaign_id):
+    camp = next((c for c in simulated_campaigns_overview() if c["campaign_id"] == str(campaign_id)), None)
+    if camp is None:
+        return None
+
+    def part(share, name, **extra):
+        return {"name": name, "impressions": int(camp["impressions"] * share), "clicks": int(camp["clicks"] * share),
+                "cost": round(camp["cost"] * share, 2), "conversions": round(camp["conversions"] * share, 1),
+                "conv_value": round(camp["conv_value"] * share, 2), **extra}
+
+    is_pmax = camp["channel_type"] == "PERFORMANCE_MAX"
+    names = ["Habitaciones y tarifas", "Marca", "Promociones"] if not is_pmax else ["Hoteles - Colombia", "Hoteles - Resto"]
+    shares = [0.55, 0.3, 0.15] if not is_pmax else [0.7, 0.3]
+    groups = [dict(part(sh, nm), id=str(i + 1), type="SEARCH_STANDARD") for i, (nm, sh) in enumerate(zip(names, shares))]
+    locations = [
+        part(0.6, "Colombia", resource="geoTargetConstants/2170", canonical="Colombia", target_type="Country", country_code="CO", excluded=False),
+        part(0.25, "Bogota", resource="geoTargetConstants/1011044", canonical="Bogota,Capital District,Colombia", target_type="City", country_code="CO", excluded=False),
+        part(0.15, "Medellin", resource="geoTargetConstants/1011051", canonical="Medellin,Antioquia,Colombia", target_type="City", country_code="CO", excluded=False),
+        {"name": "Venezuela", "resource": "geoTargetConstants/2862", "canonical": "Venezuela", "target_type": "Country", "country_code": "VE", "excluded": True,
+         "impressions": 0, "clicks": 0, "cost": 0.0, "conversions": 0.0, "conv_value": 0.0},
+    ]
+    return {
+        "groups": {"kind": "asset_group" if is_pmax else "ad_group", "groups": groups},
+        "targeting": {"locations": locations, "radii": [], "languages": ["Spanish"], "geo_target_type": "PRESENCE_OR_INTEREST"},
+    }
+
+
+def _sim_prev(block, factor):
+    """Periodo anterior simulado: el mismo bloque de métricas con otra escala."""
+    return {**block, "impressions": int(block["impressions"] * factor), "clicks": int(block["clicks"] * factor),
+            "cost": round(block["cost"] * factor, 2), "conversions": round(block["conversions"] * factor * 0.9, 1),
+            "conv_value": round(block["conv_value"] * factor * 0.9, 2)}
+
+
+def simulated_breakdown_previous(campaign_id):
+    data = simulated_campaign_breakdown(campaign_id)
+    if data is None:
+        return {"prev_groups": {}, "prev_locations": {}}
+    return {
+        "prev_groups": {g["id"]: _sim_prev(g, 0.85) for g in data["groups"]["groups"]},
+        "prev_locations": {l["resource"]: _sim_prev(l, 0.8) for l in data["targeting"]["locations"] if not l["excluded"]},
+    }
+
+
+def simulated_account_changes(days=30):
+    """Historial de cambios de ejemplo (la API de Google Ads no está configurada)."""
+    today = datetime.date.today()
+    camps = [(c["campaign_id"], c["campaign_name"]) for c in simulated_campaigns_overview()]
+    users = ["ana.gomez@agencia.com", "luis.perez@agencia.com", "cesar@agencia.com", ""]
+    web, api, auto, rec = "GOOGLE_ADS_WEB_CLIENT", "GOOGLE_ADS_API", "INTERNAL_TOOL", "GOOGLE_ADS_RECOMMENDATIONS"
+    # (días atrás, hora, usuario, origen, campaña, recurso, operación, items, texto, grupo)
+    plan = [
+        (0, "09:12", 0, web, 1, "CAMPAIGN_BUDGET", "UPDATE", [("Presupuesto diario", 3200.0, 3600.0, "money")], None, ""),
+        (1, "17:40", 1, api, 0, "CAMPAIGN", "UPDATE", [("ROAS objetivo", 5.5, 6.0, "roas")], None, ""),
+        (2, "11:05", 0, web, 1, "CAMPAIGN_CRITERION", "CREATE", [], "Palabra clave negativa «empleo» (phrase)", ""),
+        (2, "11:06", 0, web, 1, "CAMPAIGN_CRITERION", "CREATE", [], "Palabra clave negativa «gratis» (broad)", ""),
+        (3, "08:30", 2, web, 2, "CAMPAIGN", "UPDATE", [("Estado", "PAUSED", "ENABLED", "status")], None, ""),
+        (4, "15:22", 1, web, 1, "AD_GROUP", "UPDATE", [("Estado", "ENABLED", "PAUSED", "status")], None, "Promociones"),
+        (5, "10:00", 3, auto, 0, "CAMPAIGN", "UPDATE", [("Estrategia de puja", "MAXIMIZE_CONVERSIONS", "MAXIMIZE_CONVERSION_VALUE", "bid_strategy")], None, ""),
+        (6, "13:47", 1, web, 1, "AD_GROUP_AD", "UPDATE", [("Titulares del anuncio", None, None, "text")], None, "Habitaciones y tarifas"),
+        (7, "09:55", 0, web, 0, "CAMPAIGN_BUDGET", "UPDATE", [("Presupuesto diario", 7000.0, 8500.0, "money")], None, ""),
+        (9, "16:10", 2, api, 1, "CAMPAIGN_CRITERION", "REMOVE", [], "Ubicación excluida", ""),
+        (11, "12:00", 3, rec, 1, "AD_GROUP_CRITERION", "CREATE", [], "Palabra clave «hotel cerca del aeropuerto» (phrase)", "Habitaciones y tarifas"),
+        (12, "18:25", 0, web, 3, "CAMPAIGN", "UPDATE", [("Estado", "ENABLED", "PAUSED", "status")], None, ""),
+        (14, "10:40", 1, web, 1, "AD_GROUP_BID_MODIFIER", "UPDATE", [("Modificador de puja", 1.0, 1.2, "number")], None, "Marca"),
+        (18, "09:20", 0, web, 0, "CAMPAIGN_BUDGET", "UPDATE", [("Presupuesto diario", 6000.0, 7000.0, "money")], None, ""),
+        (21, "14:15", 2, web, 2, "CAMPAIGN", "UPDATE", [("Nombre", "Search Marca", "Search Marca ES", "text")], None, ""),
+        (25, "11:30", 1, api, 1, "CAMPAIGN_CRITERION", "CREATE", [], "Palabra clave negativa «trabajo» (phrase)", ""),
+        (29, "08:05", 0, web, 0, "CAMPAIGN", "UPDATE", [("ROAS objetivo", 5.0, 5.5, "roas")], None, ""),
+    ]
+    out = []
+    for ago, hhmm, u, client, ci, rtype, op, items, text, group in plan:
+        if ago > days - 1:
+            continue
+        d = (today - datetime.timedelta(days=ago)).isoformat()
+        cid, cname = camps[ci % len(camps)]
+        out.append({
+            "when": f"{d} {hhmm}:00", "date": d, "user": users[u], "client": client, "resource": rtype,
+            "resource_label": _CHANGE_RESOURCE_LABELS.get(rtype, rtype), "operation": op,
+            "operation_label": _CHANGE_OPERATION_LABELS.get(op, ""),
+            "items": [{"label": l, "old": o, "new": n, "kind": k} for l, o, n, k in items], "text": text,
+            "campaign_id": cid, "campaign_name": cname, "ad_group_name": group,
+        })
+    return {"changes": out, "truncated": False, "days": days, "errors": {}}
+
+
+def simulated_campaign_insight(view, campaign_id):
+    camp = next((c for c in simulated_campaigns_overview() if c["campaign_id"] == str(campaign_id)), None)
+    if camp is None:
+        return None
+    base = {k: camp[k] for k in ("impressions", "clicks", "cost", "conversions", "conv_value")}
+    shares = {"impr_share": camp["impr_share"], "top_impr_share": camp["top_impr_share"], "lost_is_budget": camp["lost_is_budget"], "lost_is_rank": camp["lost_is_rank"]}
+    shares_prev = {k: (None if v is None else round(max(0.0, v * 0.9), 3)) for k, v in shares.items()}
+    if view == "context":
+        limited = (camp["lost_is_budget"] or 0) > 0.2
+        return {
+            "current": {**base, **shares}, "previous": {**_sim_prev(base, 0.85), **shares_prev},
+            "status": {"primary_status": "LIMITED" if limited else "ELIGIBLE", "reasons": ["BUDGET_CONSTRAINED"] if limited else [],
+                       "bidding_system_status": "ENABLED", "budget": camp["budget"], "shared_budget": False,
+                       "recommended_budget": round(camp["budget"] * 1.6, 2) if limited else None},
+            "changes": [
+                {"when": "2026-11-02 10:15:00", "date": "2026-11-02", "user": "ejemplo@agencia.com", "client": "GOOGLE_ADS_WEB_CLIENT", "resource": "CAMPAIGN_BUDGET",
+                 "resource_label": "Presupuesto", "operation": "UPDATE", "operation_label": "Cambió", "text": None,
+                 "items": [{"label": "Presupuesto diario", "old": round(camp["budget"] * 0.8, 2), "new": camp["budget"], "kind": "money"}]},
+                {"when": "2026-10-28 16:40:00", "date": "2026-10-28", "user": "ejemplo@agencia.com", "client": "GOOGLE_ADS_API", "resource": "CAMPAIGN_CRITERION",
+                 "resource_label": "Segmentación o negativa de campaña", "operation": "CREATE", "operation_label": "Creó", "items": [],
+                 "text": "Palabra clave negativa «empleo» (phrase)"},
+            ],
+            "errors": {},
+        }
+    if view == "segments":
+        def seg(key, share):
+            return {"key": key, **{k: (round(v * share, 2) if isinstance(v, float) else int(v * share)) for k, v in base.items()}}
+        weekday = [("MONDAY", 0.13), ("TUESDAY", 0.12), ("WEDNESDAY", 0.12), ("THURSDAY", 0.14), ("FRIDAY", 0.17), ("SATURDAY", 0.18), ("SUNDAY", 0.14)]
+        return {
+            "device": [seg("MOBILE", 0.6), seg("DESKTOP", 0.35), seg("TABLET", 0.05)],
+            "weekday": [seg(k, v) for k, v in weekday],
+            "conversions": [{"name": "Reservas-purchase", "category": "PURCHASE", "conversions": round(camp["conversions"] * 0.8, 1), "conv_value": round(camp["conv_value"] * 0.9, 2)},
+                            {"name": "Clic en teléfono", "category": "CONTACT", "conversions": round(camp["conversions"] * 0.2, 1), "conv_value": 0.0}],
+            "countries": [{"name": "Colombia", "country_code": "CO", **seg("x", 0.9)}, {"name": "United States", "country_code": "US", **seg("x", 0.1)}],
+            "errors": {},
+        }
+    if view == "keywords":
+        if camp["channel_type"] != "SEARCH":
+            return []
+        rows = []
+        for i, (text, mt, qs, rel, lp, ctr, share) in enumerate([
+            ("hotel estelar bogota", "BROAD", 9, "ABOVE_AVERAGE", "ABOVE_AVERAGE", "ABOVE_AVERAGE", 0.4),
+            ("hotel cerca aeropuerto", "PHRASE", 5, "AVERAGE", "BELOW_AVERAGE", "AVERAGE", 0.25),
+            ("reservar hotel centro", "EXACT", 7, "ABOVE_AVERAGE", "AVERAGE", "AVERAGE", 0.2),
+            ("hoteles baratos", "BROAD", 3, "BELOW_AVERAGE", "BELOW_AVERAGE", "BELOW_AVERAGE", 0.15)]):
+            rows.append({"text": text, "match_type": mt, "status": "ENABLED", "ad_group": "Grupo principal", "quality_score": qs,
+                         "ad_relevance": rel, "landing_page": lp, "expected_ctr": ctr,
+                         "impressions": int(base["impressions"] * share), "clicks": int(base["clicks"] * share), "cost": round(base["cost"] * share, 2),
+                         "conversions": round(base["conversions"] * share * (0 if i == 3 else 1), 1), "conv_value": round(base["conv_value"] * share * (0 if i == 3 else 1), 2)})
+        return rows
+    if view == "position":
+        if camp["impr_share"] is None:
+            empty = {k: None for k in _POSITION_FIELDS}
+            return {"current": empty, "previous": empty}
+        cur = {"impr_share": camp["impr_share"], "top_impr_share": camp["top_impr_share"], "lost_is_budget": camp["lost_is_budget"], "lost_is_rank": camp["lost_is_rank"],
+               "abs_top_impr_share": round(camp["top_impr_share"] * 0.6, 3), "lost_top_budget": camp["lost_is_budget"], "lost_top_rank": camp["lost_is_rank"],
+               "lost_abs_top_budget": camp["lost_is_budget"], "lost_abs_top_rank": round((camp["lost_is_rank"] or 0) * 3, 3),
+               "click_share": round(camp["impr_share"] * 0.7, 3), "exact_impr_share": round(min(1.0, camp["impr_share"] + 0.1), 3)}
+        prev = {k: (None if v is None else round(max(0.0, v * 0.9), 3)) for k, v in cur.items()}
+        return {"current": cur, "previous": prev}
+    return None
+
+
+def simulated_update_campaign_status(campaign_id, status, validate_only=True):
+    return {"validate_only": validate_only, "applied": not validate_only, "status": status, "simulated": True}
 
 
 def simulated_update_campaign_ai_max(campaign_id, enable, validate_only=True):

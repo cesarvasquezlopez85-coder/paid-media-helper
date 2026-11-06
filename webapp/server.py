@@ -393,6 +393,21 @@ def init_db():
             )
             """
         )
+        # Pausas y activaciones de campañas hechas desde la sección Campañas: quién, cuándo y de qué estado a cuál.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS campaign_status_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at REAL NOT NULL,
+                user_id INTEGER,
+                customer_id TEXT NOT NULL,
+                campaign_id TEXT NOT NULL,
+                campaign_name TEXT,
+                old_status TEXT,
+                new_status TEXT NOT NULL
+            )
+            """
+        )
         # Historial de la Auditoría de cuenta: una fila por auditoría, con el puntaje, el
         # puntaje por área y los hallazgos (id, gravedad, título) para poder mostrar la
         # tendencia y qué cambió entre una auditoría y la anterior. Se lee por cuenta de
@@ -544,6 +559,19 @@ def store_neg_upload(user_id, customer_id, origen, created_items):
         conn.close()
 
 
+def store_campaign_status_change(user_id, customer_id, campaign_id, campaign_name, old_status, new_status):
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO campaign_status_log (created_at, user_id, customer_id, campaign_id, campaign_name, old_status, new_status) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (time.time(), user_id, str(customer_id), str(campaign_id), (campaign_name or "")[:200], old_status, new_status),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def hash_password(password, salt_hex=None):
     salt_hex = salt_hex or secrets.token_hex(16)
     digest = hashlib.pbkdf2_hmac(
@@ -683,6 +711,36 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_google_ads_roas(parse_qs(parsed.query))
+            return
+
+        if path == "/api/google-ads/campaigns-overview":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_campaigns_overview(parse_qs(parsed.query))
+            return
+
+        if path == "/api/google-ads/campaign-daily":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_campaign_daily(parse_qs(parsed.query))
+            return
+
+        if path == "/api/google-ads/campaign-breakdown":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_campaign_breakdown(parse_qs(parsed.query))
+            return
+
+        if path == "/api/google-ads/campaign-insight":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_campaign_insight(parse_qs(parsed.query))
+            return
+
+        if path == "/api/google-ads/account-changes":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_account_changes(parse_qs(parsed.query))
             return
 
         if path == "/api/google-ads/hotel-campaigns":
@@ -834,6 +892,10 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_super_admin_json():
                 return
             self._handle_negative_uploads_undo(payload)
+        elif path == "/api/google-ads/campaign-status":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_campaign_status(payload)
         elif path == "/api/google-ads/hotel-modifiers-apply":
             if not self._require_super_admin_json():
                 return
@@ -2027,6 +2089,257 @@ class Handler(SimpleHTTPRequestHandler):
                 pass
 
         self._send_json(200, {"rows": rows, "simulated": False, "pmax_fallback": pmax_fallback, "currency": google_ads_client.fetch_customer_currency(customer_id)})
+
+    def _handle_google_ads_campaigns_overview(self, query):
+        # Sección Campañas: todas las campañas de una cuenta (activas y pausadas) con sus KPIs del rango.
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        date_from = (query.get("date_from") or [""])[0].strip()
+        date_to = (query.get("date_to") or [""])[0].strip()
+        date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, {"campaigns": google_ads_client.simulated_campaigns_overview(), "simulated": True, "currency": "USD"})
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not date_pattern.match(date_from) or not date_pattern.match(date_to):
+            self._send_json(400, {"error": "date_from y date_to deben tener formato AAAA-MM-DD."})
+            return
+
+        user = self._get_current_user()
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            campaigns = google_ads_client.fetch_campaigns_overview(customer_id, date_from, date_to)
+            self._send_json(200, {"campaigns": campaigns, "simulated": False, "currency": google_ads_client.fetch_customer_currency(customer_id)})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    def _handle_google_ads_campaign_daily(self, query):
+        # Detalle de una campaña en Campañas: la serie día a día para sus gráficas.
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        campaign_id = (query.get("campaign_id") or [""])[0].strip()
+        date_from = (query.get("date_from") or [""])[0].strip()
+        date_to = (query.get("date_to") or [""])[0].strip()
+        date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+        if not campaign_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido campaign_id."})
+            return
+        if not date_pattern.match(date_from) or not date_pattern.match(date_to):
+            self._send_json(400, {"error": "date_from y date_to deben tener formato AAAA-MM-DD."})
+            return
+        try:
+            span = (datetime.date.fromisoformat(date_to) - datetime.date.fromisoformat(date_from)).days
+        except ValueError:
+            self._send_json(400, {"error": "Fechas inválidas."})
+            return
+        if span < 0 or span > 366:
+            self._send_json(400, {"error": "El rango debe ir de 1 a 366 días."})
+            return
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, {"days": google_ads_client.simulated_campaign_daily(campaign_id, date_from, date_to), "simulated": True, "currency": "USD"})
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        user = self._get_current_user()
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            days = google_ads_client.fetch_campaign_daily(customer_id, campaign_id, date_from, date_to)
+            self._send_json(200, {"days": days, "simulated": False, "currency": google_ads_client.fetch_customer_currency(customer_id)})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    def _handle_google_ads_campaign_breakdown(self, query):
+        # Detalle de una campaña en Campañas: sus grupos activos y a dónde se dirige, con KPIs del rango.
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        campaign_id = (query.get("campaign_id") or [""])[0].strip()
+        channel_type = (query.get("channel_type") or [""])[0].strip()
+        date_from = (query.get("date_from") or [""])[0].strip()
+        date_to = (query.get("date_to") or [""])[0].strip()
+        date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+        if not campaign_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido campaign_id."})
+            return
+        if not date_pattern.match(date_from) or not date_pattern.match(date_to):
+            self._send_json(400, {"error": "date_from y date_to deben tener formato AAAA-MM-DD."})
+            return
+
+        if not google_ads_client.is_configured():
+            data = google_ads_client.simulated_campaign_breakdown(campaign_id) or {"groups": {"kind": "ad_group", "groups": []}, "targeting": {"locations": [], "radii": [], "languages": [], "geo_target_type": None}}
+            self._send_json(200, {**data, **google_ads_client.simulated_breakdown_previous(campaign_id), "errors": {}, "simulated": True, "currency": "USD"})
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        user = self._get_current_user()
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        out = {"groups": None, "targeting": None, "errors": {}, "simulated": False,
+               "currency": google_ads_client.fetch_customer_currency(customer_id)}
+        # Periodo anterior (opcional) para mostrar la variación de cada grupo y de cada ubicación.
+        prev_from = (query.get("prev_from") or [""])[0].strip()
+        prev_to = (query.get("prev_to") or [""])[0].strip()
+        if date_pattern.match(prev_from) and date_pattern.match(prev_to):
+            try:
+                prev = google_ads_client.fetch_campaign_groups(customer_id, campaign_id, channel_type, prev_from, prev_to)
+                out["prev_groups"] = {g["id"]: g for g in prev["groups"]}
+            except Exception:  # noqa: BLE001 — sin comparación las tablas se ven igual
+                out["prev_groups"] = {}
+            try:
+                out["prev_locations"] = google_ads_client.fetch_campaign_location_metrics(customer_id, campaign_id, prev_from, prev_to)
+            except Exception:  # noqa: BLE001
+                out["prev_locations"] = {}
+        failures = []
+        try:
+            out["groups"] = google_ads_client.fetch_campaign_groups(customer_id, campaign_id, channel_type, date_from, date_to)
+        except Exception as e:  # noqa: BLE001
+            failures.append(("groups", e))
+        try:
+            out["targeting"] = google_ads_client.fetch_campaign_targeting(customer_id, campaign_id, date_from, date_to)
+        except Exception as e:  # noqa: BLE001
+            failures.append(("targeting", e))
+        if len(failures) == 2:
+            # Si fallaron las dos, es un problema general de la API: se responde igual que el resto de reportes.
+            self._send_google_ads_error(failures[0][1])
+            return
+        for name, exc in failures:
+            out["errors"][name] = " ".join(str(exc).split())[:300]
+        self._send_json(200, out)
+
+    def _handle_google_ads_campaign_insight(self, query):
+        # Pestañas del detalle de una campaña (resumen y comparación, segmentos, palabras clave, posición).
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        campaign_id = (query.get("campaign_id") or [""])[0].strip()
+        view = (query.get("view") or [""])[0].strip()
+        date_from = (query.get("date_from") or [""])[0].strip()
+        date_to = (query.get("date_to") or [""])[0].strip()
+        prev_from = (query.get("prev_from") or [""])[0].strip()
+        prev_to = (query.get("prev_to") or [""])[0].strip()
+        date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+        if view not in ("context", "segments", "keywords", "position"):
+            self._send_json(400, {"error": "Vista desconocida."})
+            return
+        if not campaign_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido campaign_id."})
+            return
+        if not date_pattern.match(date_from) or not date_pattern.match(date_to):
+            self._send_json(400, {"error": "date_from y date_to deben tener formato AAAA-MM-DD."})
+            return
+        has_prev = bool(date_pattern.match(prev_from) and date_pattern.match(prev_to))
+
+        if not google_ads_client.is_configured():
+            data = google_ads_client.simulated_campaign_insight(view, campaign_id)
+            self._send_json(200, {"data": data, "simulated": True, "currency": "USD"})
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        user = self._get_current_user()
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            if view == "context":
+                data = google_ads_client.fetch_campaign_context(customer_id, campaign_id, date_from, date_to, prev_from if has_prev else None, prev_to if has_prev else None)
+            elif view == "segments":
+                data = google_ads_client.fetch_campaign_segments(customer_id, campaign_id, date_from, date_to)
+            elif view == "keywords":
+                data = google_ads_client.fetch_campaign_keywords(customer_id, campaign_id, date_from, date_to)
+            else:
+                data = google_ads_client.fetch_campaign_position(customer_id, campaign_id, date_from, date_to, prev_from if has_prev else None, prev_to if has_prev else None)
+            self._send_json(200, {"data": data, "simulated": False, "currency": google_ads_client.fetch_customer_currency(customer_id)})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    def _handle_google_ads_account_changes(self, query):
+        # Historial de cambios de una cuenta (change_event, últimos 30 días como máximo). Solo lectura.
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        days_raw = (query.get("days") or ["30"])[0].strip()
+        if not days_raw.isdigit() or not 1 <= int(days_raw) <= 30:
+            self._send_json(400, {"error": "days debe ser un número entre 1 y 30 (Google solo guarda 30 días de cambios)."})
+            return
+        days = int(days_raw)
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, {**google_ads_client.simulated_account_changes(days), "simulated": True, "currency": "USD"})
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        user = self._get_current_user()
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+        try:
+            data = google_ads_client.fetch_account_changes(customer_id, days)
+            self._send_json(200, {**data, "simulated": False, "currency": google_ads_client.fetch_customer_currency(customer_id)})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    def _handle_google_ads_campaign_status(self, payload):
+        # Pausa o activa una campaña. Escribe de verdad en Google Ads cuando validate_only es false.
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not _write_limiter.allow(f"user:{user['id']}", *WRITE_RATE_LIMIT):
+            self._send_json(429, {"error": "Demasiadas escrituras seguidas. Espera un minuto y vuelve a intentar."})
+            return
+        customer_id = str(payload.get("customer_id") or "").strip()
+        campaign_id = str(payload.get("campaign_id") or "").strip()
+        status = str(payload.get("status") or "").strip()
+        old_status = str(payload.get("old_status") or "").strip()[:20]
+        campaign_name = str(payload.get("campaign_name") or "")
+        validate_only = payload.get("validate_only", True) is not False
+
+        if status not in google_ads_client.CAMPAIGN_STATUS_VALUES:
+            self._send_json(400, {"error": "El estado debe ser ENABLED o PAUSED."})
+            return
+        if not campaign_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido campaign_id."})
+            return
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, google_ads_client.simulated_update_campaign_status(campaign_id, status, validate_only))
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            result = google_ads_client.update_campaign_status(customer_id, campaign_id, status, validate_only)
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+            return
+        if not validate_only:
+            try:
+                store_campaign_status_change(user["id"], customer_id, campaign_id, campaign_name, old_status, status)
+            except Exception as e:  # noqa: BLE001 — el cambio ya quedó en Google Ads; un fallo del registro no debe ocultarlo
+                print(f"[campaign-status-log] {e}", flush=True)
+        self._send_json(200, result)
 
     def _handle_google_ads_campaign_list(self, query):
         # Listado liviano de TODAS las campañas activas de la cuenta (no

@@ -235,6 +235,22 @@ const state = {
       flow: { status: 'idle', preview: null, result: null, error: null }, // idle | previewing | preview_ready | applying | done | error
     },
   },
+  // Campañas — todas las campañas de las cuentas de la lista de Ritmo de consumo, con KPIs del rango y
+  // pausar/activar desde la misma fila. Solo super admin mientras se afina.
+  campanas: {
+    watchlistStatus: 'idle', watchlist: [], status: 'idle', error: null, partial: [], rows: [], simulated: false,
+    dateFrom: hotelDefaultDates().from, dateTo: hotelDefaultDates().to, loadToken: 0,
+    hotelBy: 'cuenta', hotelFilter: 'all', typeFilter: 'all', statusFilter: 'ENABLED', sortBy: 'cost', search: '',
+    confirm: null, busy: {}, notice: null,
+    loadedFrom: '', loadedTo: '', // rango con el que se trajo la tabla; el detalle de cada campaña usa el mismo
+    detail: emptyCampanaDetail(0),
+  },
+  // Historial de cambios (change_event) de una cuenta de la lista de Ritmo de consumo. Solo super admin mientras se afina.
+  cambios: {
+    watchlistStatus: 'idle', watchlist: [], accountId: '', days: 30,
+    status: 'idle', error: null, rows: [], truncated: false, warnings: {}, simulated: false, currency: '',
+    loaded: null, loadToken: 0, filters: emptyCambiosFilters(), limit: 100,
+  },
   // IA Max (AI Max for Search) — a diferencia de "Ask Advisor", sí tiene
   // API real (Campaign.ai_max_setting, desde v25). Tres sub-vistas sobre
   // las mismas campañas Search de la cuenta elegida: estado/toggle, qué
@@ -393,7 +409,7 @@ const state = {
     // (KPIs del mes en curso + presupuesto diario, ajustable) — se abre al
     // hacer click en el nombre de la cuenta en la tabla.
     campaignsModal: {
-      customerId: null, accountName: null,
+      customerId: null, accountName: null, highlightId: null, // highlightId: campaña a resaltar (viene del detalle de Campañas)
       status: 'idle', rows: null, error: null, simulated: false,
       adjust: {
         budgetResourceName: null, newBudget: '',
@@ -455,6 +471,14 @@ function themedFontsLink(legacyHref) {
 const PLUS_JAKARTA_HREF = 'https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;700;800&display=swap';
 
 const PAGE_META = {
+  cambios: {
+    title: 'Historial de cambios',
+    caption: 'Quién cambió qué en una cuenta de Google Ads en los últimos 30 días: presupuestos, pujas, estados, negativas y anuncios, con filtros y descarga en CSV y HTML.',
+  },
+  campanas: {
+    title: 'Campañas',
+    caption: 'Todas las campañas de las cuentas de tu lista de Ritmo de consumo, con sus KPIs; pausa o activa cada una desde aquí y filtra por hotel y tipo de campaña.',
+  },
   rendimiento: {
     title: 'Análisis de rendimiento',
     caption: 'Sube un export de campañas (CSV/Excel) y obtén gráficas y recomendaciones de optimización priorizadas por gasto.',
@@ -817,6 +841,8 @@ function render() {
   else if (state.page === 'recomendaciones') pageHtml = renderRecsPage();
   else if (state.page === 'iamax') pageHtml = renderIaMaxPage();
   else if (state.page === 'hoteles') pageHtml = renderHotelPage();
+  else if (state.page === 'campanas') pageHtml = renderCampanasPage();
+  else if (state.page === 'cambios') pageHtml = renderCambiosPage();
   else if (state.page === 'exclusiones') pageHtml = renderContentExclusionsPage();
   else if (state.page === 'keywordplanner') pageHtml = renderKeywordPlannerPage();
   else if (state.page === 'pacing') pageHtml = renderPacingPage();
@@ -1387,6 +1413,7 @@ function mountCharts() {
   if (state.page === 'rendimiento') mountRendCharts();
   else if (state.page === 'roas') mountRoasCharts();
   else if (state.page === 'keywordplanner') mountKeywordPlannerCharts();
+  else if (state.page === 'campanas') mountCampanaCharts();
 }
 
 function mountRendCharts() {
@@ -6195,7 +6222,8 @@ function loadRoasGoogleAdsAccounts() {
     });
 }
 
-function fetchRoasByCampaign() {
+// focusId: campaña que viene del detalle de Campañas; si se puede ajustar, queda con el editor abierto.
+function fetchRoasByCampaign(focusId) {
   const s = state.roas;
   const a = s.api;
   const manualId = (a.accountIdManual || '').replace(/[^0-9]/g, '');
@@ -6204,7 +6232,7 @@ function fetchRoasByCampaign() {
   if (!a.dateFrom || !a.dateTo) { a.error = 'Elige el rango de fechas primero.'; render(); return; }
 
   a.error = null;
-  s.status = 'loading'; s.error = null;
+  s.status = 'loading'; s.error = null; s.focusId = focusId || null; s.focusNote = null;
   render();
 
   const params = new URLSearchParams({ customer_id: customerId || '', date_from: a.dateFrom, date_to: a.dateTo, only_active: a.onlyActive ? '1' : '0' });
@@ -6216,7 +6244,15 @@ function fetchRoasByCampaign() {
       s.rows = data.rows || [];
       s.status = 'ready';
       s.adjust = { campaignId: null, newTargetRoas: '', status: 'idle', preview: null, result: null, error: null };
+      if (focusId) {
+        const fr = s.rows.find((r) => r.campaign_id === focusId);
+        if (!fr) s.focusNote = 'Esa campaña no tiene datos en este rango de fechas, así que no aparece en la tabla.';
+        else if (fr.is_portfolio) s.focusNote = 'Esa campaña usa una estrategia de puja compartida con otras campañas: aquí solo se puede ver.';
+        else if (!fr.adjustable) s.focusNote = `Esa campaña usa la estrategia ${roasStrategyLabel(fr)}, que no tiene ROAS objetivo para ajustar.`;
+        else s.adjust.campaignId = focusId;
+      }
       render();
+      if (focusId) scrollToFocusRow('roas-focus-row');
     })
     .catch((err) => {
       a.error = err.message || String(err);
@@ -6518,7 +6554,7 @@ function renderRoasPage() {
   } else if (s.status === 'ready') {
     const rows = [...(s.rows || [])].sort((a, b) => (b.roas ?? -1) - (a.roas ?? -1));
     const rowsHtml = rows.map((r) => `
-      <tr>
+      <tr${s.focusId && r.campaign_id === s.focusId ? ' id="roas-focus-row" style="background:var(--gold-100,#fdf1d8)"' : ''}>
         <td>${escapeHtml(r.campaign_name)}</td>
         <td>${escapeHtml(roasStrategyLabel(r))}</td>
         <td>${r.roas != null ? (r.roas * 100).toFixed(0) + '%' : 'N/D'}</td>
@@ -6553,7 +6589,8 @@ function renderRoasPage() {
     body = `<div class="error-panel"><strong>No se pudo traer el reporte.</strong> ${escapeHtml(s.error)}</div>`;
   }
 
-  return `${controlPanel}${body}`;
+  const focusNote = s.focusNote ? `<div class="error-panel" style="margin-bottom:16px">${escapeHtml(s.focusNote)}</div>` : '';
+  return `${controlPanel}${focusNote}${body}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -6588,7 +6625,8 @@ function loadRecsGoogleAdsAccounts() {
     });
 }
 
-function fetchRecommendations() {
+// focusName: campaña que viene del detalle de Campañas; deja el filtro puesto en ella si Google tiene recomendaciones para ella.
+function fetchRecommendations(focusName) {
   const s = state.recs;
   const a = s.api;
   const manualId = (a.accountIdManual || '').replace(/[^0-9]/g, '');
@@ -6596,7 +6634,7 @@ function fetchRecommendations() {
   if (!customerId && !a.simulated) { a.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
 
   a.error = null;
-  s.status = 'loading'; s.error = null;
+  s.status = 'loading'; s.error = null; s.focusNote = null;
   render();
 
   const params = new URLSearchParams({ customer_id: customerId || '' });
@@ -6610,6 +6648,10 @@ function fetchRecommendations() {
       s.score = data.score || null;
       s.actions = {};
       s.campaignFilter = 'all';
+      if (focusName) {
+        if (s.rows.some((r) => r.campaign_name === focusName)) s.campaignFilter = focusName;
+        else s.focusNote = 'Google no tiene recomendaciones activas para esa campaña; se muestran las de toda la cuenta.';
+      }
       s.status = 'ready';
       render();
     })
@@ -6939,7 +6981,8 @@ function renderRecsPageBody() {
     body = `<div class="error-panel"><strong>No se pudo traer las recomendaciones.</strong> ${escapeHtml(s.error)}</div>`;
   }
 
-  return `${controlPanel}${body}`;
+  const focusNote = s.focusNote ? `<div class="ok-panel" style="margin-bottom:16px">${escapeHtml(s.focusNote)}</div>` : '';
+  return `${controlPanel}${focusNote}${body}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -11507,9 +11550,9 @@ function renderPacingTable() {
     </div>`;
 }
 
-function openPacingCampaignsModal(customerId, accountName) {
+function openPacingCampaignsModal(customerId, accountName, highlightId) {
   const cm = state.pacing.campaignsModal;
-  cm.customerId = customerId; cm.accountName = accountName;
+  cm.customerId = customerId; cm.accountName = accountName; cm.highlightId = highlightId || null;
   cm.status = 'loading'; cm.rows = null; cm.error = null;
   cm.adjust = { budgetResourceName: null, newBudget: '', status: 'idle', preview: null, result: null, error: null };
   cm.revealedRoasIds = new Set();
@@ -11523,6 +11566,7 @@ function openPacingCampaignsModal(customerId, accountName) {
       cm.currency = data.currency || '';
       cm.status = 'ready';
       render();
+      scrollToFocusRow('pacing-focus-row');
     })
     .catch((err) => {
       cm.status = 'error'; cm.error = err.message || String(err);
@@ -11532,7 +11576,7 @@ function openPacingCampaignsModal(customerId, accountName) {
 
 function closePacingCampaignsModal() {
   const cm = state.pacing.campaignsModal;
-  cm.customerId = null; cm.accountName = null; cm.status = 'idle'; cm.rows = null; cm.error = null;
+  cm.customerId = null; cm.accountName = null; cm.highlightId = null; cm.status = 'idle'; cm.rows = null; cm.error = null;
   render();
 }
 
@@ -11657,8 +11701,9 @@ function pacingStrategyCell(row) {
 }
 
 function pacingCampaignRowHtml(row) {
+  const focus = state.pacing.campaignsModal.highlightId === row.campaign_id;
   return `
-    <tr>
+    <tr${focus ? ' id="pacing-focus-row" style="background:var(--gold-100,#fdf1d8)"' : ''}>
       <td>${escapeHtml(row.campaign_name)}</td>
       <td>${pacingStrategyCell(row)}</td>
       <td>${fmtInt(row.impressions)}</td>
@@ -11716,6 +11761,7 @@ function renderPacingCampaignsModalBody() {
       </tr>`;
       body = `
         ${cm.simulated ? `<div class="ok-panel" style="margin-bottom:12px"><strong>Modo simulado.</strong> Datos de ejemplo, no de una cuenta real.</div>` : ''}
+        ${cm.highlightId && !cm.rows.some((r) => r.campaign_id === cm.highlightId) ? `<div class="error-panel" style="margin-bottom:12px">La campaña que venías viendo no aparece aquí: esta lista solo trae campañas activas.</div>` : (cm.highlightId ? `<p class="field-hint" style="margin:0 0 12px">La campaña que venías viendo está resaltada.</p>` : '')}
         <div class="table-scroll">
           <table>
             <thead><tr>
@@ -12033,7 +12079,1313 @@ function renderAdminPage() {
 // Eventos
 // ---------------------------------------------------------------------------
 
+// ---- Campañas: listado de las campañas de tus cuentas vigiladas, con KPIs y pausar/activar ----
+const CAMPANAS_RENDER_LIMIT = 400;
+const CAMPAIGN_CHANNEL_LABELS = {
+  SEARCH: 'Search', PERFORMANCE_MAX: 'Performance Max', DISPLAY: 'Display', DEMAND_GEN: 'Demand Gen', DISCOVERY: 'Demand Gen',
+  VIDEO: 'YouTube', SHOPPING: 'Shopping', HOTEL: 'Hotel', TRAVEL: 'Viajes', MULTI_CHANNEL: 'App', SMART: 'Smart',
+  LOCAL: 'Local', LOCAL_SERVICES: 'Servicios locales',
+};
+
+function campanasTypeLabel(t) { return CAMPAIGN_CHANNEL_LABELS[t] || (t ? t.toLowerCase().replace(/_/g, ' ') : 'Otro'); }
+
+function campanasHotelOf(r) {
+  return state.campanas.hotelBy === 'nombre' ? deriveHotelName(r.campaign_name) : r.account_name;
+}
+
+function campanasMoney(v, currency) { return withMoneyCurrency(currency, () => fmtMoney(v)); }
+
+// Cuota de impresiones y similares llegan como fracción 0-1; si Google no las da para el tipo de campaña, son null.
+// Google devuelve ~0.0999 para "menos del 10%" (Performance Max).
+function campanasShare(v) { return v == null ? 'N/D' : (Math.abs(v - 0.0999) < 0.0002 ? '< 10%' : (v * 100).toFixed(1) + '%'); }
+
+// Estrategia de puja como la nombra Google Ads: con objetivo configurado se llama "ROAS objetivo" o "CPA objetivo".
+function campanasStrategy(r) {
+  let label = BID_STRATEGY_LABELS_ES[r.bidding_strategy_type] || r.bidding_strategy_type || 'N/D';
+  let target = '';
+  if (r.bidding_strategy_type === 'MAXIMIZE_CONVERSION_VALUE' && r.target_roas != null) label = 'ROAS objetivo';
+  if (r.bidding_strategy_type === 'MAXIMIZE_CONVERSIONS' && r.target_cpa != null) label = 'CPA objetivo';
+  if (r.target_roas != null && (r.bidding_strategy_type === 'TARGET_ROAS' || label === 'ROAS objetivo')) target = `${r.target_roas.toFixed(2)}×`;
+  else if (r.target_cpa != null && (r.bidding_strategy_type === 'TARGET_CPA' || label === 'CPA objetivo')) target = campanasMoney(r.target_cpa, r.currency);
+  return { label, target };
+}
+
+// Se llama desde el dibujado de la página: solo arranca la carga la primera vez que se entra.
+function ensureCampanasLoaded() {
+  const c = state.campanas;
+  if (c.watchlistStatus !== 'idle' || !currentUser.isSuperAdmin) return;
+  c.watchlistStatus = 'loading';
+  setTimeout(loadCampanas, 0);
+}
+
+// Lee la lista de cuentas de Ritmo de consumo y trae las campañas de cada una.
+function loadCampanas() {
+  const c = state.campanas;
+  if (!c.dateFrom || !c.dateTo || c.dateFrom > c.dateTo) { c.error = 'Elige un rango de fechas válido (desde no puede ser posterior a hasta).'; render(); return; }
+  const token = ++c.loadToken;
+  c.loadedFrom = c.dateFrom; c.loadedTo = c.dateTo;
+  c.detail = emptyCampanaDetail(c.detail.token + 1);
+  c.watchlistStatus = 'loading'; c.status = 'loading'; c.error = null; c.partial = []; c.confirm = null; c.notice = null;
+  render();
+  fetch('/api/google-ads/pacing/watchlist')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      c.watchlist = data.watchlist || [];
+      c.watchlistStatus = 'ready';
+      if (!c.watchlist.length) { if (token === c.loadToken) { c.rows = []; c.status = 'ready'; render(); } return null; }
+      return oppMapPool(c.watchlist, 4, (acc) => {
+        const params = new URLSearchParams({ customer_id: acc.customer_id, date_from: c.dateFrom, date_to: c.dateTo });
+        return fetch(`/api/google-ads/campaigns-overview?${params.toString()}`)
+          .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+          .then(({ ok: good, d }) => { if (!good) throw new Error(d.error || 'Error desconocido.'); return { acc, d }; })
+          .catch((err) => ({ acc, error: err.message || String(err) }));
+      });
+    })
+    .then((results) => {
+      if (!results || token !== c.loadToken) return;
+      const nameOf = (acc) => acc.account_name || acc.customer_id;
+      c.rows = results.filter((x) => !x.error).flatMap(({ acc, d }) => (d.campaigns || []).map((camp) => ({
+        ...camp, key: `${acc.customer_id}:${camp.campaign_id}`, customer_id: acc.customer_id,
+        account_name: nameOf(acc), currency: d.currency || '',
+      })));
+      c.partial = results.filter((x) => x.error).map((x) => `${nameOf(x.acc)}: ${x.error}`);
+      c.simulated = results.some((x) => x.d && x.d.simulated);
+      c.hotelFilter = 'all'; c.typeFilter = 'all';
+      c.status = 'ready';
+      render();
+    })
+    .catch((err) => {
+      if (token !== c.loadToken) return;
+      c.watchlistStatus = 'error'; c.status = 'error'; c.error = err.message || String(err);
+      render();
+    });
+}
+
+// Pausa o activa una campaña. Escribe de verdad en Google Ads; la confirmación ya se pidió en la propia fila.
+function setCampanaStatus(key, newStatus) {
+  const c = state.campanas;
+  const row = c.rows.find((r) => r.key === key);
+  if (!row || c.busy[key]) return;
+  c.busy[key] = true; c.confirm = null; c.notice = null;
+  render();
+  fetch('/api/google-ads/campaign-status', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customer_id: row.customer_id, campaign_id: row.campaign_id, campaign_name: row.campaign_name,
+      old_status: row.status, status: newStatus, validate_only: false,
+    }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      row.status = newStatus;
+      c.notice = { kind: 'ok', text: `${newStatus === 'PAUSED' ? 'Pausada' : 'Activada'}: ${row.campaign_name} (${row.account_name}).` };
+    })
+    .catch((err) => { c.notice = { kind: 'error', text: `No se pudo cambiar "${row.campaign_name}": ${err.message || err}` }; })
+    .finally(() => { delete c.busy[key]; render(); });
+}
+
+function campanasFilteredRows() {
+  const c = state.campanas;
+  const q = (c.search || '').trim().toLowerCase();
+  let rows = c.rows.filter((r) => {
+    if (c.statusFilter !== 'all' && r.status !== c.statusFilter) return false;
+    if (c.hotelFilter !== 'all' && campanasHotelOf(r) !== c.hotelFilter) return false;
+    if (c.typeFilter !== 'all' && r.channel_type !== c.typeFilter) return false;
+    if (q && !r.campaign_name.toLowerCase().includes(q) && !r.account_name.toLowerCase().includes(q)) return false;
+    return true;
+  });
+  const by = c.sortBy;
+  rows = rows.slice().sort((a, b) => {
+    if (by === 'name') return a.campaign_name.localeCompare(b.campaign_name);
+    if (by === 'hotel') return campanasHotelOf(a).localeCompare(campanasHotelOf(b)) || b.cost - a.cost;
+    return (b[by] || 0) - (a[by] || 0);
+  });
+  return rows;
+}
+
+function campanasTotalsHtml(rows) {
+  // Cada moneda se suma por separado: euros y pesos no se pueden mezclar.
+  const byCur = new Map();
+  rows.forEach((r) => {
+    const t = byCur.get(r.currency) || { cost: 0, impressions: 0, clicks: 0, conversions: 0, conv_value: 0, n: 0 };
+    t.cost += r.cost; t.impressions += r.impressions; t.clicks += r.clicks; t.conversions += r.conversions; t.conv_value += r.conv_value; t.n += 1;
+    byCur.set(r.currency, t);
+  });
+  const multi = byCur.size > 1;
+  return [...byCur.entries()].map(([cur, t]) => `
+    ${multi ? `<p class="field-hint" style="margin:0 0 6px"><strong>${escapeHtml(cur || 'Sin moneda')}</strong> · ${fmtInt(t.n)} campañas</p>` : ''}
+    <div class="stat-grid">
+      <div class="card stat-card"><div class="stat-label">Gasto</div><div class="stat-value">${campanasMoney(t.cost, cur)}</div></div>
+      <div class="card stat-card"><div class="stat-label">Clics</div><div class="stat-value">${fmtInt(t.clicks)}</div><div class="stat-sub">CTR ${t.impressions ? ((t.clicks / t.impressions) * 100).toFixed(2) + '%' : 'N/D'}</div></div>
+      <div class="card stat-card"><div class="stat-label">Conversiones</div><div class="stat-value">${fmtInt(t.conversions)}</div><div class="stat-sub">CPA ${t.conversions ? campanasMoney(t.cost / t.conversions, cur) : 'N/D'}</div></div>
+      <div class="card stat-card"><div class="stat-label">ROAS</div><div class="stat-value">${t.cost > 0 && t.conv_value > 0 ? (t.conv_value / t.cost).toFixed(2) + '×' : 'N/D'}</div><div class="stat-sub">Valor ${campanasMoney(t.conv_value, cur)}</div></div>
+    </div>`).join('');
+}
+
+function renderCampanasRow(r) {
+  const c = state.campanas;
+  const active = r.status === 'ENABLED';
+  const busy = !!c.busy[r.key];
+  const target = active ? 'PAUSED' : 'ENABLED';
+  let actionCell;
+  if (busy) actionCell = '<span class="field-hint">Aplicando…</span>';
+  else if (c.confirm === r.key) {
+    actionCell = `
+      <span class="field-hint" style="margin-right:6px;display:inline">¿${active ? 'Pausar' : 'Activar'}?</span>
+      <button class="btn-accent xs" data-camp-do="${escapeHtml(r.key)}" data-camp-status="${target}">Sí, ${active ? 'pausar' : 'activar'}</button>
+      <button class="btn-outline xs" data-camp-cancel="1">Cancelar</button>`;
+  } else {
+    actionCell = `<button class="btn-outline xs" data-camp-ask="${escapeHtml(r.key)}">${active ? 'Pausar' : 'Activar'}</button>`;
+  }
+  const cur = r.currency;
+  const strat = campanasStrategy(r);
+  return `
+    <tr>
+      <td data-camp-open="${escapeHtml(r.key)}" style="cursor:pointer" title="Ver las gráficas de esta campaña"><strong style="text-decoration:underline;text-decoration-color:var(--color-border);text-underline-offset:3px">${escapeHtml(r.campaign_name)}</strong><div class="field-hint">${escapeHtml(campanasHotelOf(r))}</div></td>
+      <td style="min-width:150px"><div style="margin-bottom:4px"><strong>${active ? 'Activa' : 'Pausada'}</strong></div>${actionCell}</td>
+      <td>${escapeHtml(campanasTypeLabel(r.channel_type))}</td>
+      <td>${escapeHtml(strat.label)}${strat.target ? `<div class="field-hint">${escapeHtml(strat.target)}</div>` : ''}</td>
+      <td>${r.budget == null ? 'N/D' : campanasMoney(r.budget, cur)}</td>
+      <td>${campanasMoney(r.cost, cur)}</td>
+      <td>${fmtInt(r.impressions)}</td>
+      <td>${fmtInt(r.clicks)}</td>
+      <td>${r.impressions ? ((r.clicks / r.impressions) * 100).toFixed(2) + '%' : 'N/D'}</td>
+      <td>${r.clicks ? campanasMoney(r.cost / r.clicks, cur) : 'N/D'}</td>
+      <td>${r.conversions ? r.conversions.toFixed(r.conversions % 1 ? 1 : 0) : '0'}</td>
+      <td>${r.conversions ? campanasMoney(r.cost / r.conversions, cur) : 'N/D'}</td>
+      <td>${r.cost > 0 && r.conv_value > 0 ? (r.conv_value / r.cost).toFixed(2) + '×' : 'N/D'}</td>
+      <td>${campanasShare(r.impr_share)}</td>
+      <td>${campanasShare(r.top_impr_share)}</td>
+      <td>${campanasShare(r.lost_is_budget)}</td>
+      <td>${campanasShare(r.lost_is_rank)}</td>
+    </tr>`;
+}
+
+function renderCampanasPage() {
+  const c = state.campanas;
+  if (!currentUser.isSuperAdmin) {
+    return `<div class="card state-panel idle"><p>Esta sección todavía no está disponible para tu usuario.</p></div>`;
+  }
+  ensureCampanasLoaded();
+
+  const controls = `
+    <div class="card control-panel align-end">
+      <div class="field"><label>Desde</label><input type="date" id="camp-date-from" value="${escapeHtml(c.dateFrom)}" /></div>
+      <div class="field"><label>Hasta</label><input type="date" id="camp-date-to" value="${escapeHtml(c.dateTo)}" /></div>
+      <button class="btn-outline" data-action="camp-refresh">Actualizar</button>
+      <p class="field-hint" style="max-width:380px">Se muestran las campañas de las cuentas de tu lista de <strong>Ritmo de consumo</strong>${c.watchlistStatus === 'ready' ? ` (${fmtInt(c.watchlist.length)})` : ''}. Los KPIs son del rango elegido; el estado es el actual.</p>
+    </div>`;
+
+  const notice = c.notice ? `<div class="${c.notice.kind === 'ok' ? 'ok-panel' : 'error-panel'}" style="margin-bottom:16px">${escapeHtml(c.notice.text)}</div>` : '';
+  const errorHtml = c.error ? `<div class="error-panel">${escapeHtml(c.error)}</div>` : '';
+
+  if (c.status === 'idle' || c.status === 'loading') {
+    return `${controls}${errorHtml}<div class="card state-panel loading"><div class="spinner"></div><p>Trayendo las campañas de tus cuentas…</p></div>`;
+  }
+  if (c.status === 'error') return `${controls}${errorHtml}`;
+  if (!c.watchlist.length) {
+    return `${controls}
+      <div class="card state-panel idle">
+        ${icon('list-checks', 30)}
+        <p>Tu lista de Ritmo de consumo está vacía. Agrega ahí las cuentas que quieras ver y vuelve a esta sección.</p>
+        <button class="btn-outline" data-action="camp-go-pacing">Ir a Ritmo de consumo</button>
+      </div>`;
+  }
+
+  const hotels = [...new Set(c.rows.map(campanasHotelOf))].sort((a, b) => a.localeCompare(b));
+  const types = [...new Set(c.rows.map((r) => r.channel_type))].sort((a, b) => campanasTypeLabel(a).localeCompare(campanasTypeLabel(b)));
+  const opt = (value, label, current) => `<option value="${escapeHtml(value)}" ${current === value ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+  const filters = `
+    <div class="card control-panel align-end">
+      <div class="field"><label>Hotel según</label>
+        <select id="camp-hotel-by" style="width:200px">${opt('cuenta', 'La cuenta', c.hotelBy)}${opt('nombre', 'El nombre de la campaña', c.hotelBy)}</select>
+      </div>
+      <div class="field"><label>Hotel</label>
+        <select id="camp-hotel-filter" style="width:240px">${opt('all', 'Todos los hoteles', c.hotelFilter)}${hotels.map((h) => opt(h, h, c.hotelFilter)).join('')}</select>
+      </div>
+      <div class="field"><label>Tipo de campaña</label>
+        <select id="camp-type-filter" style="width:200px">${opt('all', 'Todos los tipos', c.typeFilter)}${types.map((t) => opt(t, campanasTypeLabel(t), c.typeFilter)).join('')}</select>
+      </div>
+      <div class="field"><label>Estado</label>
+        <select id="camp-status-filter" style="width:150px">${opt('ENABLED', 'Activas', c.statusFilter)}${opt('PAUSED', 'Pausadas', c.statusFilter)}${opt('all', 'Todas', c.statusFilter)}</select>
+      </div>
+      <div class="field"><label>Ordenar por</label>
+        <select id="camp-sort" style="width:150px">${opt('cost', 'Gasto', c.sortBy)}${opt('conversions', 'Conversiones', c.sortBy)}${opt('clicks', 'Clics', c.sortBy)}${opt('hotel', 'Hotel', c.sortBy)}${opt('name', 'Nombre', c.sortBy)}</select>
+      </div>
+      <div class="field"><label>Buscar</label><input type="text" id="camp-search" placeholder="Campaña u hotel…" value="${escapeHtml(c.search)}" style="width:220px" /></div>
+    </div>`;
+
+  const partial = c.partial.length ? `<div class="error-panel" style="margin-bottom:16px"><strong>No se pudieron leer ${c.partial.length} cuenta(s):</strong><br>${c.partial.map(escapeHtml).join('<br>')}</div>` : '';
+  const sim = c.simulated ? `<div class="ok-panel" style="margin:10px 0"><strong>Modo simulado.</strong> La API de Google Ads no está configurada en el servidor: son datos de ejemplo y pausar o activar no escribe en ninguna cuenta.</div>` : '';
+
+  const rows = campanasFilteredRows();
+  const shown = rows.slice(0, CAMPANAS_RENDER_LIMIT);
+  const nActive = rows.filter((r) => r.status === 'ENABLED').length;
+  const table = `
+    <div class="card table-panel">
+      <div class="table-panel-head"><h3>Campañas (${fmtInt(rows.length)}) · ${fmtInt(nActive)} activas <span class="field-hint" style="font-weight:400">· haz clic en una campaña para ver sus gráficas</span></h3></div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th style="min-width:240px">Campaña</th><th>Estado</th><th>Tipo</th><th>Estrategia de puja</th><th>Presupuesto/día</th><th>Gasto</th><th>Impr.</th><th>Clics</th><th>CTR</th><th>CPC</th><th>Conv.</th><th>CPA</th><th>ROAS</th><th>Cuota de impr.</th><th>Cuota de impr. superior</th><th>Cuota perdida (presupuesto)</th><th>Cuota perdida (ranking)</th></tr></thead>
+          <tbody>${shown.map(renderCampanasRow).join('') || '<tr><td colspan="17" class="footnote">Ninguna campaña coincide con los filtros.</td></tr>'}</tbody>
+        </table>
+      </div>
+      <p class="footnote" style="margin-top:10px">Las cuatro cuotas de impresiones son del rango elegido; Google no las da para todos los tipos de campaña (p. ej. Display), y ahí aparece N/D. "Cuota de impr. superior" es la parte de impresiones que salió en las posiciones de arriba.</p>
+      ${rows.length > shown.length ? `<p class="footnote" style="margin-top:10px">Mostrando ${shown.length} de ${fmtInt(rows.length)}. Usa los filtros para acotar.</p>` : ''}
+    </div>`;
+
+  return `${controls}${sim}${partial}${notice}${filters}${rows.length ? campanasTotalsHtml(rows) : ''}${table}${renderCampanaDetailModal()}`;
+}
+
+// ---- Campañas: ventana de detalle de una campaña, con pestañas ----
+const CAMPANA_TABS = [
+  ['resumen', 'Resumen'], ['graficas', 'Gráficas'], ['grupos', 'Grupos y regiones'], ['segmentos', 'Segmentos'],
+  ['palabras', 'Palabras clave'], ['posicion', 'Posición en la subasta'], ['cambios', 'Cambios'],
+];
+
+function emptyCampanaPart() { return { status: 'idle', error: null, data: null }; }
+
+// `daily` (gráficas) guarda status/error/days; el resto de pestañas, una "parte" cada una.
+function emptyCampanaDetail(token) {
+  return {
+    key: null, token, tab: 'resumen',
+    status: 'idle', error: null, days: [], currency: '', simulated: false,
+    breakdown: emptyCampanaPart(), ctx: emptyCampanaPart(), seg: emptyCampanaPart(), kw: emptyCampanaPart(), pos: emptyCampanaPart(),
+  };
+}
+
+const isoDay = (ms) => new Date(ms).toISOString().slice(0, 10);
+
+// Periodo anterior de la misma duración, justo antes del rango con el que se trajo la tabla.
+function campanasPrevRange() {
+  const c = state.campanas;
+  const from = Date.parse(`${c.loadedFrom}T00:00:00Z`);
+  const to = Date.parse(`${c.loadedTo}T00:00:00Z`);
+  const days = Math.round((to - from) / 86400000) + 1;
+  const prevTo = from - 86400000;
+  return { from: isoDay(prevTo - (days - 1) * 86400000), to: isoDay(prevTo) };
+}
+
+function campanaDetailRow() {
+  const c = state.campanas;
+  return c.detail.key ? c.rows.find((r) => r.key === c.detail.key) : null;
+}
+
+function campanaApi(path, extra) {
+  const c = state.campanas;
+  const row = campanaDetailRow();
+  const prev = campanasPrevRange();
+  const params = new URLSearchParams({
+    customer_id: row.customer_id, campaign_id: row.campaign_id, date_from: c.loadedFrom, date_to: c.loadedTo,
+    prev_from: prev.from, prev_to: prev.to, ...extra,
+  });
+  return fetch(`${path}?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => { if (!ok) throw new Error(data.error || 'Error desconocido.'); return data; });
+}
+
+// Trae una parte del detalle (solo la primera vez que se necesita) y vuelve a dibujar al terminar.
+function loadCampanaPart(part, path, extra) {
+  const c = state.campanas;
+  const d = c.detail;
+  if (!d.key || d[part].status !== 'idle') return;
+  const token = d.token;
+  d[part] = { status: 'loading', error: null, data: null };
+  campanaApi(path, extra)
+    .then((data) => {
+      if (token !== c.detail.token) return;
+      // El breakdown viene plano; el resto trae todo dentro de `data`.
+      c.detail[part] = { status: 'ready', error: null, data: part === 'breakdown' ? data : data.data };
+      if (data.currency) c.detail.currency = data.currency;
+      if (data.simulated) c.detail.simulated = true;
+      render();
+    })
+    .catch((err) => {
+      if (token !== c.detail.token) return;
+      c.detail[part] = { status: 'error', error: err.message || String(err), data: null };
+      render();
+    });
+}
+
+function loadCampanaDaily() {
+  const c = state.campanas;
+  const d = c.detail;
+  const row = campanaDetailRow();
+  if (!row || d.status !== 'idle') return;
+  const token = d.token;
+  d.status = 'loading';
+  const params = new URLSearchParams({ customer_id: row.customer_id, campaign_id: row.campaign_id, date_from: c.loadedFrom, date_to: c.loadedTo });
+  fetch(`/api/google-ads/campaign-daily?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      if (token !== c.detail.token) return;
+      c.detail.days = data.days || [];
+      c.detail.currency = data.currency || row.currency;
+      if (data.simulated) c.detail.simulated = true;
+      c.detail.status = 'ready';
+      render();
+    })
+    .catch((err) => {
+      if (token !== c.detail.token) return;
+      c.detail.status = 'error'; c.detail.error = err.message || String(err);
+      render();
+    });
+}
+
+// Carga lo que necesita la pestaña; cada pestaña pide sus datos solo cuando se abre.
+function ensureCampanaTab(tab) {
+  const row = campanaDetailRow();
+  if (!row) return;
+  if (tab === 'resumen' || tab === 'cambios') loadCampanaPart('ctx', '/api/google-ads/campaign-insight', { view: 'context' });
+  else if (tab === 'graficas') { loadCampanaDaily(); loadCampanaPart('ctx', '/api/google-ads/campaign-insight', { view: 'context' }); }
+  else if (tab === 'grupos') loadCampanaPart('breakdown', '/api/google-ads/campaign-breakdown', { channel_type: row.channel_type });
+  else if (tab === 'segmentos') loadCampanaPart('seg', '/api/google-ads/campaign-insight', { view: 'segments' });
+  else if (tab === 'palabras' && row.channel_type === 'SEARCH') loadCampanaPart('kw', '/api/google-ads/campaign-insight', { view: 'keywords' });
+  else if (tab === 'posicion') loadCampanaPart('pos', '/api/google-ads/campaign-insight', { view: 'position' });
+}
+
+function openCampanaDetail(key) {
+  const c = state.campanas;
+  const row = c.rows.find((r) => r.key === key);
+  if (!row) return;
+  c.detail = { ...emptyCampanaDetail(c.detail.token + 1), key, currency: row.currency };
+  ensureCampanaTab('resumen');
+  render();
+}
+
+function setCampanaTab(tab) {
+  const c = state.campanas;
+  if (!c.detail.key || c.detail.tab === tab) return;
+  c.detail.tab = tab;
+  ensureCampanaTab(tab);
+  render();
+}
+
+// Lleva a la sección donde se hace el cambio, con la cuenta y la campaña del detalle ya elegidas. El cambio se
+// hace allá con su propia vista previa y confirmación; esta ventana no escribe nada.
+function scrollToFocusRow(id) {
+  setTimeout(() => { const el = document.getElementById(id); if (el) el.scrollIntoView({ block: 'center' }); }, 60);
+}
+
+function campanaGoTo(target) {
+  const c = state.campanas;
+  const row = campanaDetailRow();
+  if (!row) return;
+  c.detail = emptyCampanaDetail(c.detail.token + 1);
+  if (target === 'budget') {
+    state.page = 'pacing';
+    openPacingCampaignsModal(row.customer_id, row.account_name, row.campaign_id);
+  } else if (target === 'roas') {
+    const a = state.roas.api;
+    state.page = 'roas';
+    a.accountIdManual = row.customer_id; a.accountId = '';
+    a.dateFrom = c.loadedFrom; a.dateTo = c.loadedTo; a.onlyActive = false;
+    fetchRoasByCampaign(row.campaign_id);
+  } else if (target === 'recs') {
+    state.page = 'recomendaciones';
+    state.recs.api.accountIdManual = row.customer_id; state.recs.api.accountId = '';
+    fetchRecommendations(row.campaign_name);
+  }
+}
+
+function closeCampanaDetail() {
+  const c = state.campanas;
+  if (!c.detail.key) return;
+  c.detail = emptyCampanaDetail(c.detail.token + 1);
+  render();
+}
+
+// Una entrada por día del rango, también los que Google no devolvió (sin datos), para que el eje sea continuo.
+function campanaDaySeries(days, from, to) {
+  const byDate = new Map(days.map((d) => [d.date, d]));
+  const out = [];
+  let lastBudget = null;
+  const end = Date.parse(`${to}T00:00:00Z`);
+  for (let t = Date.parse(`${from}T00:00:00Z`); t <= end; t += 86400000) {
+    const date = isoDay(t);
+    const d = byDate.get(date);
+    if (d && d.budget != null) lastBudget = d.budget;
+    out.push(d || { date, impressions: 0, clicks: 0, cost: 0, conversions: 0, conv_value: 0, budget: lastBudget, impr_share: null, top_impr_share: null, lost_is_budget: null, lost_is_rank: null });
+  }
+  return out;
+}
+
+// ---- piezas comunes de las pestañas ----
+function campanaPartHtml(part, label, renderFn) {
+  if (part.status === 'idle' || part.status === 'loading') return `<div class="state-panel loading" style="padding:24px"><div class="spinner"></div><p>Trayendo ${label}…</p></div>`;
+  if (part.status === 'error') return `<div class="error-panel">${escapeHtml(part.error)}</div>`;
+  return renderFn(part.data);
+}
+
+function campanaSection(title, inner, hint) {
+  return `
+    <div class="card table-panel" style="margin:0 0 16px;padding:16px 18px">
+      <div class="table-panel-head" style="margin-bottom:8px"><h3>${title}</h3></div>
+      ${hint ? `<p class="field-hint" style="margin:0 0 8px">${hint}</p>` : ''}
+      ${inner}
+    </div>`;
+}
+
+function campanaErrorPanel(msg) { return `<div class="error-panel" style="margin:0">${escapeHtml(msg)}</div>`; }
+
+// Variación en texto chico (para celdas de tabla): fracción respecto al periodo anterior.
+function campanaDeltaSmall(cur, prev, mode) {
+  if (prev == null || !prev) return '<div class="field-hint">—</div>';
+  const pct = (cur - prev) / prev;
+  const up = pct > 0, down = pct < 0;
+  let color = '#6b7280';
+  if (mode === 'good_up') color = up ? '#1d6b41' : (down ? '#b3261e' : color);
+  else if (mode === 'good_down') color = down ? '#1d6b41' : (up ? '#b3261e' : color);
+  return `<div class="field-hint" style="color:${color}">${up ? '▲' : (down ? '▼' : '—')} ${Math.abs(pct * 100).toFixed(0)}%</div>`;
+}
+
+function campanaKpiCells(x, cur, prev) {
+  const cpa = (m) => (m && m.conversions ? m.cost / m.conversions : null);
+  const showDelta = prev !== undefined;
+  const p = prev || null;
+  return `
+    <td>${campanasMoney(x.cost, cur)}${showDelta ? campanaDeltaSmall(x.cost, p && p.cost, 'neutral') : ''}</td>
+    <td>${fmtInt(x.impressions)}</td>
+    <td>${fmtInt(x.clicks)}</td>
+    <td>${x.impressions ? ((x.clicks / x.impressions) * 100).toFixed(2) + '%' : 'N/D'}</td>
+    <td>${x.clicks ? campanasMoney(x.cost / x.clicks, cur) : 'N/D'}</td>
+    <td>${x.conversions ? x.conversions.toFixed(x.conversions % 1 ? 1 : 0) : '0'}${showDelta ? campanaDeltaSmall(x.conversions, p && p.conversions, 'good_up') : ''}</td>
+    <td>${x.conversions ? campanasMoney(x.cost / x.conversions, cur) : 'N/D'}${showDelta ? campanaDeltaSmall(x.conversions ? x.cost / x.conversions : null, cpa(p), 'good_down') : ''}</td>
+    <td>${x.cost > 0 && x.conv_value > 0 ? (x.conv_value / x.cost).toFixed(2) + '×' : 'N/D'}</td>`;
+}
+
+const CAMPANA_KPI_HEAD = '<th>Gasto</th><th>Impr.</th><th>Clics</th><th>CTR</th><th>CPC</th><th>Conv.</th><th>CPA</th><th>ROAS</th>';
+
+function campanaTable(head, rowsHtml, empty, cols = 11) {
+  return `
+    <div class="table-scroll" style="max-height:300px">
+      <table><thead><tr>${head}</tr></thead><tbody>${rowsHtml || `<tr><td colspan="${cols}" class="footnote">${empty}</td></tr>`}</tbody></table>
+    </div>`;
+}
+
+// ---- Resumen ----
+const CAMPANA_PRIMARY_STATUS_ES = {
+  ELIGIBLE: 'Activa y publicándose', LIMITED: 'Activa, pero limitada', PAUSED: 'Pausada', ENDED: 'Terminada', PENDING: 'Pendiente de iniciar',
+  REMOVED: 'Eliminada', NOT_ELIGIBLE: 'No puede publicarse', MISCONFIGURED: 'Mal configurada',
+};
+const CAMPANA_STATUS_REASON_ES = {
+  BUDGET_CONSTRAINED: 'El presupuesto limita las impresiones', BUDGET_CONSTRAINED_OR_BIDDING_STRATEGY_LEARNING: 'El presupuesto o el aprendizaje de la puja limitan las impresiones',
+  BIDDING_STRATEGY_LEARNING: 'La estrategia de puja está en aprendizaje', BIDDING_STRATEGY_CONSTRAINED: 'La estrategia de puja está limitada',
+  BIDDING_STRATEGY_MISCONFIGURED: 'La estrategia de puja está mal configurada', CAMPAIGN_PAUSED: 'La campaña está pausada',
+  CAMPAIGN_ENDED: 'La campaña terminó', CAMPAIGN_PENDING: 'La campaña aún no empieza', AD_GROUPS_PAUSED: 'Todos los grupos de anuncios están pausados',
+  NO_ACTIVE_AD_GROUPS: 'No hay grupos de anuncios activos', NO_ACTIVE_AD_GROUP_ADS: 'No hay anuncios activos', HAS_ADS_DISAPPROVED: 'Hay anuncios rechazados',
+  HAS_ADS_LIMITED_BY_POLICY: 'Hay anuncios limitados por política', MOST_ADS_UNDER_REVIEW: 'La mayoría de los anuncios están en revisión',
+  NO_ACTIVE_KEYWORDS: 'No hay palabras clave activas', PENDING_ACCOUNT_BUDGET: 'Falta el presupuesto de la cuenta',
+};
+const CAMPANA_BID_SYSTEM_STATUS_ES = {
+  LEARNING_NEW: 'Aprendiendo (estrategia nueva)', LEARNING_SETTING_CHANGE: 'Aprendiendo (cambio de configuración)',
+  LEARNING_BUDGET_CHANGE: 'Aprendiendo (cambio de presupuesto)', LEARNING_COMPOSITION_CHANGE: 'Aprendiendo (cambio de composición)',
+  LEARNING_CONVERSION_TYPE_CHANGE: 'Aprendiendo (cambio de tipo de conversión)', LEARNING_CONVERSION_SETTING_CHANGE: 'Aprendiendo (cambio de conversiones)',
+  LIMITED_BY_CPC_BID_CEILING: 'Limitada por el tope de CPC', LIMITED_BY_CPC_BID_FLOOR: 'Limitada por el piso de CPC',
+  LIMITED_BY_DATA: 'Limitada por falta de datos', LIMITED_BY_BUDGET: 'Limitada por presupuesto', LIMITED_BY_LOW_PRIORITY_SPEND: 'Limitada por gasto de baja prioridad',
+  LIMITED_BY_LOW_QUALITY: 'Limitada por baja calidad', LIMITED_BY_INVENTORY: 'Limitada por inventario',
+  MISCONFIGURED_SHARED_STRATEGY: 'Estrategia compartida mal configurada', MISCONFIGURED_STRATEGY_TYPE: 'Tipo de estrategia mal configurado',
+  PAUSED: 'Pausada', UNAVAILABLE: 'No disponible', MULTIPLE_LEARNING: 'Varios aprendizajes', MULTIPLE_LIMITED: 'Varias limitaciones', MULTIPLE_MISCONFIGURED: 'Varias configuraciones erróneas', MULTIPLE: 'Varios estados',
+};
+const campanaEnumText = (v) => (v ? v.toLowerCase().replace(/_/g, ' ').replace(/^./, (ch) => ch.toUpperCase()) : '');
+
+// Punto porcentual: para las cuotas de impresiones, que ya son porcentajes.
+function campanaPpBadge(cur, prev, mode) {
+  if (cur == null || prev == null) return '<span class="delta-badge neutral">—</span>';
+  const pp = (cur - prev) * 100;
+  const flat = Math.abs(pp) < 0.05;
+  let cls = 'neutral';
+  if (!flat && mode === 'good_up') cls = pp > 0 ? 'good' : 'bad';
+  else if (!flat && mode === 'good_down') cls = pp < 0 ? 'good' : 'bad';
+  return `<span class="delta-badge ${cls}">${flat ? '—' : (pp > 0 ? '▲' : '▼')} ${Math.abs(pp).toFixed(1)} pp</span>`;
+}
+
+function renderCampanaSummaryTab(row, cur) {
+  const part = state.campanas.detail.ctx;
+  return campanaPartHtml(part, 'el resumen y la comparación', (data) => {
+    const c = data.current, p = data.previous;
+    const prev = campanasPrevRange();
+    const ratio = (n, dnm) => (dnm ? n / dnm : null);
+    const m = (x) => (x ? {
+      cost: x.cost, impressions: x.impressions, clicks: x.clicks, conversions: x.conversions,
+      ctr: ratio(x.clicks, x.impressions), cpc: ratio(x.cost, x.clicks), cpa: ratio(x.cost, x.conversions), roas: x.cost > 0 && x.conv_value > 0 ? x.conv_value / x.cost : null,
+    } : {});
+    const mc = m(c), mp = m(p);
+    const delta = (k, mode) => deltaBadge(mp[k] != null && mc[k] != null && mp[k] !== 0 ? (mc[k] - mp[k]) / mp[k] : null, mode);
+    const card = (label, value, deltaHtml, prevText) => `
+      <div class="card stat-card" style="min-width:150px;padding:14px 16px">
+        <div class="stat-label">${label}</div>
+        <div class="stat-value" style="font-size:18px">${value}</div>
+        <div class="stat-sub">${deltaHtml}${prevText ? ` <span>antes ${prevText}</span>` : ''}</div>
+      </div>`;
+    const money = (v) => (v == null ? 'N/D' : campanasMoney(v, cur));
+    const pctTxt = (v) => (v == null ? 'N/D' : (v * 100).toFixed(2) + '%');
+    const x2 = (v) => (v == null ? 'N/D' : v.toFixed(2) + '×');
+    const num = (v) => (v == null ? 'N/D' : (v % 1 ? v.toFixed(1) : fmtInt(v)));
+    const cards = [
+      card('Gasto', money(mc.cost), delta('cost', 'neutral'), p ? money(mp.cost) : ''),
+      card('Impresiones', fmtInt(mc.impressions), delta('impressions', 'good_up'), p ? fmtInt(mp.impressions) : ''),
+      card('Clics', fmtInt(mc.clicks), delta('clicks', 'good_up'), p ? fmtInt(mp.clicks) : ''),
+      card('CTR', pctTxt(mc.ctr), delta('ctr', 'good_up'), p ? pctTxt(mp.ctr) : ''),
+      card('CPC', money(mc.cpc), delta('cpc', 'good_down'), p ? money(mp.cpc) : ''),
+      card('Conversiones', num(mc.conversions), delta('conversions', 'good_up'), p ? num(mp.conversions) : ''),
+      card('CPA', money(mc.cpa), delta('cpa', 'good_down'), p ? money(mp.cpa) : ''),
+      card('ROAS', x2(mc.roas), delta('roas', 'good_up'), p ? x2(mp.roas) : ''),
+      card('Cuota de impresiones', campanasShare(c.impr_share), p ? campanaPpBadge(c.impr_share, p.impr_share, 'good_up') : '', p ? campanasShare(p.impr_share) : ''),
+      card('Perdida (presupuesto)', campanasShare(c.lost_is_budget), p ? campanaPpBadge(c.lost_is_budget, p.lost_is_budget, 'good_down') : '', p ? campanasShare(p.lost_is_budget) : ''),
+      card('Perdida (ranking)', campanasShare(c.lost_is_rank), p ? campanaPpBadge(c.lost_is_rank, p.lost_is_rank, 'good_down') : '', p ? campanasShare(p.lost_is_rank) : ''),
+    ].join('');
+
+    // Estado en Google y por qué está limitada.
+    let statusHtml = '';
+    if (data.status) {
+      const st = data.status;
+      const reasons = (st.reasons || []).map((r) => CAMPANA_STATUS_REASON_ES[r] || campanaEnumText(r));
+      const learn = st.bidding_system_status && !['ENABLED', 'UNKNOWN', 'UNSPECIFIED'].includes(st.bidding_system_status)
+        ? (CAMPANA_BID_SYSTEM_STATUS_ES[st.bidding_system_status] || campanaEnumText(st.bidding_system_status)) : '';
+      const good = st.primary_status === 'ELIGIBLE' && !reasons.length && !learn;
+      const budgetLine = st.budget != null
+        ? `Presupuesto diario: <strong>${campanasMoney(st.budget, cur)}</strong>${st.shared_budget ? ' (compartido con otras campañas)' : ''}${st.recommended_budget != null ? ` · Google recomienda <strong>${campanasMoney(st.recommended_budget, cur)}</strong>${st.budget ? ` (${(st.recommended_budget / st.budget).toFixed(1)}× el actual)` : ''}` : ''}`
+        : '';
+      statusHtml = `
+        <div class="${good ? 'ok-panel' : ''}" style="${good ? '' : 'background:var(--rb-warning-100,#fdf1d8);border:1px solid var(--rb-warning-500,#e6a219);border-radius:10px;padding:12px 16px;'}margin:0 0 16px">
+          <strong>Estado en Google: ${escapeHtml(CAMPANA_PRIMARY_STATUS_ES[st.primary_status] || campanaEnumText(st.primary_status) || 'N/D')}</strong>
+          ${reasons.length ? `<ul style="margin:6px 0 0 18px;padding:0">${reasons.map((r) => `<li>${escapeHtml(r)}</li>`).join('')}</ul>` : ''}
+          ${learn ? `<div style="margin-top:6px">Estrategia de puja: ${escapeHtml(learn)}</div>` : ''}
+          ${budgetLine ? `<div style="margin-top:6px">${budgetLine}</div>` : ''}
+        </div>`;
+    } else if (data.errors && data.errors.status) statusHtml = campanaErrorPanel(data.errors.status);
+
+    // Los cambios se hacen en su propia sección, con vista previa y confirmación; aquí solo se abre con esta campaña elegida.
+    const budgetLimited = (c.lost_is_budget || 0) >= 0.1 || (data.status && (data.status.reasons || []).some((r) => /BUDGET/.test(r)));
+    const roasOk = ['TARGET_ROAS', 'MAXIMIZE_CONVERSION_VALUE'].includes(row.bidding_strategy_type);
+    const goBtn = (go, label, why, accent) => `
+      <div style="flex:1;min-width:220px">
+        <button class="${accent ? 'btn-accent' : 'btn-outline'} sm" data-camp-go="${go}">${label}</button>
+        <div class="field-hint" style="margin-top:4px">${why}</div>
+      </div>`;
+    const goButtons = [
+      row.status === 'ENABLED'
+        ? goBtn('budget', 'Ajustar presupuesto', `Abre Ritmo de consumo con esta campaña resaltada.${budgetLimited ? ' <strong>Hoy el presupuesto la limita.</strong>' : ''}`, budgetLimited)
+        : '',
+      roasOk ? goBtn('roas', 'Ajustar ROAS objetivo', 'Abre la sección ROAS con el editor de esta campaña listo.', false) : '',
+      goBtn('recs', 'Ver recomendaciones de Google', 'Abre Recomendaciones filtrado por esta campaña.', false),
+    ].filter(Boolean).join('');
+    const actionsHtml = `
+      <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--color-border)">
+        <strong style="font-size:13px">Cambiar algo en esta campaña</strong>
+        <p class="field-hint" style="margin:2px 0 10px">Los cambios se hacen en su propia sección, con vista previa y confirmación antes de escribir en Google Ads.${row.status === 'ENABLED' ? '' : ' La campaña está pausada: para ajustar su presupuesto primero actívala desde la tabla.'}</p>
+        <div style="display:flex;gap:16px;flex-wrap:wrap">${goButtons}</div>
+      </div>`;
+
+    const nChanges = (data.changes || []).length;
+    const changesNote = data.changes
+      ? `<p class="field-hint" style="margin:12px 0 0">${nChanges ? `Hay <strong>${nChanges}</strong> cambio${nChanges === 1 ? '' : 's'} en esta campaña en los últimos 30 días (pestaña <em>Cambios</em>).` : 'No hay cambios registrados en esta campaña en los últimos 30 días.'}</p>`
+      : (data.errors && data.errors.changes ? campanaErrorPanel(data.errors.changes) : '');
+    return `
+      ${statusHtml}
+      <div class="stat-grid" style="margin-bottom:0">${cards}</div>
+      <p class="field-hint" style="margin:10px 0 0">${p ? `Comparado con el periodo anterior de la misma duración (del ${escapeHtml(prev.from)} al ${escapeHtml(prev.to)}). Verde = mejora, rojo = empeora.` : ''}</p>
+      ${changesNote}
+      ${actionsHtml}`;
+  });
+}
+
+// ---- Gráficas ----
+function renderCampanaChartsTab(row, cur) {
+  const c = state.campanas;
+  const d = c.detail;
+  if (d.status === 'idle' || d.status === 'loading') return `<div class="state-panel loading"><div class="spinner"></div><p>Trayendo la evolución día a día…</p></div>`;
+  if (d.status === 'error') return `<div class="error-panel">${escapeHtml(d.error)}</div>`;
+  const series = campanaDaySeries(d.days, c.loadedFrom, c.loadedTo);
+  const hasShare = series.some((x) => x.impr_share != null);
+  const hasData = series.some((x) => x.impressions > 0);
+  const budget = series.find((x) => x.budget != null);
+  const nearLimit = budget ? series.filter((x) => x.budget > 0 && x.cost >= x.budget * 0.95).length : 0;
+  const changeDays = campanaChangeDates(series);
+  const chartCard = (id, title, hint, extra, ok, emptyMsg) => `
+    <div class="card" style="padding:16px 18px">
+      <h4 style="margin:0 0 4px;font-size:12.5px;color:var(--color-text-heading);text-transform:uppercase;letter-spacing:.04em">${title}</h4>
+      <p class="field-hint" style="margin:0 0 10px">${hint}${extra ? ` <strong>${extra}</strong>` : ''}</p>
+      ${ok ? `<div style="height:230px"><canvas id="${id}"></canvas></div>` : `<p class="field-hint" style="padding:40px 0;text-align:center">${emptyMsg}</p>`}
+    </div>`;
+  const noShare = 'Google no da la cuota de impresiones para este tipo de campaña o para este rango.';
+  const noData = 'La campaña no tuvo actividad en este rango.';
+  const markerNote = changeDays.size
+    ? `<p class="field-hint" style="margin:0 0 12px"><span style="color:var(--rb-danger-500,#d5455f)">┆</span> Las líneas rojas punteadas marcan días con cambios en la campaña (${changeDays.size}); el detalle está en la pestaña <em>Cambios</em>.</p>` : '';
+  return `
+    ${markerNote}
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(420px,100%),1fr));gap:16px">
+      ${chartCard('camp-chart-is', 'Cuota de impresiones', 'Qué parte de las búsquedas posibles mostró tus anuncios y qué parte salió arriba del todo. Una caída sostenida es visibilidad perdida.', '', hasShare, noShare)}
+      ${chartCard('camp-chart-lost', 'Dónde se pierde la cuota', 'De lo que no mostraste, cuánto fue por presupuesto y cuánto por ranking. Mucho por presupuesto: el límite diario te frena. Mucho por ranking: puja o calidad del anuncio.', '', hasShare, noShare)}
+      ${chartCard('camp-chart-spend', 'Gasto diario y presupuesto', 'Gasto de cada día frente al presupuesto diario actual. Los días pegados a la línea son días en que el presupuesto se agota.', budget ? `${nearLimit} de ${series.length} días con gasto ≥ 95% del presupuesto.` : '', hasData, noData)}
+      ${chartCard('camp-chart-clicks', 'Clics y CTR', 'Si los clics suben con el CTR plano, es más volumen; si el CTR cae, el anuncio pierde relevancia.', '', hasData, noData)}
+      ${chartCard('camp-chart-conv', 'Conversiones y CPA', 'Conversiones por día y lo que costó cada una (el CPA queda vacío los días sin conversiones).', '', hasData, noData)}
+      ${chartCard('camp-chart-cpc', 'CPC medio y ROAS', 'Un CPC que sube sin que suba el ROAS (valor de conversión ÷ gasto) es puja más cara sin retorno.', '', hasData, noData)}
+    </div>
+    <p class="field-hint" style="margin-top:12px">El presupuesto de la gráfica de gasto es el actual de la campaña, no el de cada día. Los días sin datos de Google se muestran vacíos.</p>`;
+}
+
+// Días del rango que tuvieron algún cambio en la campaña (Google solo guarda 30 días de cambios).
+function campanaChangeDates(series) {
+  const ctx = state.campanas.detail.ctx;
+  if (ctx.status !== 'ready' || !ctx.data.changes) return new Set();
+  const inRange = new Set(series.map((x) => x.date));
+  return new Set(ctx.data.changes.map((ch) => ch.date).filter((dt) => inRange.has(dt)));
+}
+
+// ---- Grupos y regiones ----
+const CAMPANA_GEO_TYPE_ES = { Country: 'País', Region: 'Región', State: 'Estado', Province: 'Provincia', City: 'Ciudad', 'Postal Code': 'Código postal', Neighborhood: 'Barrio', County: 'Condado', Department: 'Departamento', Metro: 'Área metropolitana', 'DMA Region': 'Área de mercado', District: 'Distrito', Municipality: 'Municipio', Airport: 'Aeropuerto', 'Autonomous Community': 'Comunidad autónoma' };
+const CAMPANA_GEO_SETTING_ES = {
+  PRESENCE_OR_INTEREST: 'Personas en esas ubicaciones o que muestran interés en ellas',
+  PRESENCE: 'Solo personas que están en esas ubicaciones',
+};
+
+function renderCampanaBreakdown(row, cur) {
+  return campanaPartHtml(state.campanas.detail.breakdown, 'los grupos activos y las regiones', (data) => {
+    const err = (name) => (data.errors && data.errors[name] ? campanaErrorPanel(data.errors[name]) : '');
+    const prevNote = data.prev_groups !== undefined ? '<p class="field-hint" style="margin:0 0 12px">Las flechas comparan con el periodo anterior de la misma duración.</p>' : '';
+
+    let groupsHtml;
+    if (data.groups) {
+      const isAsset = data.groups.kind === 'asset_group';
+      const list = data.groups.groups || [];
+      const rows = list.slice(0, 200).map((g) => `<tr><td style="min-width:200px"><strong>${escapeHtml(g.name)}</strong></td>${campanaKpiCells(g, cur, data.prev_groups === undefined ? undefined : (data.prev_groups[g.id] || null))}</tr>`).join('');
+      groupsHtml = campanaSection(
+        `${isAsset ? 'Grupos de recursos activos' : 'Grupos de anuncios activos'} (${fmtInt(list.length)})`,
+        campanaTable(`<th>${isAsset ? 'Grupo de recursos' : 'Grupo de anuncios'}</th>${CAMPANA_KPI_HEAD}`, rows, `La campaña no tiene ${isAsset ? 'grupos de recursos' : 'grupos de anuncios'} activos.`),
+        isAsset ? 'Performance Max no tiene grupos de anuncios: sus equivalentes son los grupos de recursos.' : '',
+      );
+    } else groupsHtml = campanaSection('Grupos activos', err('groups'));
+
+    let geoHtml;
+    if (data.targeting) {
+      const t = data.targeting;
+      const included = t.locations.filter((l) => !l.excluded);
+      const excluded = t.locations.filter((l) => l.excluded);
+      const locRows = t.locations.slice(0, 300).map((l) => `
+        <tr>
+          <td style="min-width:200px"><strong>${escapeHtml(l.name)}</strong>${l.canonical && l.canonical !== l.name ? `<div class="field-hint">${escapeHtml(l.canonical.split(',').join(', '))}</div>` : ''}</td>
+          <td>${escapeHtml(CAMPANA_GEO_TYPE_ES[l.target_type] || l.target_type || '')}</td>
+          <td>${l.excluded ? '<span style="color:var(--rb-danger-500,#d5455f);font-weight:600">Excluida</span>' : 'Incluida'}</td>
+          ${l.excluded ? '<td colspan="8" class="field-hint">—</td>' : campanaKpiCells(l, cur, data.prev_locations === undefined ? undefined : (data.prev_locations[l.resource] || null))}
+        </tr>`).join('');
+      const chips = (items) => items.map((x) => `<span class="field-hint" style="display:inline-block;border:1px solid var(--color-border);border-radius:999px;padding:2px 10px;margin:0 6px 6px 0;font-size:12px">${escapeHtml(x)}</span>`).join('');
+      const meta = [];
+      if (t.languages.length) meta.push(`<p class="field-hint" style="margin:0 0 8px"><strong>Idiomas:</strong> ${t.languages.map(escapeHtml).join(', ')}</p>`);
+      if (t.geo_target_type && CAMPANA_GEO_SETTING_ES[t.geo_target_type]) meta.push(`<p class="field-hint" style="margin:0 0 8px"><strong>Se muestra a:</strong> ${escapeHtml(CAMPANA_GEO_SETTING_ES[t.geo_target_type])}</p>`);
+      if (t.radii.length) meta.push(`<p class="field-hint" style="margin:0 0 8px"><strong>Radios:</strong></p>${chips(t.radii.map((r) => `${r.name}${r.excluded ? ' (excluido)' : ''}`))}`);
+      const noKpiNote = included.length && included.every((l) => !l.impressions && !l.clicks && !l.cost)
+        ? '<p class="field-hint" style="margin:8px 0 0">Google no devolvió datos por ubicación para este rango (o la campaña no tuvo actividad): los KPIs salen en cero.</p>' : '';
+      geoHtml = campanaSection(
+        `Mercados y regiones a los que se dirige (${fmtInt(included.length)} incluidas${excluded.length ? `, ${fmtInt(excluded.length)} excluidas` : ''})`,
+        `${meta.join('')}${campanaTable(`<th>Ubicación</th><th>Tipo</th><th>Estado</th>${CAMPANA_KPI_HEAD}`, locRows, 'La campaña no tiene ubicaciones configuradas (se muestra en todas partes).')}${noKpiNote}`,
+      );
+    } else geoHtml = campanaSection('Mercados y regiones', err('targeting'));
+    return `${prevNote}${groupsHtml}${geoHtml}`;
+  });
+}
+
+// ---- Segmentos ----
+const CAMPANA_DEVICE_ES = { MOBILE: 'Móvil', DESKTOP: 'Escritorio', TABLET: 'Tablet', CONNECTED_TV: 'TV conectada', OTHER: 'Otros', UNKNOWN: 'Desconocido' };
+const CAMPANA_WEEKDAYS = [['MONDAY', 'Lunes'], ['TUESDAY', 'Martes'], ['WEDNESDAY', 'Miércoles'], ['THURSDAY', 'Jueves'], ['FRIDAY', 'Viernes'], ['SATURDAY', 'Sábado'], ['SUNDAY', 'Domingo']];
+const CAMPANA_CONV_CATEGORY_ES = {
+  PURCHASE: 'Compra / reserva', DEFAULT: 'Otra', PAGE_VIEW: 'Vista de página', ADD_TO_CART: 'Añadir al carrito', BEGIN_CHECKOUT: 'Inicio de compra',
+  SUBSCRIBE_PAID: 'Suscripción de pago', PHONE_CALL_LEAD: 'Llamada', IMPORTED_LEAD: 'Contacto importado', SUBMIT_LEAD_FORM: 'Formulario enviado',
+  BOOK_APPOINTMENT: 'Cita', REQUEST_QUOTE: 'Solicitud de cotización', GET_DIRECTIONS: 'Cómo llegar', OUTBOUND_CLICK: 'Clic saliente',
+  CONTACT: 'Contacto', ENGAGEMENT: 'Interacción', STORE_VISIT: 'Visita a tienda', STORE_SALE: 'Venta en tienda', QUALIFIED_LEAD: 'Contacto calificado', CONVERTED_LEAD: 'Contacto convertido',
+};
+
+function renderCampanaSegmentsTab(row, cur) {
+  return campanaPartHtml(state.campanas.detail.seg, 'los segmentos', (data) => {
+    const err = (name) => (data.errors && data.errors[name] ? campanaErrorPanel(data.errors[name]) : null);
+    const totalCost = (list) => (list || []).reduce((a, x) => a + x.cost, 0);
+    const shareCell = (v, total) => `<td>${total > 0 ? ((v / total) * 100).toFixed(0) + '%' : 'N/D'}</td>`;
+    const kpiTable = (labelHead, list, labelFn, hint) => {
+      const total = totalCost(list);
+      const rows = list.map((x) => `<tr><td style="min-width:130px"><strong>${escapeHtml(labelFn(x))}</strong></td>${shareCell(x.cost, total)}${campanaKpiCells(x, cur)}</tr>`).join('');
+      return campanaTable(`<th>${labelHead}</th><th>% del gasto</th>${CAMPANA_KPI_HEAD}`, rows, 'Sin datos en este rango.', 10) + (hint ? `<p class="field-hint" style="margin:8px 0 0">${hint}</p>` : '');
+    };
+    const sections = [];
+    sections.push(campanaSection('Por dispositivo', err('device') || kpiTable('Dispositivo', [...(data.device || [])].sort((a, b) => b.cost - a.cost), (x) => CAMPANA_DEVICE_ES[x.key] || campanaEnumText(x.key)),
+      'Compara el CPA y el ROAS entre móvil y escritorio: si uno rinde mucho peor, es candidato a un ajuste de puja por dispositivo.'));
+    const byDay = new Map((data.weekday || []).map((x) => [x.key, x]));
+    const weekdayList = CAMPANA_WEEKDAYS.filter(([k]) => byDay.has(k)).map(([k, label]) => ({ ...byDay.get(k), label }));
+    sections.push(campanaSection('Por día de la semana', err('weekday') || kpiTable('Día', weekdayList, (x) => x.label),
+      'Busca los días en que el gasto y las conversiones no van parejos: ahí puede haber espacio para una programación de anuncios o ajustes de puja por día.'));
+    if (data.conversions || (data.errors && data.errors.conversions)) {
+      const convs = data.conversions || [];
+      const totalConv = convs.reduce((a, x) => a + x.conversions, 0);
+      const rows = convs.map((x) => `
+        <tr>
+          <td style="min-width:200px"><strong>${escapeHtml(x.name)}</strong></td>
+          <td>${escapeHtml(CAMPANA_CONV_CATEGORY_ES[x.category] || campanaEnumText(x.category))}</td>
+          <td>${x.conversions ? x.conversions.toFixed(x.conversions % 1 ? 1 : 0) : '0'}</td>
+          <td>${totalConv > 0 ? ((x.conversions / totalConv) * 100).toFixed(0) + '%' : 'N/D'}</td>
+          <td>${campanasMoney(x.conv_value, cur)}</td>
+          <td>${x.conversions ? campanasMoney(x.conv_value / x.conversions, cur) : 'N/D'}</td>
+        </tr>`).join('');
+      sections.push(campanaSection('Conversiones por acción',
+        err('conversions') || campanaTable('<th>Acción de conversión</th><th>Categoría</th><th>Conv.</th><th>% de las conv.</th><th>Valor</th><th>Valor por conv.</th>', rows, 'La campaña no registró conversiones en este rango.', 6),
+        'Separa las reservas de otras acciones (llamadas, formularios, clics a contacto). Si el CPA mezcla acciones de poco valor con reservas, engaña.'));
+    }
+    const countries = data.countries || [];
+    sections.push(campanaSection('Países desde los que se ve la campaña',
+      err('countries') || (() => {
+        const total = totalCost(countries);
+        const rows = countries.slice(0, 30).map((x) => `<tr><td style="min-width:160px"><strong>${escapeHtml(x.name)}</strong></td>${shareCell(x.cost, total)}${campanaKpiCells(x, cur)}</tr>`).join('');
+        return campanaTable(`<th>País</th><th>% del gasto</th>${CAMPANA_KPI_HEAD}`, rows, 'Sin datos en este rango.', 10);
+      })(),
+      'Dónde estaban físicamente las personas que vieron los anuncios. Un país que no es tu mercado con gasto relevante indica que la segmentación deja pasar tráfico de otro lugar.'));
+    return sections.join('');
+  });
+}
+
+// ---- Palabras clave ----
+const CAMPANA_MATCH_ES = { BROAD: 'Amplia', PHRASE: 'Frase', EXACT: 'Exacta' };
+const CAMPANA_QUALITY_ES = { BELOW_AVERAGE: 'Inferior a la media', AVERAGE: 'Media', ABOVE_AVERAGE: 'Superior a la media' };
+
+function renderCampanaKeywordsTab(row, cur) {
+  if (row.channel_type !== 'SEARCH') {
+    return `<div class="card state-panel idle"><p>Las palabras clave solo existen en campañas de Search. Esta es una campaña de ${escapeHtml(campanasTypeLabel(row.channel_type))}.</p></div>`;
+  }
+  return campanaPartHtml(state.campanas.detail.kw, 'las palabras clave', (list) => {
+    const kws = (list || []).filter((k) => k.impressions > 0 || k.cost > 0);
+    const total = kws.reduce((a, k) => a + k.cost, 0);
+    const wasted = kws.filter((k) => k.cost > 0 && k.conversions === 0);
+    const wastedCost = wasted.reduce((a, k) => a + k.cost, 0);
+    const qsCell = (q) => {
+      if (q == null) return '<td>—</td>';
+      const color = q >= 7 ? '#1d6b41' : (q >= 5 ? '#a86a00' : '#b3261e');
+      return `<td style="font-weight:700;color:${color}">${q}/10</td>`;
+    };
+    const qual = (v) => `<td>${escapeHtml(CAMPANA_QUALITY_ES[v] || '—')}</td>`;
+    const rows = kws.map((k) => `
+      <tr>
+        <td style="min-width:200px"><strong>${escapeHtml(k.text)}</strong><div class="field-hint">${escapeHtml(k.ad_group)}</div></td>
+        <td>${escapeHtml(CAMPANA_MATCH_ES[k.match_type] || campanaEnumText(k.match_type))}</td>
+        ${qsCell(k.quality_score)}${qual(k.expected_ctr)}${qual(k.ad_relevance)}${qual(k.landing_page)}
+        ${campanaKpiCells(k, cur)}
+      </tr>`).join('');
+    const summary = kws.length
+      ? `<p class="field-hint" style="margin:0 0 10px">Las ${fmtInt(kws.length)} palabras clave de mayor gasto (hasta 60). ${wasted.length ? `<strong>${fmtInt(wasted.length)} gastan sin convertir (${campanasMoney(wastedCost, cur)}, ${total > 0 ? ((wastedCost / total) * 100).toFixed(0) : 0}% de lo listado)</strong>: revísalas antes de subir presupuesto.` : 'Todas las listadas con gasto convirtieron.'}</p>` : '';
+    return campanaSection(`Palabras clave (${fmtInt(kws.length)})`,
+      `${summary}${campanaTable(`<th>Palabra clave</th><th>Concordancia</th><th>Nivel de calidad</th><th>CTR esperado</th><th>Relevancia del anuncio</th><th>Página de destino</th>${CAMPANA_KPI_HEAD}`, rows, 'No hay palabras clave con actividad en este rango.', 14)}`,
+      'El Nivel de calidad (1-10) y sus tres componentes los calcula Google: 7 o más es sano; por debajo de 5 sube el costo por clic. El componente "Inferior a la media" te dice qué arreglar: anuncio, página o CTR.');
+  });
+}
+
+// ---- Posición en la subasta ----
+const CAMPANA_POSITION_ROWS = [
+  ['impr_share', 'Cuota de impresiones', 'good_up', 'Impresiones que obtuviste sobre las que podías obtener.'],
+  ['top_impr_share', 'Cuota de impresiones superior', 'good_up', 'Impresiones que salieron arriba de los resultados de búsqueda.'],
+  ['abs_top_impr_share', 'Cuota de impresiones superior absoluta', 'good_up', 'Impresiones que salieron en la primera posición de todas.'],
+  ['lost_is_budget', 'Perdida por presupuesto', 'good_down', 'Impresiones que no obtuviste porque el presupuesto se agotó.'],
+  ['lost_is_rank', 'Perdida por ranking', 'good_down', 'Impresiones que no obtuviste por una puja o un Ranking de anuncio bajos.'],
+  ['lost_top_budget', 'Posición superior perdida por presupuesto', 'good_down', 'Veces que no saliste arriba por falta de presupuesto.'],
+  ['lost_top_rank', 'Posición superior perdida por ranking', 'good_down', 'Veces que no saliste arriba por ranking bajo.'],
+  ['lost_abs_top_budget', 'Primera posición perdida por presupuesto', 'good_down', 'Veces que no saliste primero por falta de presupuesto.'],
+  ['lost_abs_top_rank', 'Primera posición perdida por ranking', 'good_down', 'Veces que no saliste primero por ranking bajo.'],
+  ['click_share', 'Cuota de clics', 'good_up', 'Clics que obtuviste sobre los que podías obtener.'],
+  ['exact_impr_share', 'Cuota de impresiones en coincidencia exacta', 'good_up', 'Cuota solo contando las búsquedas que coinciden exactamente con tus palabras clave.'],
+];
+
+function renderCampanaPositionTab(row, cur) {
+  return campanaPartHtml(state.campanas.detail.pos, 'la posición en la subasta', (data) => {
+    const c = data.current, p = data.previous;
+    const allNull = Object.values(c).every((v) => v == null);
+    const rows = CAMPANA_POSITION_ROWS.map(([k, label, mode, desc]) => `
+      <tr>
+        <td style="min-width:240px"><strong>${label}</strong><div class="field-hint">${desc}</div></td>
+        <td>${campanasShare(c[k])}</td>
+        <td>${p ? campanasShare(p[k]) : 'N/D'}</td>
+        <td>${p ? campanaPpBadge(c[k], p[k], mode) : '—'}</td>
+      </tr>`).join('');
+    const table = allNull
+      ? '<p class="field-hint" style="padding:20px 0;text-align:center">Google no da estas cuotas para este tipo de campaña o para este rango.</p>'
+      : campanaTable('<th>Métrica</th><th>Este periodo</th><th>Periodo anterior</th><th>Variación</th>', rows, '', 4);
+    const competitors = `
+      <div style="background:var(--rb-info-100,#e3ebfd);border-radius:10px;padding:12px 16px;margin-top:4px">
+        <strong>Competidores (Información de subastas)</strong>
+        <div style="margin-top:4px">Google no entrega por API los datos de competidores (qué dominios compiten contigo, su cuota y cuántas veces te superan) a esta plataforma: es un acceso restringido a desarrolladores autorizados por Google. Se ven en Google Ads: <em>Informes → Información de subastas</em>.</div>
+      </div>`;
+    return campanaSection('Posición en la subasta', `${table}${competitors}`,
+      'Estas cuotas explican por qué no apareces más arriba o más veces. Lo perdido por presupuesto se arregla con dinero; lo perdido por ranking, con puja, calidad del anuncio o de la página.');
+  });
+}
+
+// ---- Cambios ----
+const CAMPANA_CLIENT_ES = {
+  GOOGLE_ADS_WEB_CLIENT: 'Google Ads (web)', GOOGLE_ADS_API: 'API / herramientas', GOOGLE_ADS_SCRIPTS: 'Script', GOOGLE_ADS_EDITOR: 'Google Ads Editor',
+  GOOGLE_ADS_MOBILE_CLIENT: 'App móvil', INTERNAL_TOOL: 'Google (automático)', OTHER: 'Otro', UNKNOWN: 'Desconocido', GOOGLE_ADS_RECOMMENDATIONS: 'Recomendación aplicada',
+  GOOGLE_ADS_AUTOMATED_RULE: 'Regla automatizada', GOOGLE_ADS_CAMPAIGN_ASSISTANT: 'Asistente de campañas',
+};
+
+function renderCampanaChangesTab(row, cur) {
+  return campanaPartHtml(state.campanas.detail.ctx, 'los cambios', (data) => {
+    if (!data.changes) return campanaErrorPanel((data.errors && data.errors.changes) || 'No se pudieron leer los cambios.');
+    const rows = data.changes.map((ch) => {
+      const detail = changeDetailHtml(ch, state.campanas.detail.currency);
+      return `
+        <tr>
+          <td style="white-space:nowrap">${escapeHtml(ch.when.slice(0, 16))}</td>
+          <td>${escapeHtml(ch.user || '—')}<div class="field-hint">${escapeHtml(changeClientText(ch.client))}</div></td>
+          <td>${escapeHtml(ch.operation_label)} · ${escapeHtml(ch.resource_label)}</td>
+          <td style="min-width:240px">${detail}</td>
+        </tr>`;
+    }).join('');
+    return campanaSection(`Cambios de los últimos 30 días (${fmtInt(data.changes.length)})`,
+      campanaTable('<th>Fecha</th><th>Quién</th><th>Qué</th><th>Detalle</th>', rows, 'No hay cambios registrados en los últimos 30 días.', 4),
+      'Google solo guarda 30 días de cambios, así que esta lista no depende del rango de fechas. Los cambios hechos desde esta plataforma (presupuesto, ROAS, estado) salen como "API / herramientas". Si una gráfica cambia de tendencia un día con cambio, ese cambio es el primer sospechoso.');
+  });
+}
+
+// ---- Ventana ----
+function renderCampanaDetailModal() {
+  const c = state.campanas;
+  const d = c.detail;
+  if (!d.key) return '';
+  const row = c.rows.find((r) => r.key === d.key);
+  if (!row) return '';
+  const cur = d.currency || row.currency;
+  const strat = campanasStrategy(row);
+  const head = `
+    <button class="modal-close" data-action="camp-detail-close" aria-label="Cerrar">${icon('x', 18)}</button>
+    <h3 class="dense-chart-title" style="margin:0 0 4px;padding-right:28px">${escapeHtml(row.campaign_name)}</h3>
+    <p class="field-hint" style="margin:0 0 14px">${escapeHtml(campanasHotelOf(row))} · ${escapeHtml(campanasTypeLabel(row.channel_type))} · ${escapeHtml(strat.label)}${strat.target ? ` (${escapeHtml(strat.target)})` : ''} · ${row.status === 'ENABLED' ? 'Activa' : 'Pausada'} · del ${escapeHtml(c.loadedFrom)} al ${escapeHtml(c.loadedTo)}</p>
+    <div class="seg-control" style="flex-wrap:wrap;margin-bottom:16px">
+      ${CAMPANA_TABS.map(([k, label]) => `<button class="seg-btn ${d.tab === k ? 'active' : ''}" data-camp-tab="${k}">${label}</button>`).join('')}
+    </div>
+    ${d.simulated ? '<div class="ok-panel" style="margin:0 0 12px"><strong>Modo simulado.</strong> Datos de ejemplo.</div>' : ''}`;
+  const bodies = {
+    resumen: renderCampanaSummaryTab, graficas: renderCampanaChartsTab, grupos: renderCampanaBreakdown, segmentos: renderCampanaSegmentsTab,
+    palabras: renderCampanaKeywordsTab, posicion: renderCampanaPositionTab, cambios: renderCampanaChangesTab,
+  };
+  return `
+    <div class="modal-overlay camp-detail-overlay">
+      <div class="modal-box card" data-modal-stop-propagation style="max-width:1100px">
+        ${head}
+        ${bodies[d.tab](row, cur)}
+      </div>
+    </div>`;
+}
+
+function mountCampanaCharts() {
+  const c = state.campanas;
+  if (!c.detail.key || c.detail.tab !== 'graficas' || c.detail.status !== 'ready' || !window.Chart) return;
+  const cur = c.detail.currency;
+  const series = campanaDaySeries(c.detail.days, c.loadedFrom, c.loadedTo);
+  const labels = series.map((x) => x.date.slice(5));
+  const changeLabels = new Set([...campanaChangeDates(series)].map((dt) => dt.slice(5)));
+  const col = {
+    teal: cssVar('--rb-teal-500') || '#03a694', navy: cssVar('--rb-navy-500') || '#2f4468',
+    orange: cssVar('--rb-orange-500') || '#ff9800', red: cssVar('--rb-danger-500') || '#d5455f',
+    grid: cssVar('--color-border') || '#e5e7eb', muted: cssVar('--color-text-muted') || '#666',
+  };
+  // Línea roja punteada vertical en los días con cambios en la campaña.
+  const changeMarkers = {
+    id: 'changeMarkers',
+    afterDatasetsDraw(chart) {
+      if (!changeLabels.size) return;
+      const { ctx, chartArea, scales } = chart;
+      ctx.save();
+      ctx.strokeStyle = col.red; ctx.globalAlpha = 0.6; ctx.lineWidth = 1.5; ctx.setLineDash([3, 3]);
+      chart.data.labels.forEach((lab, i) => {
+        if (!changeLabels.has(lab)) return;
+        const px = scales.x.getPixelForValue(i);
+        ctx.beginPath(); ctx.moveTo(px, chartArea.top); ctx.lineTo(px, chartArea.bottom); ctx.stroke();
+      });
+      ctx.restore();
+    },
+  };
+  const pct = (v) => Math.round(v * 100) + '%';
+  const pct1 = (v) => (v * 100).toFixed(1) + '%';
+  const tick = (fmt) => ({ callback: fmt, color: col.muted, font: { size: 11 } });
+  const base = () => ({
+    responsive: true, maintainAspectRatio: false, animation: { duration: 250 },
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { position: 'bottom', labels: { boxWidth: 10, font: { size: 11 } } },
+      tooltip: { backgroundColor: cssVar('--navy-900') || '#0f172a', padding: 8, cornerRadius: 6 },
+    },
+    scales: { x: { grid: { display: false }, ticks: { color: col.muted, font: { size: 10 }, maxTicksLimit: 12 } } },
+  });
+  const mount = (id, config) => {
+    const canvas = document.getElementById(id);
+    if (canvas) chartRegistry[id] = new window.Chart(canvas.getContext('2d'), { ...config, plugins: [changeMarkers] });
+  };
+  const line = (label, data, color, extra = {}) => ({ type: 'line', label, data, borderColor: color, backgroundColor: color, borderWidth: 2, pointRadius: 2, tension: 0.25, spanGaps: false, ...extra });
+  const tip = (fmts) => ({ callbacks: { label: (item) => `${item.dataset.label}: ${fmts[item.datasetIndex] ? fmts[item.datasetIndex](item.parsed.y) : item.parsed.y}` } });
+  const money = (v) => campanasMoney(v, cur);
+  // Los ejes van sin moneda para no recargarlos; la moneda sale en el detalle al pasar el cursor.
+  const axisMoney = (v) => (Math.abs(v) >= 1000 ? (v / 1000).toFixed(Math.abs(v) >= 10000 ? 0 : 1) + 'k' : v.toFixed(Math.abs(v) < 10 ? 2 : 0));
+
+  // 1) Cuota de impresiones y cuota superior
+  let o = base();
+  o.scales.y = { min: 0, max: 1, grid: { color: col.grid }, ticks: tick(pct) };
+  o.plugins.tooltip = { ...o.plugins.tooltip, ...tip([pct1, pct1]) };
+  mount('camp-chart-is', { type: 'line', data: { labels, datasets: [
+    line('Cuota de impresiones', series.map((x) => x.impr_share), col.teal),
+    line('Cuota de impresiones superior', series.map((x) => x.top_impr_share), col.navy, { borderDash: [5, 4] }),
+  ] }, options: o });
+
+  // 2) Lo obtenido y lo perdido (por presupuesto y por ranking), apilado al 100%
+  o = base();
+  o.scales.x.stacked = true;
+  o.scales.y = { stacked: true, min: 0, max: 1, grid: { color: col.grid }, ticks: tick(pct) };
+  o.plugins.tooltip = { ...o.plugins.tooltip, ...tip([pct1, pct1, pct1]) };
+  const bar = (label, data, color) => ({ type: 'bar', label, data, backgroundColor: color, borderWidth: 0, barPercentage: 0.9, categoryPercentage: 0.95 });
+  mount('camp-chart-lost', { type: 'bar', data: { labels, datasets: [
+    bar('Cuota obtenida', series.map((x) => x.impr_share), col.teal),
+    bar('Perdida por presupuesto', series.map((x) => x.lost_is_budget), col.orange),
+    bar('Perdida por ranking', series.map((x) => x.lost_is_rank), col.red),
+  ] }, options: o });
+
+  // 3) Gasto diario frente al presupuesto
+  o = base();
+  o.scales.y = { beginAtZero: true, grid: { color: col.grid }, ticks: tick(axisMoney) };
+  o.plugins.tooltip = { ...o.plugins.tooltip, ...tip([money, money]) };
+  mount('camp-chart-spend', { type: 'bar', data: { labels, datasets: [
+    { type: 'bar', label: 'Gasto', data: series.map((x) => x.cost), backgroundColor: col.navy, borderRadius: 3, order: 2 },
+    line('Presupuesto diario actual', series.map((x) => x.budget), col.orange, { borderDash: [6, 4], pointRadius: 0, order: 1 }),
+  ] }, options: o });
+
+  // 4) Clics (barras) y CTR (línea, eje derecho)
+  o = base();
+  o.scales.y = { beginAtZero: true, grid: { color: col.grid }, ticks: tick((v) => fmtInt(v)) };
+  o.scales.y1 = { position: 'right', beginAtZero: true, grid: { display: false }, ticks: tick((v) => v.toFixed(1) + '%') };
+  o.plugins.tooltip = { ...o.plugins.tooltip, ...tip([fmtInt, (v) => v.toFixed(2) + '%']) };
+  mount('camp-chart-clicks', { type: 'bar', data: { labels, datasets: [
+    { type: 'bar', label: 'Clics', data: series.map((x) => x.clicks), backgroundColor: col.teal, borderRadius: 3, yAxisID: 'y', order: 2 },
+    line('CTR', series.map((x) => (x.impressions ? (x.clicks / x.impressions) * 100 : null)), col.navy, { yAxisID: 'y1', order: 1 }),
+  ] }, options: o });
+
+  // 5) Conversiones (barras) y CPA (línea, eje derecho)
+  o = base();
+  o.scales.y = { beginAtZero: true, grid: { color: col.grid }, ticks: tick((v) => (Number.isInteger(v) ? v : v.toFixed(1))) };
+  o.scales.y1 = { position: 'right', beginAtZero: true, grid: { display: false }, ticks: tick(axisMoney) };
+  o.plugins.tooltip = { ...o.plugins.tooltip, ...tip([(v) => (Number.isInteger(v) ? v : v.toFixed(1)), money]) };
+  mount('camp-chart-conv', { type: 'bar', data: { labels, datasets: [
+    { type: 'bar', label: 'Conversiones', data: series.map((x) => x.conversions), backgroundColor: col.teal, borderRadius: 3, yAxisID: 'y', order: 2 },
+    line('CPA', series.map((x) => (x.conversions > 0 ? x.cost / x.conversions : null)), col.orange, { yAxisID: 'y1', order: 1 }),
+  ] }, options: o });
+
+  // 6) CPC medio y ROAS, cada uno con su eje
+  o = base();
+  o.scales.y = { beginAtZero: true, grid: { color: col.grid }, ticks: tick(axisMoney) };
+  o.scales.y1 = { position: 'right', beginAtZero: true, grid: { display: false }, ticks: tick((v) => v.toFixed(1) + '×') };
+  o.plugins.tooltip = { ...o.plugins.tooltip, ...tip([money, (v) => v.toFixed(2) + '×']) };
+  mount('camp-chart-cpc', { type: 'line', data: { labels, datasets: [
+    line('CPC medio', series.map((x) => (x.clicks ? x.cost / x.clicks : null)), col.navy, { yAxisID: 'y' }),
+    line('ROAS', series.map((x) => (x.cost > 0 && x.conv_value > 0 ? x.conv_value / x.cost : null)), col.teal, { yAxisID: 'y1' }),
+  ] }, options: o });
+}
+
+// ---- Historial de cambios de la cuenta ----
+const CAMBIOS_PAGE_SIZE = 100;
+const CAMBIOS_OPERATIONS = [['CREATE', 'Creó'], ['UPDATE', 'Cambió'], ['REMOVE', 'Eliminó']];
+
+function emptyCambiosFilters() { return { user: 'all', client: 'all', resource: 'all', operation: 'all', campaign: 'all', search: '' }; }
+
+// Valor de un cambio en texto; `currency` es el código de moneda de la cuenta.
+function changeValueText(item, v, currency) {
+  if (v == null) return null;
+  if (item.kind === 'money') return campanasMoney(v, currency);
+  if (item.kind === 'roas') return `${Number(v).toFixed(2)}×`;
+  if (item.kind === 'status') return ({ ENABLED: 'Activa', PAUSED: 'Pausada', REMOVED: 'Eliminada' })[v] || v;
+  if (item.kind === 'bid_strategy') return BID_STRATEGY_LABELS_ES[v] || v;
+  return String(v);
+}
+
+// Detalle de un cambio como texto plano (una línea por dato): para el CSV y la búsqueda.
+function changeDetailLines(ch, currency) {
+  if (!ch.items.length) return ch.text ? [ch.text] : [];
+  return ch.items.map((it) => {
+    const o = changeValueText(it, it.old, currency), n = changeValueText(it, it.new, currency);
+    return o != null || n != null ? `${it.label}: ${o != null ? `${o} → ` : ''}${n != null ? n : '—'}` : it.label;
+  });
+}
+
+function changeDetailHtml(ch, currency) {
+  if (!ch.items.length) return ch.text ? escapeHtml(ch.text) : '<span class="field-hint">—</span>';
+  return ch.items.map((it) => {
+    const o = changeValueText(it, it.old, currency), n = changeValueText(it, it.new, currency);
+    return `<div>${escapeHtml(it.label)}${o != null || n != null ? `: ${o != null ? `<span style="text-decoration:line-through;opacity:.7">${escapeHtml(o)}</span> → ` : ''}<strong>${n != null ? escapeHtml(n) : '—'}</strong>` : ''}</div>`;
+  }).join('');
+}
+
+const changeClientText = (client) => CAMPANA_CLIENT_ES[client] || campanaEnumText(client);
+const changeUserText = (ch) => ch.user || 'Google (sin usuario)';
+
+function ensureCambiosLoaded() {
+  const s = state.cambios;
+  if (s.watchlistStatus !== 'idle' || !currentUser.isSuperAdmin) return;
+  s.watchlistStatus = 'loading';
+  fetch('/api/google-ads/pacing/watchlist')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      s.watchlist = data.watchlist || [];
+      s.watchlistStatus = 'ready';
+      if (!s.accountId && s.watchlist.length) s.accountId = s.watchlist[0].customer_id;
+      if (s.accountId) loadCambios(); else render();
+    })
+    .catch((err) => { s.watchlistStatus = 'error'; s.error = err.message || String(err); render(); });
+}
+
+function loadCambios() {
+  const s = state.cambios;
+  if (!s.accountId) { s.error = 'Elige una cuenta primero.'; render(); return; }
+  const token = ++s.loadToken;
+  const acc = s.watchlist.find((a) => a.customer_id === s.accountId);
+  s.status = 'loading'; s.error = null;
+  render();
+  const params = new URLSearchParams({ customer_id: s.accountId, days: String(s.days) });
+  fetch(`/api/google-ads/account-changes?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      if (token !== s.loadToken) return;
+      s.rows = data.changes || [];
+      s.truncated = !!data.truncated;
+      s.warnings = data.errors || {};
+      s.simulated = !!data.simulated;
+      s.currency = data.currency || '';
+      s.loaded = { accountId: s.accountId, accountName: (acc && acc.account_name) || s.accountId, days: s.days };
+      s.filters = emptyCambiosFilters();
+      s.limit = CAMBIOS_PAGE_SIZE;
+      s.status = 'ready';
+      render();
+    })
+    .catch((err) => {
+      if (token !== s.loadToken) return;
+      s.status = 'error'; s.error = err.message || String(err);
+      render();
+    });
+}
+
+function cambiosFilteredRows() {
+  const s = state.cambios;
+  const f = s.filters;
+  const q = f.search.trim().toLowerCase();
+  return s.rows.filter((ch) => {
+    if (f.user !== 'all' && changeUserText(ch) !== f.user) return false;
+    if (f.client !== 'all' && ch.client !== f.client) return false;
+    if (f.resource !== 'all' && ch.resource !== f.resource) return false;
+    if (f.operation !== 'all' && ch.operation !== f.operation) return false;
+    if (f.campaign !== 'all' && ch.campaign_id !== f.campaign) return false;
+    if (q) {
+      const hay = [ch.campaign_name, ch.ad_group_name, changeUserText(ch), ch.resource_label, ...changeDetailLines(ch, s.currency)].join(' ').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+}
+
+function cambiosFilterSummary() {
+  const s = state.cambios;
+  const f = s.filters;
+  const parts = [];
+  if (f.user !== 'all') parts.push(`Persona: ${f.user}`);
+  if (f.client !== 'all') parts.push(`Origen: ${changeClientText(f.client)}`);
+  if (f.resource !== 'all') parts.push(`Qué: ${(s.rows.find((r) => r.resource === f.resource) || {}).resource_label || f.resource}`);
+  if (f.operation !== 'all') parts.push(`Operación: ${(CAMBIOS_OPERATIONS.find((o) => o[0] === f.operation) || [])[1] || f.operation}`);
+  if (f.campaign !== 'all') parts.push(`Campaña: ${(s.rows.find((r) => r.campaign_id === f.campaign) || {}).campaign_name || f.campaign}`);
+  if (f.search.trim()) parts.push(`Texto: «${f.search.trim()}»`);
+  return parts;
+}
+
+const cambiosSlug = (text) => String(text).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'cuenta';
+
+function downloadCambiosCsv() {
+  const s = state.cambios;
+  if (!s.loaded) return;
+  const rows = [['Fecha y hora (hora de la cuenta)', 'Persona', 'Origen', 'Campaña', 'Grupo de anuncios', 'Operación', 'Qué', 'Detalle']];
+  cambiosFilteredRows().forEach((ch) => rows.push([ch.when, changeUserText(ch), changeClientText(ch.client), ch.campaign_name, ch.ad_group_name, ch.operation_label, ch.resource_label, changeDetailLines(ch, s.currency).join(' | ')]));
+  engine.downloadCsv(`historial_cambios_${cambiosSlug(s.loaded.accountName)}_${new Date().toISOString().slice(0, 10)}.csv`, rows);
+}
+
+function downloadCambiosHtml() {
+  const s = state.cambios;
+  if (!s.loaded) return;
+  const list = cambiosFilteredRows();
+  const filters = cambiosFilterSummary();
+  const body = list.map((ch) => `
+      <tr>
+        <td class="nw">${escapeHtml(ch.when.slice(0, 16))}</td>
+        <td>${escapeHtml(changeUserText(ch))}<div class="sub">${escapeHtml(changeClientText(ch.client))}</div></td>
+        <td>${escapeHtml(ch.campaign_name || '—')}${ch.ad_group_name ? `<div class="sub">${escapeHtml(ch.ad_group_name)}</div>` : ''}</td>
+        <td>${escapeHtml(ch.operation_label)} · ${escapeHtml(ch.resource_label)}</td>
+        <td>${changeDetailHtml(ch, s.currency)}</td>
+      </tr>`).join('');
+  const html = `<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Historial de cambios — ${escapeHtml(s.loaded.accountName)}</title>
+<style>
+  body { font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: #1f2937; margin: 32px auto; max-width: 1100px; padding: 0 16px; }
+  h1 { font-size: 22px; margin: 0 0 4px; } p.meta { color: #6b7280; font-size: 13px; margin: 0 0 4px; }
+  table { border-collapse: collapse; width: 100%; margin-top: 18px; font-size: 13px; }
+  th { text-align: left; background: #f3f4f6; padding: 8px 10px; border-bottom: 2px solid #d1d5db; }
+  td { padding: 8px 10px; border-bottom: 1px solid #e5e7eb; vertical-align: top; } .nw { white-space: nowrap; } .sub { color: #6b7280; font-size: 12px; }
+  s { opacity: .7; }
+</style></head><body>
+<h1>Historial de cambios — ${escapeHtml(s.loaded.accountName)}</h1>
+<p class="meta">Cuenta ${escapeHtml(s.loaded.accountId)} · últimos ${s.loaded.days} días · ${list.length} cambio${list.length === 1 ? '' : 's'} · generado el ${escapeHtml(new Date().toISOString().slice(0, 10))}</p>
+${filters.length ? `<p class="meta">Filtros: ${filters.map(escapeHtml).join(' · ')}</p>` : ''}
+<p class="meta">Las horas son las de la cuenta. Google Ads guarda 30 días de cambios.</p>
+<table><thead><tr><th>Fecha</th><th>Quién</th><th>Campaña</th><th>Qué</th><th>Detalle</th></tr></thead><tbody>${body || '<tr><td colspan="5">Sin cambios.</td></tr>'}</tbody></table>
+</body></html>`.replace(/<span style="text-decoration:line-through;opacity:.7">/g, '<s>').replace(/<\/span> →/g, '</s> →');
+  downloadTextFile(html, `historial_cambios_${cambiosSlug(s.loaded.accountName)}_${new Date().toISOString().slice(0, 10)}.html`, 'text/html');
+}
+
+function renderCambiosPage() {
+  const s = state.cambios;
+  if (!currentUser.isSuperAdmin) {
+    return `<div class="card state-panel idle"><p>Esta sección todavía no está disponible para tu usuario.</p></div>`;
+  }
+  ensureCambiosLoaded();
+
+  const opt = (value, label, current) => `<option value="${escapeHtml(value)}" ${current === value ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+  const controls = `
+    <div class="card control-panel align-end">
+      <div class="field"><label>Cuenta</label>
+        <select id="cam-account" style="width:300px">${s.watchlist.map((a) => opt(a.customer_id, `${a.account_name || a.customer_id} (${a.customer_id})`, s.accountId)).join('')}</select>
+      </div>
+      <div class="field"><label>Periodo</label>
+        <select id="cam-days" style="width:160px">${[7, 14, 30].map((d) => opt(String(d), `Últimos ${d} días`, String(s.days))).join('')}</select>
+      </div>
+      <button class="btn-accent" data-action="cambios-load" ${s.status === 'loading' ? 'disabled' : ''}>Consultar</button>
+      <p class="field-hint" style="max-width:380px">Cuentas de tu lista de <strong>Ritmo de consumo</strong>. Google Ads solo guarda 30 días de cambios, y un cambio puede tardar unos minutos en aparecer.</p>
+    </div>`;
+
+  const errorHtml = s.error ? `<div class="error-panel" style="margin-bottom:16px">${escapeHtml(s.error)}</div>` : '';
+  if (s.watchlistStatus === 'idle' || s.watchlistStatus === 'loading') {
+    return `${controls}<div class="card state-panel loading"><div class="spinner"></div><p>Leyendo tus cuentas…</p></div>`;
+  }
+  if (s.watchlistStatus === 'error') return `${controls}${errorHtml}`;
+  if (!s.watchlist.length) {
+    return `${controls}
+      <div class="card state-panel idle">
+        ${icon('history', 30)}
+        <p>Tu lista de Ritmo de consumo está vacía. Agrega ahí las cuentas que quieras ver y vuelve a esta sección.</p>
+        <button class="btn-outline" data-action="camp-go-pacing">Ir a Ritmo de consumo</button>
+      </div>`;
+  }
+  if (s.status === 'loading') return `${controls}<div class="card state-panel loading"><div class="spinner"></div><p>Trayendo el historial de cambios…</p></div>`;
+  if (s.status === 'error') return `${controls}${errorHtml}`;
+  if (s.status !== 'ready') return `${controls}<div class="card state-panel idle">${icon('history', 30)}<p>Elige una cuenta y pulsa Consultar.</p></div>`;
+
+  const sim = s.simulated ? `<div class="ok-panel" style="margin:10px 0"><strong>Modo simulado.</strong> La API de Google Ads no está configurada en el servidor: son cambios de ejemplo.</div>` : '';
+  const warn = Object.keys(s.warnings || {}).length
+    ? `<div class="error-panel" style="margin-bottom:16px">Algunos nombres no se pudieron resolver (${Object.keys(s.warnings).map((k) => ({ campaigns: 'campañas', ad_groups: 'grupos de anuncios' })[k] || k).join(', ')}); se muestra el id en su lugar.</div>` : '';
+  const trunc = s.truncated
+    ? `<div class="error-panel" style="margin-bottom:16px">La cuenta tiene más cambios de los que se pueden traer de una vez; se muestran los más recientes. Elige un periodo más corto para ver los anteriores.</div>` : '';
+
+  // Opciones de filtro: salen de lo que realmente trae la consulta.
+  const uniq = (fn) => [...new Set(s.rows.map(fn))].filter(Boolean);
+  const users = uniq(changeUserText).sort((a, b) => a.localeCompare(b));
+  const clients = uniq((ch) => ch.client).sort((a, b) => changeClientText(a).localeCompare(changeClientText(b)));
+  const resources = [...new Map(s.rows.map((ch) => [ch.resource, ch.resource_label])).entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  const campaigns = [...new Map(s.rows.filter((ch) => ch.campaign_id).map((ch) => [ch.campaign_id, ch.campaign_name])).entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  const f = s.filters;
+  const filters = `
+    <div class="card control-panel align-end">
+      <div class="field"><label>Persona</label>
+        <select id="cf-user" style="width:220px">${opt('all', 'Todas', f.user)}${users.map((u) => opt(u, u, f.user)).join('')}</select>
+      </div>
+      <div class="field"><label>Origen</label>
+        <select id="cf-client" style="width:200px">${opt('all', 'Todos', f.client)}${clients.map((c) => opt(c, changeClientText(c), f.client)).join('')}</select>
+      </div>
+      <div class="field"><label>Qué cambió</label>
+        <select id="cf-resource" style="width:220px">${opt('all', 'Todo', f.resource)}${resources.map(([k, label]) => opt(k, label, f.resource)).join('')}</select>
+      </div>
+      <div class="field"><label>Operación</label>
+        <select id="cf-operation" style="width:130px">${opt('all', 'Todas', f.operation)}${CAMBIOS_OPERATIONS.map(([k, label]) => opt(k, label, f.operation)).join('')}</select>
+      </div>
+      <div class="field"><label>Campaña</label>
+        <select id="cf-campaign" style="width:260px">${opt('all', 'Todas', f.campaign)}${campaigns.map(([k, name]) => opt(k, name, f.campaign)).join('')}</select>
+      </div>
+      <div class="field"><label>Buscar</label><input type="text" id="cf-search" placeholder="Texto, campaña, persona…" value="${escapeHtml(f.search)}" style="width:220px" /></div>
+    </div>`;
+
+  const list = cambiosFilteredRows();
+  const shown = list.slice(0, s.limit);
+  const people = new Set(list.map(changeUserText));
+  const camps = new Set(list.filter((ch) => ch.campaign_id).map((ch) => ch.campaign_id));
+  const card = (label, value, sub) => `<div class="card stat-card"><div class="stat-label">${label}</div><div class="stat-value">${value}</div>${sub ? `<div class="stat-sub">${sub}</div>` : ''}</div>`;
+  const cards = `
+    <div class="stat-grid">
+      ${card('Cambios', fmtInt(list.length), list.length === s.rows.length ? `en los últimos ${s.loaded.days} días` : `de ${fmtInt(s.rows.length)} en total`)}
+      ${card('Personas', fmtInt(people.size), 'que hicieron cambios')}
+      ${card('Campañas tocadas', fmtInt(camps.size), '')}
+      ${card('Último cambio', list.length ? escapeHtml(list[0].when.slice(0, 10)) : 'N/D', list.length ? escapeHtml(list[0].when.slice(11, 16)) : '')}
+    </div>`;
+
+  const rowsHtml = shown.map((ch) => `
+    <tr>
+      <td style="white-space:nowrap">${escapeHtml(ch.when.slice(0, 16))}</td>
+      <td>${escapeHtml(changeUserText(ch))}<div class="field-hint">${escapeHtml(changeClientText(ch.client))}</div></td>
+      <td style="min-width:200px">${escapeHtml(ch.campaign_name || '—')}${ch.ad_group_name ? `<div class="field-hint">${escapeHtml(ch.ad_group_name)}</div>` : ''}</td>
+      <td>${escapeHtml(ch.operation_label)} · ${escapeHtml(ch.resource_label)}</td>
+      <td style="min-width:240px">${changeDetailHtml(ch, s.currency)}</td>
+    </tr>`).join('');
+  const table = `
+    <div class="card table-panel">
+      <div class="table-panel-head" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+        <h3>${escapeHtml(s.loaded.accountName)} · cambios (${fmtInt(list.length)})</h3>
+        <div style="display:flex;gap:8px">
+          <button class="btn-outline xs" data-action="cambios-csv" ${list.length ? '' : 'disabled'}>Descargar CSV</button>
+          <button class="btn-outline xs" data-action="cambios-html" ${list.length ? '' : 'disabled'}>Descargar HTML</button>
+        </div>
+      </div>
+      <div class="table-scroll" style="max-height:620px">
+        <table>
+          <thead><tr><th>Fecha</th><th>Quién</th><th>Campaña</th><th>Qué</th><th>Detalle</th></tr></thead>
+          <tbody>${rowsHtml || '<tr><td colspan="5" class="footnote">Ningún cambio coincide con los filtros.</td></tr>'}</tbody>
+        </table>
+      </div>
+      ${list.length > shown.length ? `<p class="footnote" style="margin-top:10px">Mostrando ${fmtInt(shown.length)} de ${fmtInt(list.length)}. <button class="btn-outline xs" data-action="cambios-more">Mostrar ${fmtInt(Math.min(CAMBIOS_PAGE_SIZE, list.length - shown.length))} más</button> Las descargas incluyen todos.</p>` : ''}
+      <p class="footnote" style="margin-top:10px">Las horas son las de la cuenta. "API / herramientas" incluye los cambios hechos desde esta plataforma. Los cambios sin usuario los hace Google (recomendaciones automáticas, ajustes de puja). En los anuncios solo se avisa de que cambió el texto, sin detallarlo.</p>
+    </div>`;
+
+  return `${controls}${sim}${warn}${trunc}${filters}${cards}${table}`;
+}
+
 function bindEvents() {
+  // Campañas
+  document.querySelectorAll('[data-camp-open]').forEach((el) => el.addEventListener('click', () => openCampanaDetail(el.dataset.campOpen)));
+  document.querySelectorAll('[data-camp-tab]').forEach((el) => el.addEventListener('click', () => setCampanaTab(el.dataset.campTab)));
+  document.querySelectorAll('[data-camp-go]').forEach((el) => el.addEventListener('click', () => campanaGoTo(el.dataset.campGo)));
+  const campDetailOverlay = document.querySelector('.camp-detail-overlay');
+  if (campDetailOverlay) campDetailOverlay.addEventListener('click', (e) => {
+    if (e.target.closest('[data-modal-stop-propagation]')) return;
+    closeCampanaDetail();
+  });
+  const campOn = (id, ev, fn) => { const el = document.getElementById(id); if (el) el.addEventListener(ev, fn); };
+  campOn('camp-date-from', 'change', (e) => { state.campanas.dateFrom = e.target.value; });
+  campOn('camp-date-to', 'change', (e) => { state.campanas.dateTo = e.target.value; });
+  campOn('camp-hotel-by', 'change', (e) => { state.campanas.hotelBy = e.target.value; state.campanas.hotelFilter = 'all'; render(); });
+  campOn('camp-hotel-filter', 'change', (e) => { state.campanas.hotelFilter = e.target.value; render(); });
+  campOn('camp-type-filter', 'change', (e) => { state.campanas.typeFilter = e.target.value; render(); });
+  campOn('camp-status-filter', 'change', (e) => { state.campanas.statusFilter = e.target.value; render(); });
+  campOn('camp-sort', 'change', (e) => { state.campanas.sortBy = e.target.value; render(); });
+  campOn('camp-search', 'input', (e) => { state.campanas.search = e.target.value; render(); hotelRefocus('camp-search'); });
+  document.querySelectorAll('[data-camp-ask]').forEach((btn) => btn.addEventListener('click', () => { state.campanas.confirm = btn.dataset.campAsk; render(); }));
+  document.querySelectorAll('[data-camp-cancel]').forEach((btn) => btn.addEventListener('click', () => { state.campanas.confirm = null; render(); }));
+  document.querySelectorAll('[data-camp-do]').forEach((btn) => btn.addEventListener('click', () => setCampanaStatus(btn.dataset.campDo, btn.dataset.campStatus)));
+
+  // Historial de cambios
+  const camOn = (id, ev, fn) => { const el = document.getElementById(id); if (el) el.addEventListener(ev, fn); };
+  camOn('cam-account', 'change', (e) => { state.cambios.accountId = e.target.value; });
+  camOn('cam-days', 'change', (e) => { state.cambios.days = Number(e.target.value); });
+  [['cf-user', 'user'], ['cf-client', 'client'], ['cf-resource', 'resource'], ['cf-operation', 'operation'], ['cf-campaign', 'campaign']].forEach(([id, key]) => {
+    camOn(id, 'change', (e) => { state.cambios.filters[key] = e.target.value; state.cambios.limit = CAMBIOS_PAGE_SIZE; render(); });
+  });
+  camOn('cf-search', 'input', (e) => { state.cambios.filters.search = e.target.value; state.cambios.limit = CAMBIOS_PAGE_SIZE; render(); hotelRefocus('cf-search'); });
+
   // Rendimiento
   const rendBrandInput = document.getElementById('rend-brand-keywords');
   if (rendBrandInput) rendBrandInput.addEventListener('input', (e) => { state.rend.brandKeywords = e.target.value; });
@@ -12959,6 +14311,13 @@ function handleAction(action) {
       break;
     }
 
+    case 'camp-refresh': loadCampanas(); break;
+    case 'camp-detail-close': closeCampanaDetail(); break;
+    case 'camp-go-pacing': state.page = 'pacing'; render(); break;
+    case 'cambios-load': loadCambios(); break;
+    case 'cambios-more': state.cambios.limit += CAMBIOS_PAGE_SIZE; render(); break;
+    case 'cambios-csv': downloadCambiosCsv(); break;
+    case 'cambios-html': downloadCambiosHtml(); break;
     case 'rend-source-file': state.rend.source = 'file'; render(); break;
     case 'rend-source-api': {
       state.rend.source = 'api';
@@ -13456,6 +14815,10 @@ function handleAction(action) {
   }
 }
 
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && state.page === 'campanas') closeCampanaDetail();
+});
+
 document.querySelectorAll('.nav-btn').forEach((btn) => {
   btn.addEventListener('click', () => { state.page = btn.dataset.nav; render(); });
 });
@@ -13476,6 +14839,10 @@ fetch('/api/me').then((r) => r.json()).then((data) => {
   // Hoteles está en afinado: oculto para todos (también para el super admin) hasta
   // que se ponga HOTEL_SECTION_VISIBLE en true; cuando se muestre, solo super admin
   // (el servidor también lo exige).
+  const navCampanas = document.getElementById('nav-campanas');
+  if (navCampanas && currentUser.isSuperAdmin) navCampanas.style.display = '';
+  const navCambios = document.getElementById('nav-cambios');
+  if (navCambios && currentUser.isSuperAdmin) navCambios.style.display = '';
   const navHoteles = document.getElementById('nav-hoteles');
   if (navHoteles && HOTEL_SECTION_VISIBLE && currentUser.isSuperAdmin) navHoteles.style.display = '';
   if (data.must_change_password) {
