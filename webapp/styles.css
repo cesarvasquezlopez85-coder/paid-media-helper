@@ -500,6 +500,10 @@ main.content { flex: 1; overflow-y: auto; height: 100%; }
 .table-panel-head h3 { margin: 0; font-size: 13px; font-weight: 700; color: var(--color-text-heading); }
 .table-scroll { max-height: 420px; overflow-y: auto; }
 
+/* Tabla con encabezado fijo: más alta, y los títulos se quedan arriba al bajar (Campañas). */
+.table-scroll.sticky-head { max-height: calc(100vh - 200px); min-height: 320px; }
+.table-scroll.sticky-head th { position: sticky; top: 0; z-index: 2; background: #fff; box-shadow: 0 1px 0 var(--color-border); }
+
 .heatmap-wrap { overflow-x: auto; }
 .heatmap-table { border-collapse: separate; border-spacing: 3px; width: 100%; }
 .heatmap-table th {

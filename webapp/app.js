@@ -12326,7 +12326,7 @@ function renderCampanasPage() {
   const table = `
     <div class="card table-panel">
       <div class="table-panel-head"><h3>Campañas (${fmtInt(rows.length)}) · ${fmtInt(nActive)} activas <span class="field-hint" style="font-weight:400">· haz clic en una campaña para ver sus gráficas</span></h3></div>
-      <div class="table-scroll">
+      <div class="table-scroll sticky-head">
         <table>
           <thead><tr><th style="min-width:240px">Campaña</th><th>Estado</th><th>Tipo</th><th>Estrategia de puja</th><th>Presupuesto/día</th><th>Gasto</th><th>Impr.</th><th>Clics</th><th>CTR</th><th>CPC</th><th>Conv.</th><th>CPA</th><th>ROAS</th><th>Cuota de impr.</th><th>Cuota de impr. superior</th><th>Cuota perdida (presupuesto)</th><th>Cuota perdida (ranking)</th></tr></thead>
           <tbody>${shown.map(renderCampanasRow).join('') || '<tr><td colspan="17" class="footnote">Ninguna campaña coincide con los filtros.</td></tr>'}</tbody>
