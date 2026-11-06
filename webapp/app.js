@@ -4599,7 +4599,6 @@ function renderNegAiPushPanel() {
   const highRisk = selectedNeg.filter((n) => n.riesgo === 'alto');
   const canPush = !!ai.customerId;
   const campaigns = new Set(items.map((i) => i.campaign_id)).size;
-  const phraseOnPmax = items.some((i) => i.match_type === 'PHRASE' && i.pmax);
 
   return `
     <div class="card table-panel" style="margin-bottom:20px">
@@ -4617,7 +4616,6 @@ function renderNegAiPushPanel() {
       </div>
       ${selectedNeg.length ? `<div class="ok-panel" style="margin-bottom:12px"><strong>Gasto de los términos que bloquearían: ${fmtMoney(savings)}</strong> (gasto ya hecho en el periodo; el ahorro real depende de que esas búsquedas se repitan).</div>` : ''}
       ${kwConflicts ? `<div class="error-panel" style="margin-bottom:12px"><strong>Cuidado:</strong> ${kwConflicts === 1 ? 'una de las negativas marcadas bloquearía' : `${kwConflicts} de las negativas marcadas bloquearían`} una palabra clave tuya que está activa. Esas palabras dejarían de servirse; revisa el detalle en rojo antes de subir.</div>` : ''}
-      ${phraseOnPmax ? `<div class="error-panel" style="margin-bottom:12px"><strong>Ojo:</strong> hay negativas de <strong>frase</strong> dirigidas a campañas de Performance Max, algo que todavía no se ha probado en una cuenta real. Mira que la vista previa de Google salga sin errores antes de confirmar.</div>` : ''}
       ${reviewBrand ? `<div class="error-panel" style="margin-bottom:12px"><strong>Ojo:</strong> ${reviewBrand === 1 ? 'marcaste un término que lleva' : `marcaste ${reviewBrand} términos que llevan`} el nombre del hotel o la marca: al negativizarlos dejarías de aparecer en esas búsquedas propias.</div>` : ''}
       ${highRisk.length ? `<div class="error-panel" style="margin-bottom:12px"><strong>Ojo:</strong> ${highRisk.length === 1 ? 'una palabra marcada choca' : `${highRisk.length} palabras marcadas chocan`} con términos que convierten o llevan la marca${convAtRisk > 0 ? ` (${fmtInt(convAtRisk)} conversión${convAtRisk === 1 ? '' : 'es'} en juego)` : ''}. Revisa el detalle de cada una o usa la alternativa segura.</div>` : ''}
       ${canPush && (p.status === 'idle' || p.status === 'error') ? `
