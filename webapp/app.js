@@ -86,6 +86,7 @@ const state = {
     campaignFilter: 'all',
     campaignTypeFilter: 'all',
     hotelFilter: 'all',
+    hotelBy: 'cuenta', // cómo se agrupa el resumen por hotel: 'cuenta' (varias cuentas) o 'nombre' (prefijo del nombre de campaña)
     brandKeywords: 'marca, brand, branded, brnd',
     source: 'file', // 'file' | 'api'
     api: {
@@ -1688,7 +1689,7 @@ function runCompareAnalysis(which, text, fileName) {
   try {
     const brandKeywords = state.compare.brandKeywords.split(',').map((v) => v.trim()).filter(Boolean);
     const rowsRaw = engine.loadCampaignReport(text, brandKeywords);
-    rowsRaw.forEach((r) => { r.hotel = deriveHotelName(r.campaign); });
+    rowsRaw.forEach((r) => { r.campaign_raw = r.campaign; r.hotel = deriveHotelName(r.campaign); });
     const rows = engine.computeMetrics(rowsRaw);
     Object.assign(slot, { status: 'ready', error: null, rows, fileName });
   } catch (err) {
@@ -1712,6 +1713,7 @@ function runCompareAnalysisFromApiRows(which, apiRows, fileName) {
     // del nombre de la campaña (igual que Oportunidad de ingresos).
     rowsRaw.forEach((r, i) => {
       const acct = apiRows[i] && apiRows[i]._account;
+      r.campaign_raw = r.campaign;
       r.hotel = acct || deriveHotelName(r.campaign);
       r.hotel_is_account = !!acct;
       if (acct) r.campaign = `${acct} › ${r.campaign}`;
@@ -1723,6 +1725,13 @@ function runCompareAnalysisFromApiRows(which, apiRows, fileName) {
   }
 }
 
+// Hotel de una fila según el corte elegido: la cuenta (solo existe con varias cuentas) o lo que va antes del primer
+// " - " del nombre de la campaña. null = sin hotel con este corte.
+function compareHotelOf(r) {
+  if (state.compare.hotelBy === 'nombre') return deriveHotelName(r.campaign_raw || r.campaign);
+  return r.hotel_is_account ? r.hotel : null;
+}
+
 // ignoreHotel=true: lo que alimenta el resumen por hotel, que debe seguir mostrando a todos los hoteles aunque se
 // haya elegido ver solo uno en el resto de la página.
 function getCompareFilteredRows(ignoreHotel = false) {
@@ -1730,8 +1739,8 @@ function getCompareFilteredRows(ignoreHotel = false) {
   let currentRows = s.current.rows || [];
   let previousRows = s.previous.rows || [];
   if (!ignoreHotel && s.hotelFilter !== 'all') {
-    currentRows = currentRows.filter((r) => r.hotel === s.hotelFilter);
-    previousRows = previousRows.filter((r) => r.hotel === s.hotelFilter);
+    currentRows = currentRows.filter((r) => compareHotelOf(r) === s.hotelFilter);
+    previousRows = previousRows.filter((r) => compareHotelOf(r) === s.hotelFilter);
   }
   if (s.campaignFilter !== 'all') {
     currentRows = currentRows.filter((r) => r.campaign === s.campaignFilter);
@@ -2073,13 +2082,15 @@ function deltaBadge(pct, mode) {
 function renderCompareHotelSummary() {
   const { currentRows, previousRows } = getCompareFilteredRows(true);
   const all = [...currentRows, ...previousRows];
-  const hotels = [...new Set(all.map((r) => r.hotel))];
-  const byAccount = all.some((r) => r.hotel_is_account);
-  if (!byAccount || hotels.length < 2) return '';
+  const hotels = [...new Set(all.map(compareHotelOf).filter(Boolean))];
+  const byName = state.compare.hotelBy === 'nombre';
+  const campaignCount = new Set(all.map((r) => r.campaign)).size;
+  // Por nombre: si cada campaña sería su propio "hotel" (ninguna comparte prefijo), el corte no agrupa nada.
+  if (hotels.length < 2 || (byName && hotels.length >= campaignCount)) return '';
 
   const groups = hotels.map((h) => {
-    const cur = currentRows.filter((r) => r.hotel === h);
-    const prev = previousRows.filter((r) => r.hotel === h);
+    const cur = currentRows.filter((r) => compareHotelOf(r) === h);
+    const prev = previousRows.filter((r) => compareHotelOf(r) === h);
     const cs = engine.summarize(cur); const ps = engine.summarize(prev);
     return { hotel: h, cur, prev, cs, ps, d: engine.compareSummaries(cs, ps), campaigns: new Set(cur.map((r) => r.campaign)).size };
   }).sort((x, y) => y.cs.total_cost - x.cs.total_cost);
@@ -2112,7 +2123,7 @@ function renderCompareHotelSummary() {
           </tbody>
         </table>
       </div>
-      <p class="footnote" style="margin-top:10px">Cifras del periodo actual; las flechas comparan con el periodo anterior. Cada hotel es una de las cuentas elegidas.</p>
+      <p class="footnote" style="margin-top:10px">Cifras del periodo actual; las flechas comparan con el periodo anterior. ${byName ? 'El hotel se toma de lo que va antes del primer " - " en el nombre de la campaña.' : 'Cada hotel es una de las cuentas elegidas.'}</p>
     </div>`;
 }
 
@@ -2171,10 +2182,23 @@ function renderComparePageBody() {
 
   const allCampaignNames = [...new Set([...s.current.rows.map((r) => r.campaign), ...s.previous.rows.map((r) => r.campaign)])].sort((a, b) => a.localeCompare(b));
   const allCampaignTypes = [...new Set([...s.current.rows.map((r) => r.campaign_type), ...s.previous.rows.map((r) => r.campaign_type)])].filter(Boolean);
-  const allHotels = [...new Set([...s.current.rows, ...s.previous.rows].map((r) => r.hotel).filter(Boolean))].sort((x, y) => x.localeCompare(y));
-  const showHotelFilter = allHotels.length > 1 && renderCompareHotelSummary() !== '';
+  const hotelSummaryHtml = renderCompareHotelSummary();
+  const allHotels = [...new Set([...s.current.rows, ...s.previous.rows].map(compareHotelOf).filter(Boolean))].sort((x, y) => x.localeCompare(y));
+  const showHotelFilter = allHotels.length > 1 && hotelSummaryHtml !== '';
+  const hotelByHint = s.hotelBy === 'nombre'
+    ? (hotelSummaryHtml ? 'El hotel se toma de lo que va antes del primer " - " del nombre de la campaña (por ejemplo "Estelar Hoteles - CO:es - Search" → Estelar Hoteles). Sirve si tus campañas se nombran así.'
+      : 'Con este corte no se forman al menos 2 grupos distintos (o cada campaña sería su propio hotel). Revisa cómo se nombran las campañas.')
+    : (hotelSummaryHtml ? 'Cada hotel es una de las cuentas elegidas.' : 'Con una sola cuenta o con archivos, elige "Por nombre de campaña" para ver el resumen por hotel.');
   const campaignFilterHtml = `
     <div class="card control-panel align-end">
+      <div class="field">
+        <label>Resumen por hotel</label>
+        <select id="compare-hotel-by" style="width:260px">
+          <option value="cuenta" ${s.hotelBy === 'cuenta' ? 'selected' : ''}>Por cuenta (varias cuentas)</option>
+          <option value="nombre" ${s.hotelBy === 'nombre' ? 'selected' : ''}>Por nombre de campaña</option>
+        </select>
+        <p class="field-hint" style="max-width:340px">${escapeHtml(hotelByHint)}</p>
+      </div>
       ${showHotelFilter ? `
       <div class="field">
         <label>Ver solo este hotel</label>
@@ -2295,7 +2319,7 @@ function renderComparePageBody() {
     ${uploadPanel}
     ${campaignFilterHtml}
     ${statGrid}
-    ${renderCompareHotelSummary()}
+    ${hotelSummaryHtml}
     <div style="margin-top:16px">
       <h2 class="section-title">Recomendaciones por tendencia (${trendRecs.length})</h2>
       ${recsHtml}
@@ -11908,6 +11932,13 @@ function bindEvents() {
     render();
     readFileAsCsvText(file).then((text) => runCompareAnalysis('previous', text, file.name))
       .catch((err) => { state.compare.previous.status = 'error'; state.compare.previous.error = err.message || String(err); render(); });
+  });
+  const compareHotelBy = document.getElementById('compare-hotel-by');
+  if (compareHotelBy) compareHotelBy.addEventListener('change', (e) => {
+    state.compare.hotelBy = e.target.value;
+    state.compare.hotelFilter = 'all'; // los nombres de hotel cambian con el corte
+    state.compare.campaignFilter = 'all';
+    render();
   });
   const compareHotelFilter = document.getElementById('compare-hotel-filter');
   if (compareHotelFilter) compareHotelFilter.addEventListener('change', (e) => {
