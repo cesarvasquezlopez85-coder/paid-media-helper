@@ -2208,13 +2208,19 @@ class Handler(SimpleHTTPRequestHandler):
             return
         # Las negativas que la cuenta ya tiene (solo con Google Ads real y acceso a la cuenta): la IA no las repite,
         # el resultado omite las que ya existen en cada campaña y los términos que ya bloquean se sacan de la lista.
-        existing = []
+        existing = negativos_ia.ExistingNegatives()
+        neg_errors = []
         customer_id = str(payload.get("customer_id") or "").strip()
         if google_ads_client.is_configured() and customer_id.isdigit() and self._user_can_access_account(user, customer_id):
             try:
-                existing = google_ads_client.fetch_account_negative_keywords(customer_id)
+                sources = google_ads_client.fetch_negative_keyword_sources(customer_id)
+                existing = negativos_ia.ExistingNegatives.from_sources(sources)
+                neg_errors = sources.get("errores", [])
             except Exception as e:  # noqa: BLE001 — sin esto el análisis igual sirve
                 print(f"[neg-ia] no se pudieron leer las negativas existentes: {' '.join(str(e).split())[:200]}", flush=True)
+                neg_errors = ["no se pudieron leer las negativas existentes"]
+            for msg in neg_errors:
+                print(f"[neg-ia] {msg}", flush=True)
         try:
             rows, dropped_rows = negativos_ia.drop_blocked(rows, existing)
             terms = negativos_ia.aggregate_terms(rows)
@@ -2232,10 +2238,11 @@ class Handler(SimpleHTTPRequestHandler):
             return
         try:
             chosen = negativos_ia.select_for_ai(terms)
-            user_content = negativos_ia.build_user_content(ctx, chosen, sorted({e["text"] for e in existing}))
+            user_content = negativos_ia.build_user_content(ctx, chosen, existing.texts())
             ai = claude_client.analizar_negativos(user_content)
             result = negativos_ia.build_result(ai, terms, chosen, ctx, existing)
-            result["negativas_existentes"] = len(existing)
+            result["negativas_existentes"] = existing.total()
+            result["negativas_fuentes"] = {**existing.counts, "errores": len(neg_errors)}
             result["ya_bloqueados"] = negativos_ia.summarize_dropped(dropped_rows)
             self._send_json(200, result)
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa

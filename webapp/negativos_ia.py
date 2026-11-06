@@ -85,18 +85,16 @@ def _blocked_by(tokens, negatives):
 
 
 def drop_blocked(rows, existing_negatives):
-    """Separa las filas (término, campaña) que YA bloquea una negativa existente de su propia campaña: no tiene
-    sentido volver a negativizarlas ni gastarle tokens a la IA con ellas. En Search Google ya las marca como
-    excluidas y la consulta las descarta; en Performance Max la vista no trae estado y reaparecen dentro del
-    periodo. Las filas sin campaña (CSV) se conservan. Devuelve (conservadas, descartadas)."""
-    by = {}
-    for e in _clean_existing(existing_negatives):
-        by.setdefault(e["campaign_id"], []).append((e["tokens"], e["match"]))
+    """Separa las filas (término, campaña) que YA bloquea una negativa existente de su campaña — puesta en la
+    propia campaña, en una lista compartida enlazada a ella o en una lista de la cuenta: no tiene sentido volver
+    a negativizarlas ni gastarle tokens a la IA con ellas. En Search Google ya las marca como excluidas y la
+    consulta las descarta; en Performance Max la vista no trae estado y reaparecen dentro del periodo. Las filas
+    sin campaña (CSV) se conservan. Devuelve (conservadas, descartadas)."""
+    existing = as_existing(existing_negatives)
     kept, dropped = [], []
     for r in rows or []:
         cid = r.get("campaign_id") if isinstance(r, dict) else None
-        negs = by.get(str(cid)) if cid not in (None, "") else None
-        if negs and _blocked_by(_tokens(r.get("term")), negs):
+        if cid not in (None, "") and existing.blocks(cid, _tokens(r.get("term"))):
             dropped.append(r)
         else:
             kept.append(r)
@@ -196,24 +194,138 @@ def _term_view(t):
     }
 
 
-def _existing_covers(existing, tokens, match, campaign_id):
-    """¿Ya hay en esta campaña una negativa igual (mismo texto y concordancia,
-    o la misma palabra en amplia, que ya cubre a la exacta)?"""
-    for e in existing:
-        if e["campaign_id"] != campaign_id or e["tokens"] != tokens:
-            continue
-        if e["match"] == match or e["match"] == "BROAD":
+class NegIndex:
+    """Conjunto de negativas indexado para preguntar rápido "¿alguna bloquea esta búsqueda?" aunque haya miles.
+    Exacta: conjunto de tuplas. Frase: conjunto de tuplas, probando las subfrases de la búsqueda. Amplia: se
+    indexa por una de sus palabras y se comprueba que estén todas."""
+
+    def __init__(self):
+        self.exact, self.phrase = set(), set()
+        self.broad_by_word, self.broad_all = {}, set()
+        self.phrase_max = 0
+
+    def add(self, tokens, match):
+        toks = tuple(tokens)
+        if not toks:
+            return
+        if match == "EXACT":
+            self.exact.add(toks)
+        elif match == "PHRASE":
+            self.phrase.add(toks)
+            self.phrase_max = max(self.phrase_max, len(toks))
+        elif match == "BROAD":
+            key = frozenset(toks)
+            if key not in self.broad_all:
+                self.broad_all.add(key)
+                self.broad_by_word.setdefault(min(key), []).append(key)
+
+    def blocks(self, tokens):
+        tup = tuple(tokens)
+        if tup in self.exact:
             return True
-    return False
+        if self.phrase:
+            n = len(tup)
+            for i in range(n):
+                for j in range(i + 1, min(n, i + self.phrase_max) + 1):
+                    if tup[i:j] in self.phrase:
+                        return True
+        if self.broad_by_word:
+            words = set(tup)
+            for w in words:
+                for neg in self.broad_by_word.get(w, ()):
+                    if neg <= words:
+                        return True
+        return False
+
+    def has_same(self, tokens, match):
+        """¿Ya hay una igual (mismo texto y concordancia, o la misma palabra en amplia)?"""
+        tup = tuple(tokens)
+        if frozenset(tup) in self.broad_all:  # una amplia con las mismas palabras ya cubre a la exacta y a la de frase
+            return True
+        return (match == "EXACT" and tup in self.exact) or (match == "PHRASE" and tup in self.phrase)
 
 
-def _clean_existing(existing_negatives):
-    out = []
-    for e in existing_negatives or []:
-        toks = _tokens(e.get("text"))
-        if toks:
-            out.append({"campaign_id": str(e.get("campaign_id")), "tokens": toks, "match": str(e.get("match_type") or "").upper()})
-    return out
+class ExistingNegatives:
+    """Las negativas que ya tiene la cuenta, de todos los orígenes: de campaña, listas compartidas enlazadas a
+    campañas y listas enlazadas a la cuenta (aplican a todas las campañas)."""
+
+    def __init__(self):
+        self.campaign = {}      # campaign_id -> NegIndex
+        self.lists = {}         # list_id -> NegIndex
+        self.list_names = {}
+        self.campaign_lists = {}  # campaign_id -> [list_id]
+        self.account_lists = []
+        self.counts = {"campania": 0, "palabras_listas": 0, "listas": 0, "listas_cuenta": 0}
+        self._texts = []
+
+    @classmethod
+    def from_rows(cls, rows):
+        """Solo negativas de campaña: [{campaign_id, text, match_type}]."""
+        return cls.from_sources({"campaign": rows or [], "lists": []})
+
+    @classmethod
+    def from_sources(cls, sources):
+        ex = cls()
+        seen = set()
+        for e in (sources or {}).get("campaign", []):
+            toks = _tokens(e.get("text"))
+            if not toks:
+                continue
+            ex.campaign.setdefault(str(e.get("campaign_id")), NegIndex()).add(toks, str(e.get("match_type") or "").upper())
+            ex.counts["campania"] += 1
+            if e["text"] not in seen:
+                seen.add(e["text"]); ex._texts.append(e["text"])
+        for lst in (sources or {}).get("lists", []):
+            idx = NegIndex()
+            for kw in lst.get("keywords", []):
+                toks = _tokens(kw.get("text"))
+                if toks:
+                    idx.add(toks, str(kw.get("match_type") or "").upper())
+                    ex.counts["palabras_listas"] += 1
+                    if kw["text"] not in seen:
+                        seen.add(kw["text"]); ex._texts.append(kw["text"])
+            lid = str(lst.get("id"))
+            ex.lists[lid] = idx
+            ex.list_names[lid] = lst.get("name") or lid
+            ex.counts["listas"] += 1
+            for cid in lst.get("campaign_ids", []):
+                ex.campaign_lists.setdefault(str(cid), []).append(lid)
+            if lst.get("account"):
+                ex.account_lists.append(lid)
+                ex.counts["listas_cuenta"] += 1
+        return ex
+
+    def _indexes(self, campaign_id):
+        cid = str(campaign_id)
+        if cid in self.campaign:
+            yield self.campaign[cid]
+        for lid in self.campaign_lists.get(cid, ()):
+            yield self.lists[lid]
+        for lid in self.account_lists:
+            yield self.lists[lid]
+
+    def blocks(self, campaign_id, tokens):
+        return any(idx.blocks(tokens) for idx in self._indexes(campaign_id))
+
+    def has_same(self, campaign_id, tokens, match):
+        return any(idx.has_same(tokens, match) for idx in self._indexes(campaign_id))
+
+    def texts(self, limit=150):
+        return self._texts[:limit]
+
+    def total(self):
+        return self.counts["campania"] + self.counts["palabras_listas"]
+
+
+def as_existing(existing_negatives):
+    if isinstance(existing_negatives, ExistingNegatives):
+        return existing_negatives
+    return ExistingNegatives.from_rows(existing_negatives)
+
+
+def _existing_covers(existing, tokens, match, campaign_id):
+    """¿Ya hay en esta campaña (propia, lista compartida o lista de la cuenta) una negativa igual?"""
+    return existing.has_same(campaign_id, tokens, match)
 
 
 def _as_int(v):
@@ -234,7 +346,7 @@ def build_result(ai, all_terms, chosen, ctx, existing_negatives):
     marca = _phrases(split_lines(ctx.get("marca")))
     destino = _phrases(split_lines(ctx.get("destino")))
     protegidas = marca + destino
-    existing = _clean_existing(existing_negatives)
+    existing = as_existing(existing_negatives)
     pmax_ids = {cid for t in all_terms for cid in t.get("pmax_campaigns", ())}
 
     def camp(cid, name):

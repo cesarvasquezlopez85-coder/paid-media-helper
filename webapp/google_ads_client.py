@@ -1407,6 +1407,69 @@ def fetch_account_negative_keywords(customer_id):
     return rows
 
 
+def fetch_negative_keyword_sources(customer_id):
+    """Todas las negativas de palabra clave que afectan a las campañas de la cuenta, por origen:
+      - "campaign": las puestas directo en cada campaña (fetch_account_negative_keywords);
+      - "lists": listas compartidas de negativas (SharedSet NEGATIVE_KEYWORDS) con sus palabras y las
+        campañas a las que están enlazadas; si la lista también está enlazada a la cuenta (negativas de
+        nivel cuenta, CustomerNegativeCriterion NEGATIVE_KEYWORD_LIST), `account` es True y aplica a todas.
+    Las negativas de cuenta no existen como palabra suelta en la API: solo como listas enlazadas, y esas
+    listas son de otro tipo (ACCOUNT_LEVEL_NEGATIVE_KEYWORDS), no NEGATIVE_KEYWORDS.
+    Verificado contra cuentas reales (2026-11-05): 64 de 120 cuentas usan listas enlazadas a campañas; 3 de
+    150 tenían además una lista a nivel cuenta. Cada origen que falle
+    se reporta en "errores" sin tumbar los demás."""
+    sources = {"campaign": [], "lists": [], "errores": []}
+    try:
+        sources["campaign"] = fetch_account_negative_keywords(customer_id)
+    except RuntimeError as e:
+        sources["errores"].append(f"campañas: {' '.join(str(e).split())[:120]}")
+    by_list = {}
+    try:
+        for r in _search(customer_id, """
+            SELECT campaign.id, shared_set.id, shared_set.name
+            FROM campaign_shared_set
+            WHERE shared_set.type = 'NEGATIVE_KEYWORDS' AND shared_set.status = 'ENABLED'
+              AND campaign_shared_set.status = 'ENABLED'
+        """):
+            sid = str(r.get("sharedSet", {}).get("id"))
+            entry = by_list.setdefault(sid, {"id": sid, "name": r.get("sharedSet", {}).get("name") or sid,
+                                              "campaign_ids": [], "keywords": [], "account": False})
+            if r.get("campaign", {}).get("id") is not None:
+                entry["campaign_ids"].append(str(r["campaign"]["id"]))
+    except RuntimeError as e:
+        sources["errores"].append(f"listas enlazadas a campañas: {' '.join(str(e).split())[:120]}")
+    try:
+        for r in _search(customer_id, """
+            SELECT customer_negative_criterion.negative_keyword_list.shared_set
+            FROM customer_negative_criterion
+            WHERE customer_negative_criterion.type = 'NEGATIVE_KEYWORD_LIST'
+        """):
+            ref = (r.get("customerNegativeCriterion", {}).get("negativeKeywordList", {}) or {}).get("sharedSet") or ""
+            sid = ref.rsplit("/", 1)[-1]
+            if sid.isdigit():
+                by_list.setdefault(sid, {"id": sid, "name": sid, "campaign_ids": [], "keywords": [], "account": False})["account"] = True
+    except RuntimeError as e:
+        sources["errores"].append(f"listas de la cuenta: {' '.join(str(e).split())[:120]}")
+    if by_list:
+        try:
+            for r in _search(customer_id, """
+                SELECT shared_set.id, shared_set.name, shared_criterion.keyword.text, shared_criterion.keyword.match_type
+                FROM shared_criterion
+                WHERE shared_set.type IN ('NEGATIVE_KEYWORDS', 'ACCOUNT_LEVEL_NEGATIVE_KEYWORDS')
+                  AND shared_criterion.type = 'KEYWORD'
+            """):
+                sid = str(r.get("sharedSet", {}).get("id"))
+                kw = r.get("sharedCriterion", {}).get("keyword", {})
+                if sid in by_list and kw.get("text"):
+                    by_list[sid]["keywords"].append({"text": kw["text"], "match_type": kw.get("matchType") or "UNKNOWN"})
+                    if by_list[sid]["name"] == sid and r.get("sharedSet", {}).get("name"):
+                        by_list[sid]["name"] = r["sharedSet"]["name"]
+        except RuntimeError as e:
+            sources["errores"].append(f"palabras de las listas: {' '.join(str(e).split())[:120]}")
+    sources["lists"] = list(by_list.values())
+    return sources
+
+
 def push_negative_keywords(customer_id, items, validate_only=True):
     """Sube palabras clave negativas a nivel de campaña (concordancia exacta
     por defecto; "match_type": "PHRASE" en el item la pasa a frase).
