@@ -8,6 +8,8 @@ El generador de copys de anuncio desde una URL estuvo oculto del menú desde el 
 
 Ya no es solo un prototipo de Streamlit, y ya no corre solo local: existe una implementación web completa (`webapp/`, HTML/CSS/JS + un servidor Python sin dependencias externas) con login por usuario/contraseña, que reproduce el diseño hecho en Claude Design. **Vive en producción en [Railway](https://railway.app)**, en `https://paid-media-helper.up.railway.app`, con auto-deploy desde la rama `main` del repo de GitHub — cualquier cambio que se suba se despliega solo, sin pasos manuales. También se puede correr local con `python3 webapp/server.py` → `http://localhost:8642` — ver "Cómo corre la plataforma" más abajo.
 
+Desde el 2026-11-04 hay además secciones que solo ve y usa el super admin mientras se afinan: **Hoteles** (modificadores de oferta de campañas de hotel), **Campañas** (todas las campañas de las cuentas vigiladas, con KPIs y un detalle por campaña), **Historial de cambios** (quién cambió qué en una cuenta) y la pestaña **Con IA** de Negativización. Ver "Novedades desde la V4" y las Funciones 15 a 17.
+
 ## Versión V4 (2026-11-03)
 
 El sidebar de la app ya dice V4. Lo que cambia desde la V3 (35 cambios publicados entre el 2026-10-14 y el 2026-11-03):
@@ -20,6 +22,20 @@ El sidebar de la app ya dice V4. Lo que cambia desde la V3 (35 cambios publicado
 - **Menú reordenado** (2026-10-22): Auditoría, Rendimiento, ROAS, IA Max, Ritmo de consumo y siguientes.
 - **Infraestructura y seguridad:** plan Pro de Railway, despliegue solo cuando cambia `webapp/`, librerías de la página servidas desde la propia plataforma (`vendor/`), todas las credenciales rotadas tras el incidente de seguridad de Railway (2026-10-21 y 22) y `/api/fetch` ya no acepta direcciones internas.
 - **Material para el equipo:** presentación de 31 diapositivas en colores de Roiba con capturas nuevas, el documento y la página con las 66 reglas, el informe de ejemplo de la auditoría y la comparación con Google Ads Editor.
+
+## Novedades desde la V4 (2026-11-04 a 2026-11-06)
+
+El sidebar sigue diciendo V4. Todo esto está publicado en producción. Las secciones y pestañas marcadas "super admin" solo las ve y usa `cesar.vasquez` (`PMH_SUPER_ADMIN_USERNAMES`); el servidor responde 403 a cualquier otro usuario, aunque sea administrador.
+
+- **Hoteles — modificadores de oferta (2026-11-04, super admin):** sección nueva para ver y editar los modificadores de las campañas de hotel por tramo, con vista previa de Google antes de aplicar. Ver Función 15.
+- **Negativización con IA (2026-11-05, super admin):** pestaña "Con IA" donde Claude propone qué negativizar, qué dejar y qué revisar, y el código lo valida. Incluye Performance Max con términos reales, listas compartidas de negativas, historial de subidas con deshacer y una vista de palabras frecuentes sin IA. Ver Función 2.
+- **Uso de la IA (2026-11-05, super admin):** cada llamado a Claude se registra por usuario, día y función con su costo estimado, y se ve en Administración. Ver "Cómo corre la plataforma, y el login".
+- **Comparar periodos (2026-11-06):** se pueden elegir hasta 20 cuentas y ver el total combinado, hay un resumen por hotel (por cuenta o por nombre de campaña) con filtro "Ver solo este hotel", y el informe se descarga en HTML y en Markdown. Ver Función 5.
+- **Moneda de la cuenta (2026-11-06):** con datos de Google Ads, los importes de todas las secciones muestran el código de la moneda de la cuenta (EUR, COP…) en vez de "$". Con archivos se mantiene el "$". Oportunidad de ingresos ya no mezcla cuentas de monedas distintas.
+- **Campañas (2026-11-06, super admin):** todas las campañas de las cuentas de la lista de Ritmo de consumo con KPIs, pausar y activar, y un detalle por campaña con 7 pestañas. Ver Función 16.
+- **Historial de cambios (2026-11-06, super admin):** quién cambió qué en una cuenta en los últimos 30 días, con filtros y descarga en CSV y HTML. Ver Función 17.
+- **Conexión de solo lectura a GA4, Tag Manager, Search Console y BigQuery (2026-11-06):** guía y script listos en `OUTPUTS/plataforma-google-ads/conexiones_lectura/`. Todavía no se ha ejecutado la autorización. Ver "Conexiones de solo lectura".
+- **Pruebas reales (2026-11-06):** pausar y reactivar una campaña por la función de la plataforma contra Google Ads, y negativas de frase en Performance Max con subida y deshacer reales. Ver Funciones 2 y 16.
 
 ## Versión V3 (2026-10-14)
 
@@ -41,11 +57,13 @@ Fue la versión del sidebar entre el 2026-07-29 y el 2026-10-14. El salto de V1 
 - **Conectada de verdad desde el 2026-07-28** (no solo en modo simulado): la primera prueba contra una cuenta real de la agencia encontró y corrigió varios bugs reales (versión de API retirada, un parámetro no soportado, un nombre de campo equivocado, un filtro que dejaba fuera la mayoría de las cuentas del MCC) — ver el detalle completo en la sección de Función 1 más abajo y en `roadmap.md`.
 - Mientras las credenciales de Google no estén configuradas (o para cualquier cuenta de prueba), todo sigue funcionando en **modo simulado** — mismos botones, mismo flujo, datos de ejemplo en vez de reales.
 
-## Estado: V4 — catorce funciones construidas, catorce activas en el menú (la Función 3, copys, solo para administradores desde el 2026-11-01)
+## Estado: V4 — diecisiete funciones construidas y en el menú (copys solo para administradores desde el 2026-11-01; Hoteles, Campañas e Historial de cambios solo para el super admin)
 
 **Menú reordenado (2026-07-29):** las cuatro funciones conectadas a Google Ads quedan agrupadas arriba — Rendimiento, Comparar periodos, Oportunidad de ingresos, Negativización — y las dos que no dependen de Google Ads (Bookings, Proyección de ventas) quedan abajo.
 
 **Menú actual (al 2026-10-14), de arriba a abajo:** Auditoría de cuenta, Rendimiento, ROAS, Recomendaciones, IA Max, Negativización, Exclusiones de contenido, Planificador de keywords, Ritmo de consumo, Oportunidad de ingresos, Comparar periodos, Bookings, Proyección de ventas — las once primeras se conectan a Google Ads (nueve leen/escriben sobre una cuenta elegida, Oportunidad de ingresos puede analizar varias a la vez y Ritmo de consumo vigila varias); las dos últimas no dependen de la API.
+
+**Menú actual (al 2026-11-06), de arriba a abajo:** Auditoría de cuenta, Campañas*, Historial de cambios*, Rendimiento, ROAS, IA Max, Hoteles*, Ritmo de consumo, Oportunidad de ingresos, Planificador de keywords, Negativización, Comparar periodos, Bookings, Proyección de ventas, Recomendaciones, Exclusiones de contenido, Generador de copys (solo administradores) y Administración (solo administradores). Los marcados con * solo los ve el super admin.
 
 ### Función 1 — Análisis de rendimiento
 
@@ -117,6 +135,18 @@ Verificado de punta a punta en modo simulado (traer términos → clasificar →
 - **Cuadro con los términos ya seleccionados:** antes había que buscar cuáles checkboxes estaban marcados dentro de la tabla completa de candidatos. Se agregó una tabla chica, con scroll, justo debajo de los botones de selección, que lista los términos marcados con su campaña y costo — se actualiza en vivo con cada clic.
 - **Bug: el botón "Vista previa" no volvía a aparecer al cambiar de campaña.** Después de subir negativos en una campaña, el panel de subida quedaba pegado en el estado "Listo" al cambiar el filtro a otra campaña — ese estado solo se limpiaba con una recarga completa. Corregido: cambiar de campaña ahora reinicia la selección y el estado del panel de subida.
 
+**Pestaña "Con IA" (2026-11-05, super admin).** Junto a la vista "Por reglas", que no cambió, una pestaña donde Claude lee los términos de búsqueda de la cuenta y propone qué negativizar (agrupado por tema, con la palabra o frase negativa sugerida), qué dejar y qué revisar. Archivos: `webapp/negativos_ia.py` (validación con código), `claude_client.analizar_negativos` (la llamada) y el endpoint `POST /api/ai/analizar-negativos`. El periodo es de 30, 60 o 90 días y vale para las dos pestañas.
+
+- **La IA propone y el código valida.** Ningún término con conversiones ni con la marca se negativiza (pasa a revisar). Se descartan las negativas genéricas ("hotel", "reserva") o iguales a la marca o al destino. Cada negativa se mide contra todos los términos de la cuenta (riesgo bajo, medio o alto, con choques y los términos "extra" que la IA no revisó). Se omiten las que ya existen. Se marcan solas las de riesgo bajo que bloquean gasto real.
+- **Qué ya está bloqueado se deja fuera** antes de analizar: negativas de la campaña, listas compartidas enlazadas a campañas y listas de la cuenta (`ACCOUNT_LEVEL_NEGATIVE_KEYWORDS`). La pantalla dice cuántos términos y cuánto gasto se dejaron fuera.
+- **Choque con palabras clave propias:** una negativa que bloquearía una palabra clave positiva activa de esa campaña pasa a riesgo alto con el detalle. Los nombres parecidos a la marca (errores de escritura) son riesgo medio.
+- **Performance Max con términos reales:** la vista `campaign_search_term_view` sí devuelve el texto exacto de las búsquedas de PMax con costo (Estelar Alto Prado: 682 términos en 30 días), a diferencia de las categorías que usa la vista "Por reglas". La pestaña "Con IA" los incluye por defecto y los marca con "PMax".
+- **Casillas para negativizar** también en los términos de "Revisar antes de decidir" (agrupados por pregunta, una casilla por grupo) y en los de "Qué dejar". La marca acompañada de palabras genéricas o informativas va a "revisar", no a "dejar".
+- **Historial con deshacer:** las subidas se registran (quién, cuándo, qué y el `resource_name` real que devuelve Google) en `neg_uploads` y `neg_upload_items`, y se pueden ver y deshacer desde la pestaña, con vista previa de Google antes de quitar. Aplica también a la vista "Por reglas".
+- **Palabras frecuentes (sin IA):** palabras y frases de 1 a 3 palabras que se repiten, gastan y nunca convirtieron, con riesgo marcado (`/api/negativos/palabras`).
+- **Cómo se llama a Claude:** salida estructurada (esquema JSON), razonamiento desactivado y esfuerzo bajo, unos 25 a 55 segundos. Con razonamiento tardaba unos 2 minutos y se cortaba por tokens; sin esquema una vez devolvió un JSON roto. Se mandan hasta 300 términos (los de más gasto) más los que convierten. Cada análisis real cuesta una llamada a Opus y cuenta contra el tope por usuario.
+- **Probado con datos reales:** BlueBay Banus (1.211 términos a 90 días): la validación frenó "fotos", "maps", "teléfono" y "estepona" por chocar con búsquedas de marca. Prueba de escritura real el 2026-11-06 en Estelar Medellín (campañas pausadas sin gasto): 3 negativas de prueba, frase y exacta en Search y **frase en Performance Max**, se subieron, Google las mostró (79 a 82), el deshacer real las quitó (de nuevo 79) y el historial quedó en "deshecha". Confirmado: las negativas de frase funcionan en PMax y `partialFailure` devuelve los `resource_name`. Sigue siendo solo super admin; abrirla al equipo es una decisión de cesar.
+
 ### Función 3 — Generador de copys desde URL (con IA desde 2026-11-01, solo administradores)
 
 **Actualización 2026-11-01: copys con IA (Search, Performance Max, Demand Gen, YouTube y Meta).** El generador volvió al menú como "Generador de copys", visible **solo para administradores** mientras se afinan los textos. Tras analizar la página (que sigue sacando título, encabezados, listas y ofertas reales), hay un botón por tipo de campaña que le pide a Claude (`claude-opus-5`) un borrador con los límites de ese formato: **Search** 15 títulos de 30 y 4 descripciones de 90; **Performance Max** 15 títulos de 30 (con al menos uno de 15 o menos), 5 títulos largos de 90 y 5 descripciones de 90; **Demand Gen** 5 títulos de 40 y 5 descripciones de 90 (límites por verificar: la página oficial de Google no los lista); **YouTube** títulos de 30, títulos largos de 90, descripciones de 90, botón de 10 y líneas in-feed de 40 y 35; **Meta** (anuncios pagados de Facebook e Instagram, no orgánico) texto principal de 125, titulares de 27 y descripciones de enlace de 30. El servidor valida cada texto: descarta los que pasan el límite, llevan emojis, mayúsculas sostenidas o exclamaciones en títulos, y los que traen cifras o superlativos (mejor, garantizado, número 1...) que la página no dice. Si faltan textos válidos pide solo lo que falta, una vez más. Va con tope de 10 generaciones por hora por usuario (`POST /api/ai/generar-copys`, `_copy_limiter`), idioma (español, inglés o portugués) y palabras clave opcionales; las plantillas anteriores siguen debajo como versión sin IA. Cada resultado se puede copiar y descargar en CSV. De paso se cerró un hueco de `/api/fetch`: ya no descarga direcciones internas (localhost, red privada, metadatos de la nube). Probado en local con la llave real, con la página de ejemplo y con una página real de hotel; no se probó con un usuario no administrador en producción. Pendiente: abrirlo a todo el equipo cuando se validen los textos (cambiar `_require_admin_json` por `_require_auth_json` en esa ruta y mostrar el menú a todos).
@@ -168,6 +198,12 @@ Verificada con datos sintéticos de dos periodos (botón "Usar ejemplo"). Pendie
 Verificado en modo simulado de punta a punta: selector de cuenta, ambos periodos con fechas por defecto correctas, filtro por campaña y por tipo recalculando correctamente (probado aislando solo Performance Max), y sin regresión en el modo CSV existente.
 
 **Tarjeta y columna de CPA % (2026-07-29):** misma métrica que ya existe en Rendimiento (gasto ÷ valor de conversión), agregada acá en dos lugares — una tarjeta de cuenta (actual vs. anterior, con badge de cambio, igual que el resto de tarjetas de la pantalla) y, a pedido de cesar, la columna "CPA" de la tabla "Campañas comparadas" se cambió por CPA % por campaña, en vez del CPA en $.
+
+**Varios hoteles, resumen por hotel e informe (2026-11-06).**
+- Con Google Ads conectado se marcan hasta 20 cuentas (con buscador, filtro por MCC y los botones de marcar y quitar de Oportunidad de ingresos) y la comparación suma las campañas de todas en un solo total. Solo se combinan cuentas con la misma moneda; si una cuenta falla en alguno de los dos periodos queda fuera con aviso. Con varias cuentas, cada campaña lleva delante el nombre de su hotel para no mezclar dos campañas con el mismo nombre de hoteles distintos.
+- **Resumen por hotel:** gasto (con su peso en el total), conversiones, CPA y ROAS del periodo actual con su variación frente al anterior, y una fila de total. Un selector permite agruparlo por cuenta o por nombre de campaña (el hotel es lo que va antes del primer " - "); si el corte no forma al menos 2 grupos distintos no se muestra y se explica por qué. "Ver solo este hotel" filtra el resto de la página y sigue el corte elegido.
+- **Informe descargable** en HTML y en Markdown, con las cifras de ambos periodos y sus variaciones, el resumen por hotel, las recomendaciones por tendencia, las campañas comparadas y las nuevas o que ya no aparecen, con los filtros aplicados.
+- **Moneda:** los importes muestran el código de la moneda de la cuenta (EUR, COP…) en vez de "$"; con archivos se mantiene el "$".
 
 ### Función 6 — Oportunidad de ingresos (nueva, 2026-07-14)
 
@@ -338,9 +374,57 @@ Sección nueva, primera del menú. Revisa **en solo lectura** la configuración 
 
 **Material para el equipo (privado hasta que se comparta):** documento editable con todas las reglas (Claude Docs), página con diseño Roiback con el mismo contenido y filtros por gravedad, y la presentación (diapositivas de la auditoría, de sus hallazgos y de Oportunidad con varias cuentas).
 
+### Función 15 — Hoteles: modificadores de oferta (nueva, 2026-11-04, solo super admin)
+
+Sección para ver y editar los modificadores de oferta de las campañas de hotel (`advertising_channel_type = HOTEL`), que cesar considera vitales en estas campañas. Lista las campañas de hotel de una cuenta y, por campaña, muestra los tramos (ventana de reserva, estancia, día de entrada y fechas elegidas) con su rendimiento (`hotel_performance_view`). Se editan **por campaña**, con el mismo valor en todos los grupos de anuncios, y siempre con la vista previa de Google (`validateOnly`) antes de aplicar. Endpoints: `/api/google-ads/hotel-campaigns`, `hotel-modifiers` y `hotel-modifiers-apply`. Código en `google_ads_client.py` (`update_hotel_campaign_modifiers`).
+
+- **Solo super admin:** visible en el menú y usable únicamente para `PMH_SUPER_ADMIN_USERNAMES`; el servidor responde 403 a los demás. El interruptor `HOTEL_SECTION_VISIBLE` está en `webapp/app.js` (hoy en `true`); no se abre al equipo hasta que cesar lo pida.
+- **Plantillas externas:** las cuentas cuyos modificadores mantiene una plantilla externa (unas 30 de 249; se detecta si coinciden 2 de 3 firmas: ventana 3-7 ≈ 0,57, estancia 8-30 ≈ 0,23, ventana 50-330 ≈ 1,21) quedan de solo lectura. Aún no se sabe quién mantiene esa plantilla.
+- **Escritura real probada** el 2026-11-04 en GHA-CPC-aptosmedellin (campaña :CO, pausada): estancia 2-2 de 1,00 a 1,01 y de vuelta a 1,00 desde la pantalla, sin residuos. **Sin probar:** crear un tramo que falta en un grupo (la cuenta de prueba tenía los 18 tramos).
+- **Hallazgos del MCC (escaneos del 2026-11-03):** 289 de 1.113 cuentas tienen campañas HOTEL activas (34.800 campañas), la mayoría con CPC% o CPC manual; una campaña con estrategia COMMISSION retirada (HIC - Google Hotel Ads); solo 39 cuentas con Travel Feeds en Search (1.250 clics, 4 conversiones). Los costos de cuentas con monedas distintas no se pueden sumar.
+- **Propuesto, no construido:** reglas de auditoría para hoteles y un panel con la diferencia de precio frente a la competencia (`hotel_price_difference_percentage`). cesar decidió llevar esto a la sección Hoteles, no al detalle de Campañas.
+
+### Función 16 — Campañas (nueva, 2026-11-06, solo super admin)
+
+Todas las campañas de las cuentas de la lista de **Ritmo de consumo** del usuario en una sola tabla, con sus KPIs, y un detalle por campaña. Solo super admin (los endpoints usan `_require_super_admin_json`).
+
+**Tabla.** Por campaña: estado, tipo, estrategia de puja (con "ROAS objetivo" o "CPA objetivo" y su valor cuando hay objetivo), presupuesto diario, gasto, impresiones, clics, CTR, CPC, conversiones, CPA, ROAS y cuatro cuotas (de impresiones, de impresiones superior, perdida por presupuesto y perdida por ranking; N/D cuando Google no las da para el tipo de campaña). Filtros por hotel (según la cuenta o según el nombre de la campaña), tipo, estado (por defecto Activas) y búsqueda; orden por gasto, conversiones, clics, hotel o nombre; totales por moneda. Rango de fechas propio. El encabezado de la tabla queda fijo al hacer scroll (2026-11-06). Endpoint `/api/google-ads/campaigns-overview`: la lista de campañas se pide sin fechas y se une por id con las métricas del rango, para que las pausadas o sin impresiones también aparezcan; las cuotas de impresiones se piden en una consulta aparte (junto a otras métricas solo devolvían campañas Search).
+
+**Pausar y activar.** Botón en la fila, con confirmación en la misma fila. Solo ENABLED y PAUSED; eliminar no se ofrece. Escribe con `campaigns:mutate` (`updateMask: status`), pasa por el límite de escrituras por usuario y deja registro en la tabla `campaign_status_log`. **Probado en real el 2026-11-06** con la función de la plataforma sobre GHA-CPC-aptosmedellin:CO (cuenta 4196558266, campaña 22265105186): validación sin aplicar, activar, releer y volver a pausar; quedó PAUSED. El botón de la pantalla y el registro `campaign_status_log` solo se probaron en modo simulado.
+
+**Detalle de la campaña (clic en el nombre).** Ventana con 7 pestañas; cada una pide sus datos solo cuando se abre (`/api/google-ads/campaign-insight?view=…`, `campaign-daily` y `campaign-breakdown`):
+- **Resumen:** estado en Google (`primary_status` y sus motivos, estado de aprendizaje de la puja), presupuesto y el presupuesto recomendado por Google, y todos los KPIs con su variación frente al periodo anterior de la misma duración (verde mejora, rojo empeora; las cuotas en puntos porcentuales). Al final, los botones que llevan a otras secciones.
+- **Gráficas:** cuota de impresiones, dónde se pierde la cuota (presupuesto o ranking), gasto frente al presupuesto, clics y CTR, conversiones y CPA, CPC y ROAS, con líneas rojas punteadas en los días en que hubo cambios en la campaña.
+- **Grupos y regiones:** grupos de anuncios activos (en Performance Max, grupos de recursos) y ubicaciones a las que se dirige (con excluidas, radios, idiomas y si se muestra a presentes o también a interesados), todo con KPIs y flechas contra el periodo anterior.
+- **Segmentos:** por dispositivo, por día de la semana, conversiones por acción de conversión (con su porcentaje) y países desde los que se ve la campaña (`geographic_view`, ubicación de presencia).
+- **Palabras clave:** solo Search. Las 60 de mayor gasto con Nivel de calidad y sus tres componentes; avisa cuáles gastan sin convertir.
+- **Posición en la subasta:** 11 cuotas (impresiones, superior, superior absoluta, pérdidas por presupuesto y ranking, cuota de clics, coincidencia exacta) contra el periodo anterior.
+- **Cambios:** los cambios de los últimos 30 días de esa campaña (`change_event`), con quién, desde dónde y valor anterior → nuevo.
+
+**Botones hacia otras secciones.** Para no duplicar lo que ya se escribe en otras secciones, el detalle no escribe nada: en el Resumen hay botones que abren la sección correspondiente con la cuenta y la campaña ya elegidas, y el cambio se hace allá con su propia vista previa y confirmación. **Ajustar presupuesto** abre la ventana de campañas de Ritmo de consumo con la campaña resaltada (solo campañas activas; sale destacado si el presupuesto la limita). **Ajustar ROAS objetivo** abre la sección ROAS con el editor de esa campaña listo (solo con estrategia ROAS objetivo o Maximizar valor de conversión; si la estrategia es compartida o no admite ROAS, la sección avisa por qué). **Ver recomendaciones de Google** abre Recomendaciones filtrado por la campaña (si Google no tiene recomendaciones para ella, muestra las de toda la cuenta con un aviso).
+
+**Información de subastas de los competidores: no disponible.** Las métricas `auction_insight_*` están restringidas a desarrolladores autorizados por Google (así lo dicen los hilos del foro de la API; la consulta como tal no se ejecutó en la plataforma). La pestaña "Posición en la subasta" lo avisa y dice dónde verlo en Google Ads (Informes, Información de subastas). Caminos: pedirle acceso a Google, o subir el CSV de ese informe exportado (no construido).
+
+**Pruebas.** Modo simulado de punta a punta (las 7 pestañas, errores por pestaña, Escape para cerrar, ancho de móvil, los tres botones). Con datos reales, solo lectura: cada consulta del detalle se validó por separado contra una cuenta Search (1456539019) y una Performance Max (22424047131) de la cuenta 5608875865. **Sin probar:** campañas Demand Gen, Display y Shopping en los grupos, radios de ubicación y una campaña con objetivo de ROAS o CPA configurado.
+
+### Función 17 — Historial de cambios de Google Ads (nueva, 2026-11-06, solo super admin)
+
+Quién cambió qué en una cuenta de la lista de Ritmo de consumo, a partir de `change_event`. Periodo de 7, 14 o 30 días (Google solo guarda 30). Endpoint `/api/google-ads/account-changes` (solo lectura).
+
+- **Cada cambio** muestra fecha y hora (la de la cuenta), persona, origen (Google Ads web, API o herramientas, Editor, script, recomendación aplicada, Google automático), campaña, grupo de anuncios, la operación (creó, cambió, eliminó), el tipo de elemento y el detalle con valor anterior → nuevo (estado, presupuesto, ROAS objetivo, estrategia de puja, modificadores, nombre, negativas y ubicaciones). De los anuncios solo se avisa que cambió el texto, sin detallarlo.
+- **Filtros** por persona, origen, tipo de cambio, operación, campaña y texto; tarjetas con el total, las personas, las campañas tocadas y el último cambio; 100 filas por página con "Mostrar más". **Descarga en CSV y en HTML** de todo lo que coincide con los filtros.
+- **Límites:** se piden hasta 3.000 cambios (si se llega al tope, avisa y muestra los más recientes); los nombres de campaña y de grupo se resuelven con consultas aparte (si fallan, se muestra el id).
+- **Hallazgo real:** Google rechaza la consulta (`START_DATE_TOO_OLD`) cuando el inicio cae justo a 30 días y la zona horaria de la cuenta va por detrás de la del servidor; se reintenta un día más tarde. La pestaña "Cambios" del detalle de Campañas tenía el mismo fallo latente y quedó corregida.
+- **Retraso de Google:** un cambio puede tardar en aparecer. La pausa y reactivación de prueba del 2026-11-06 no salían en el historial unos 30 minutos después; está por confirmar.
+- **Verificado** con datos reales en dos cuentas (4 y 32 cambios, lectura): se ven los modificadores de puja que se cambiaron el 2026-11-04 por la API y las pausas hechas desde la web de Google Ads. Pantalla, filtros, paginación, errores y descargas probados en modo simulado.
+
 ## Conexión a BigQuery (base lista desde 2026-10-08, sin credenciales)
 
 Para cruzar reservas reales con la inversión de Google Ads. Ya está construida la base: `webapp/bigquery_client.py` (cliente de **solo lectura**, solo `urllib`, con tope de bytes por consulta — 10 GB por defecto, `BIGQUERY_MAX_BYTES_BILLED`) y `GET /api/bigquery/explore` (solo administradores: verifica la conexión, lista tablas de un dataset o muestra el esquema de una tabla). Falta que cesar corra `webapp/get_bigquery_refresh_token.py`, configure `BIGQUERY_PROJECT_ID` y `BIGQUERY_REFRESH_TOKEN` en Railway y diga en qué dataset y tabla están las reservas; con eso se mapea la tabla y Bookings puede traer reservas directo en vez de un archivo. Mientras no estén las variables, `is_configured()` da falso y nada cambia.
+
+## Conexiones de solo lectura a GA4, Tag Manager, Search Console y BigQuery (guía lista, 2026-11-06)
+
+Credencial **aparte** de la de Google Ads, para que, si algo sale mal, se revoque sin tocar las cuentas de anuncios. En `OUTPUTS/plataforma-google-ads/conexiones_lectura/` hay un script (`autorizar_google_lectura.py`, solo Python estándar) y una guía paso a paso (`GUIA_Google_Cloud_lectura.md`): proyecto de Google Cloud, cinco APIs, pantalla de consentimiento, cliente OAuth de tipo escritorio y los cuatro permisos `.readonly`. El script pide el ID y el secreto en la terminal, abre el navegador, comprueba qué se ve con esa cuenta, guarda un inventario sin claves en `~/.pmh_lectura/inventario.json` y ofrece guardar las credenciales como variables de Railway (`GOOGLE_READ_CLIENT_ID`, `GOOGLE_READ_CLIENT_SECRET`, `GOOGLE_READ_REFRESH_TOKEN`) sin reiniciar el servicio. Tiene opciones para no pedir un permiso (`--sin-bigquery`, `--sin-gtm`, `--sin-gsc`), comprobar (`--probar`) y revocar (`--revocar`). **Estado:** listo; falta que cesar lo ejecute y avise. Lo que viene después: emparejar cuentas de Google Ads con propiedades de GA4, contenedores de GTM y sitios de Search Console (con su confirmación), una sección de medición y la comparación entre las conversiones de Google Ads y las reservas de GA4.
 
 ## Capacidad y carga (octubre 2026)
 
@@ -401,6 +485,8 @@ En ambos casos, la app pide iniciar sesión o crear cuenta antes de dejar entrar
 
 Cada usuario no-admin solo puede leer/escribir en las cuentas de Google Ads que se le asignen explícitamente (pantalla de Administración, solo visible para admins) — antes cualquier usuario autenticado podía tocar cualquiera de las 1105+ cuentas reales del MCC. Rendimiento y Negativización siguen procesando el archivo subido enteramente en el navegador (nunca tocan el servidor) cuando se usa el modo "Subir archivo" — ese modo no pasa por el control de acceso por cuenta, que solo aplica cuando el dato viene de la API de Google Ads. **Acceso por MCC (2026-10-09):** además de dar cuentas una por una, un admin puede ligar a un usuario a un sub-MCC completo (panel "Otorgar acceso a un MCC completo" en Administración, con vista previa del número de cuentas antes de confirmar). El usuario ve y modifica todas las cuentas que cuelguen de ese MCC, incluidas las que se abran después: la tabla `user_mcc_access` guarda solo el vínculo, y la pertenencia se resuelve contra Google Ads (`list_mcc_group_accounts`) con un caché de 10 minutos — una cuenta nueva aparece sola en ese plazo y una que se saque del MCC deja de ser accesible en el mismo plazo. Falla cerrado: si Google no responde, no se concede acceso por esa vía. Solo acepta sub-MCCs (nunca el MCC raíz) y valida que el ID exista. Endpoints `POST /api/admin/access/grant-mcc` y `/revoke-mcc`; `GET /api/admin/access` ahora devuelve también `mcc_access`. Borrar un usuario limpia sus accesos.
 
+**Uso de la IA (2026-11-05, solo super admin).** Cada llamado a Claude (negativización, auditoría, rendimiento y copys) se registra en la tabla `ai_usage` por usuario, día (hora de Colombia), función, llamados, tokens de entrada y salida y un costo estimado a precios de lista, incluso cuando el llamado termina en error. Un panel "Uso de la IA" en Administración muestra totales, promedio por día con uso y el desglose por usuario, función y día, a 7, 30 o 90 días (`/api/admin/ai-usage`; ni el panel ni el endpoint están disponibles para otros administradores). El registro empieza desde el despliegue, sin histórico. Si cambian el modelo o los precios, hay que actualizar `PRICES_PER_MILLION` en `claude_client.py`. Sigue sin haber un tope diario por usuario: solo el límite de 10 llamados por hora, compartido por negativización, auditoría y rendimiento (copys tiene el suyo).
+
 ## Limitaciones conocidas
 
 - El `sample_data.csv` de prueba no trae la columna real "Campaign type" de Google Ads, así que en ese archivo las campañas de Display/Performance Max caen por defecto en Search genérica — hay que confirmar con un export real que sí incluya esa columna.
@@ -429,6 +515,12 @@ Cada usuario no-admin solo puede leer/escribir en las cuentas de Google Ads que 
 - **Oportunidad de ingresos con varias cuentas:** máximo 20 cuentas por análisis; con el listado completo de 1.100+ cuentas la lista muestra las primeras 150 y pide afinar la búsqueda. Solo se probó en modo simulado. Si dos cuentas tienen campañas con el mismo nombre, no se distinguen en la tabla.
 - **Rediseño Roiback y capturas:** las capturas de la presentación son de la versión publicada (paleta anterior); si el rediseño se publica hay que repetirlas.
 
+- **Campañas (Función 16):** el botón de pausar y activar de la pantalla y su registro solo se probaron en modo simulado; con datos reales se probó la función de Google Ads (2026-11-06). El detalle se validó en lectura en una campaña Search y una Performance Max; falta Demand Gen, Display, Shopping, radios de ubicación y una campaña con objetivo de ROAS o CPA configurado. La información de subastas de competidores no está disponible por la API con el acceso actual.
+- **Historial de cambios (Función 17):** Google guarda 30 días, puede tardar en mostrar un cambio reciente, y de los anuncios solo avisa que cambió el texto. No es un historial propio de la plataforma.
+- **Hoteles (Función 15):** sin probar crear un tramo que falta en un grupo; las cuentas con plantilla externa de modificadores son de solo lectura.
+- **Secciones solo para el super admin:** Hoteles, Campañas, Historial de cambios y la pestaña "Con IA" de Negativización no están abiertas al equipo; abrirlas es una decisión de cesar. Sus botones hacia Negativización, AI Max y Hoteles desde el detalle de Campañas no están construidos.
+- **Monedas:** con datos de Google Ads se muestra el código de la moneda de la cuenta; Comparar periodos y Oportunidad de ingresos no suman cuentas de monedas distintas.
+
 ## Próximos pasos
 
 1. Repetir la carga de Función 1 con Click Clack Bogotá y con Estelar (ya corregidos los bugs de encabezado, UTF-16, filas "Total:" y columnas no reconocidas) y seguir con el resto de las 3-5 cuentas reales objetivo, comparando las recomendaciones contra el criterio de cesar como estratega.
@@ -456,14 +548,25 @@ Cada usuario no-admin solo puede leer/escribir en las cuentas de Google Ads que 
 23. Nuevas conexiones por API: Google Analytics, Meta y Google Tag Manager, y más después (frente abierto de la presentación).
 24. Recordatorio del 2026-10-16: revisar Railway, la cuota de Google Ads y los accesos cuando la plataforma empiece a tener usuarios.
 
+25. ~~Probar la pausa y activación de una campaña contra una cuenta real~~ — hecho el 2026-11-06 (función de la plataforma en GHA-CPC-aptosmedellin:CO). Falta usar el botón de la pantalla con una campaña real y confirmar que el registro `campaign_status_log` guarda el cambio.
+26. Confirmar que la pausa y activación de prueba aparece en el Historial de cambios (Google puede tardar).
+27. Campañas: botones del detalle hacia Negativización, AI Max y Hoteles (ya están los de presupuesto, ROAS y recomendaciones).
+28. Campañas: información de subastas de competidores (pedir acceso a Google o subir el CSV exportado) y llevar la diferencia de precio del hotel frente a la competencia (`hotel_performance_view`) a la sección Hoteles.
+29. Campañas: pausar palabras clave y grupos de anuncios con gasto sin convertir (escritura nueva, que no existe en otras secciones).
+30. Conexión de solo lectura: ejecutar `autorizar_google_lectura.py` siguiendo la guía y avisar ("ya autoricé"); luego emparejar cuentas con GA4, GTM y Search Console.
+31. Decidir si Hoteles, Campañas, Historial de cambios y la pestaña "Con IA" de Negativización se abren al equipo, y poner un tope diario de gasto de IA por usuario y un límite en la consola de Anthropic.
+
 ## Archivos del proyecto
 
 | Archivo | Para qué sirve |
 |---|---|
-| `webapp/` | Implementación web completa (HTML/CSS/JS + servidor Python + `Dockerfile`), con login, control de acceso por cuenta, pantalla de Administración, y las catorce funciones (trece activas en el menú) — en producción en Railway, o local con `python3 webapp/server.py`. Ver `webapp/README.md` |
+| `webapp/` | Implementación web completa (HTML/CSS/JS + servidor Python + `Dockerfile`), con login, control de acceso por cuenta, pantalla de Administración, y las diecisiete funciones — en producción en Railway, o local con `python3 webapp/server.py`. Ver `webapp/README.md` |
 | `webapp/login.js` | JS del login/registro (separado de `login.html` el 2026-07-30, por la Content-Security-Policy nueva — ver "Seguridad — endurecimiento") |
 | `webapp/google_ads_client.py` | Cliente de la API de Google Ads (lectura de cuentas/campañas/términos de búsqueda, y escritura de negativos) — solo `urllib`, sin la librería oficial, para no agregar dependencias pip al servidor |
-| `webapp/claude_client.py` | Cliente de la API de Claude (análisis con IA de Función 1) — mismo criterio que `google_ads_client.py`: solo `urllib`, sin el SDK oficial de Anthropic |
+| `webapp/claude_client.py` | Cliente de la API de Claude (análisis con IA de Rendimiento, Auditoría, Negativización y copys, y registro del consumo en `ai_usage`) — mismo criterio que `google_ads_client.py`: solo `urllib`, sin el SDK oficial de Anthropic |
+| `webapp/negativos_ia.py` | Validación con código de la Negativización con IA (Función 2): riesgo, marca, genéricas, negativas existentes, choque con palabras clave y palabras frecuentes; Python puro, sin llamadas de red |
+| `OUTPUTS/plataforma-google-ads/conexiones_lectura/` | Script (`autorizar_google_lectura.py`) y guía (`GUIA_Google_Cloud_lectura.md`) para autorizar GA4, Tag Manager, Search Console y BigQuery en solo lectura; ver "Conexiones de solo lectura" |
+| `roadmap.md` | Lo construido, lo pendiente y las decisiones abiertas |
 | `webapp/account_audit.py` | Motor de reglas de la Auditoría de cuenta (Función 14): Python puro, `run_audit(data, ctx, days)` devuelve hallazgos, puntaje y revisiones no verificables |
 | `webapp/bigquery_client.py` / `webapp/get_bigquery_refresh_token.py` | Cliente de solo lectura de BigQuery (con tope de bytes) y el script que genera el refresh token; ver "Conexión a BigQuery" |
 | `auditoria_reglas_propuesta.md` | Reglas de la Auditoría general (A a G) con las gravedades y umbrales que ajustó cesar, y el estado de cada una |
