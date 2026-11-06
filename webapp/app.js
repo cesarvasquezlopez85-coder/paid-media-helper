@@ -93,6 +93,7 @@ const state = {
       current: { dateFrom: '', dateTo: '' },
       previous: { dateFrom: '', dateTo: '' },
       onlyActive: false,
+      currency: '', // moneda de las cuentas traídas (EUR, COP…); los importes la muestran en vez de "$"
       accountIds: [], accountSearch: '', // varias cuentas (hoteles) para un total combinado
       partial: [], combinedNote: null,   // cuentas que fallaron y descripción del total mostrado
       simulated: false, error: null,
@@ -535,9 +536,13 @@ function escapeHtml(value) {
   }[ch]));
 }
 
+// Código de moneda (p. ej. "EUR") que fmtMoney pone delante del importe en vez de "$". Solo se activa mientras se
+// dibuja una página que conoce la moneda de sus datos (hoy, Comparar periodos con Google Ads) y se apaga al terminar.
+let moneyCurrencyCode = null;
 function fmtMoney(n) {
   if (n === null || n === undefined || Number.isNaN(n)) return 'N/D';
-  return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const num = n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return moneyCurrencyCode ? `${moneyCurrencyCode}\u00a0${num}` : '$' + num;
 }
 function fmtInt(n) {
   if (n === null || n === undefined || Number.isNaN(n)) return '0';
@@ -1824,6 +1829,7 @@ function fetchCompareGoogleAdsCampaigns() {
     const curRows = good.flatMap((r, i) => tag(r.cur, r, i));
     const prevRows = good.flatMap((r, i) => tag(r.prev, r, i));
     const currency = byCurrency.size ? [...byCurrency.keys()][0] : '';
+    a.currency = currency;
     let who;
     if (a.simulated) who = 'Google Ads (simulado)';
     else if (!multi) who = `Google Ads — ${names[0]}`;
@@ -2032,6 +2038,12 @@ function deltaBadge(pct, mode) {
 }
 
 function renderComparePage() {
+  const c = state.compare;
+  moneyCurrencyCode = c.source === 'api' && c.api.currency ? c.api.currency : null;
+  try { return renderComparePageBody(); } finally { moneyCurrencyCode = null; }
+}
+
+function renderComparePageBody() {
   const s = state.compare;
   const bothReady = s.current.status === 'ready' && s.previous.status === 'ready';
 
