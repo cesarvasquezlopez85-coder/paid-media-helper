@@ -546,7 +546,7 @@ def fetch_account_campaigns_budget(customer_id):
                campaign_budget.resource_name, campaign_budget.amount_micros,
                campaign_budget.explicitly_shared,
                metrics.impressions, metrics.clicks, metrics.ctr,
-               metrics.cost_micros, metrics.conversions, metrics.cost_per_conversion
+               metrics.cost_micros, metrics.conversions, metrics.conversions_value, metrics.cost_per_conversion
         FROM campaign
         WHERE campaign.status = 'ENABLED'
           AND segments.date BETWEEN '{month_start.isoformat()}' AND '{today.isoformat()}'
@@ -573,6 +573,7 @@ def fetch_account_campaigns_budget(customer_id):
             "ctr": _float_or_none(metrics.get("ctr")),
             "cost": _micros_to_units(_int_or_none(metrics.get("costMicros"))) or 0,
             "conversions": _float_or_none(metrics.get("conversions")),
+            "conv_value": _float_or_none(metrics.get("conversionsValue")) or 0,
             "cost_per_conv": _micros_to_units(_float_or_none(metrics.get("costPerConversion"))),
         })
     budget_counts = Counter(r["budget_resource_name"] for r in rows)
@@ -3023,6 +3024,7 @@ def simulated_account_campaigns_budget(customer_id):
             "ctr": c["ctr"],
             "cost": c["cost"],
             "conversions": c["conversions"],
+            "conv_value": c.get("conv_value") or 0,
             "cost_per_conv": c["cost_per_conv"],
         })
     out.sort(key=lambda r: r["cost"], reverse=True)

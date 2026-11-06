@@ -11529,7 +11529,7 @@ function renderPacingTable() {
         </div>
       </div>
       ${p.monthFrom ? `<p class="footnote" style="margin:0 0 10px">${pacingPeriodNote(p)}</p>` : ''}
-      <div class="table-scroll">
+      <div class="table-scroll sticky-head">
         <table>
           <thead><tr>
             ${pacingSortTh('Cuenta', 'account_name')}
@@ -11700,6 +11700,11 @@ function pacingStrategyCell(row) {
   return `<button class="btn-link" data-pacing-roas-toggle="${escapeHtml(row.campaign_id)}" title="Click para ${revealed ? 'ocultar' : 'ver'} el ROAS objetivo">${text}</button>`;
 }
 
+// CPA %: gasto ÷ valor de conversión (la misma métrica de Rendimiento y Comparar periodos); N/D si no hay valor de conversión.
+function pacingCpaPct(cost, convValue) {
+  return convValue > 0 ? `${((cost / convValue) * 100).toFixed(1)}%` : 'N/D';
+}
+
 function pacingCampaignRowHtml(row) {
   const focus = state.pacing.campaignsModal.highlightId === row.campaign_id;
   return `
@@ -11712,6 +11717,7 @@ function pacingCampaignRowHtml(row) {
       <td>${fmtMoney(row.cost)}</td>
       <td>${fmtInt(row.conversions)}</td>
       <td>${row.cost_per_conv != null ? fmtMoney(row.cost_per_conv) : 'N/D'}</td>
+      <td>${pacingCpaPct(row.cost, row.conv_value)}</td>
       <td>${row.daily_budget != null ? fmtMoney(row.daily_budget) : 'N/D'}</td>
       <td>${pacingBudgetAdjustCell(row)}</td>
     </tr>`;
@@ -11735,15 +11741,16 @@ function renderPacingCampaignsModalBody() {
       body = `<div class="ok-panel">Sin campañas activas para esta cuenta.</div>`;
     } else {
       const rowsHtml = cm.rows.map((r) => pacingCampaignRowHtml(r)).join('');
-      // Totales de la cuenta. El CTR y el costo/conv se recalculan con los totales (no se promedian) y el
+      // Totales de la cuenta. El CTR, el costo/conv y el CPA % se recalculan con los totales (no se promedian) y el
       // presupuesto diario suma cada presupuesto una sola vez, porque varias campañas pueden compartir uno.
-      const tot = { impressions: 0, clicks: 0, cost: 0, conversions: 0, budget: 0 };
+      const tot = { impressions: 0, clicks: 0, cost: 0, conversions: 0, convValue: 0, budget: 0 };
       const seenBudgets = new Set();
       cm.rows.forEach((r) => {
         tot.impressions += r.impressions || 0;
         tot.clicks += r.clicks || 0;
         tot.cost += r.cost || 0;
         tot.conversions += r.conversions || 0;
+        tot.convValue += r.conv_value || 0;
         const key = r.budget_resource_name || `c${r.campaign_id}`;
         if (r.daily_budget != null && !seenBudgets.has(key)) { seenBudgets.add(key); tot.budget += r.daily_budget; }
       });
@@ -11756,13 +11763,14 @@ function renderPacingCampaignsModalBody() {
         <td>${fmtMoney(tot.cost)}</td>
         <td>${fmtInt(tot.conversions)}</td>
         <td>${tot.conversions > 0 ? fmtMoney(tot.cost / tot.conversions) : 'N/D'}</td>
+        <td>${pacingCpaPct(tot.cost, tot.convValue)}</td>
         <td>${seenBudgets.size ? fmtMoney(tot.budget) : 'N/D'}</td>
         <td></td>
       </tr>`;
       body = `
         ${cm.simulated ? `<div class="ok-panel" style="margin-bottom:12px"><strong>Modo simulado.</strong> Datos de ejemplo, no de una cuenta real.</div>` : ''}
         ${cm.highlightId && !cm.rows.some((r) => r.campaign_id === cm.highlightId) ? `<div class="error-panel" style="margin-bottom:12px">La campaña que venías viendo no aparece aquí: esta lista solo trae campañas activas.</div>` : (cm.highlightId ? `<p class="field-hint" style="margin:0 0 12px">La campaña que venías viendo está resaltada.</p>` : '')}
-        <div class="table-scroll">
+        <div class="table-scroll sticky-head" style="max-height:calc(85vh - 190px);min-height:0">
           <table>
             <thead><tr>
               <th>Campaña</th>
@@ -11773,6 +11781,7 @@ function renderPacingCampaignsModalBody() {
               <th>Costo (mes)</th>
               <th>Conversiones</th>
               <th>Costo/conv</th>
+              <th>CPA %</th>
               <th>Presupuesto diario</th>
               <th></th>
             </tr></thead>
@@ -11780,7 +11789,7 @@ function renderPacingCampaignsModalBody() {
             <tfoot>${totalHtml}</tfoot>
           </table>
         </div>
-        <p class="footnote" style="margin-top:12px">Solo campañas con status ENABLED. La fila Total suma las campañas de la lista (el presupuesto diario cuenta una sola vez los presupuestos compartidos). KPIs del mes en curso (mismo rango que el resto de Ritmo de consumo). Ajustar el presupuesto diario escribe de inmediato en la cuenta real de Google Ads — siempre pasa por vista previa antes de aplicar.</p>`;
+        <p class="footnote" style="margin-top:12px">Solo campañas con status ENABLED. La fila Total suma las campañas de la lista (el presupuesto diario cuenta una sola vez los presupuestos compartidos). KPIs del mes en curso (mismo rango que el resto de Ritmo de consumo). CPA % = gasto ÷ valor de conversión (N/D si la campaña no tiene valor de conversión). Ajustar el presupuesto diario escribe de inmediato en la cuenta real de Google Ads — siempre pasa por vista previa antes de aplicar.</p>`;
     }
   }
 
