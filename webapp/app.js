@@ -404,6 +404,7 @@ const state = {
   // Solo visible/usable para usuarios con is_admin=1 (el servidor también
   // lo exige en cada endpoint /api/admin/*, esto es solo la UI).
   admin: {
+    usage: { status: 'idle', days: 30, rows: [], meta: null, error: null }, // consumo de la IA por usuario y día
     usersStatus: 'idle', users: [], usersError: null,
     accessStatus: 'idle', access: [], mccAccess: [], accessError: null,
     deleteStatus: 'idle', deleteError: null,
@@ -9459,8 +9460,88 @@ function fmtDateTime(epochSeconds) {
 }
 
 function ensureAdminDataLoaded() {
+  if (state.admin.usage.status === 'idle') loadAdminAiUsage();
   if (state.admin.usersStatus === 'idle') loadAdminUsers();
   if (state.admin.accessStatus === 'idle') loadAdminAccess();
+}
+
+function loadAdminAiUsage() {
+  const u = state.admin.usage;
+  u.status = 'loading'; u.error = null;
+  render();
+  fetch(`/api/admin/ai-usage?days=${u.days}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      u.rows = data.rows || []; u.meta = data; u.status = 'ready';
+      render();
+    })
+    .catch((err) => { u.status = 'error'; u.error = err.message || String(err); render(); });
+}
+
+const AI_FEATURE_LABELS = { negativizacion: 'Negativización', auditoria: 'Auditoría', rendimiento: 'Rendimiento', copys: 'Copys' };
+
+// Consumo de la IA por día, por usuario y por función. El costo es una estimación con los precios de lista
+// del modelo (el servidor manda los precios), no lo que factura Anthropic.
+function renderAdminAiUsage() {
+  const u = state.admin.usage;
+  const usd = (n) => '$' + (n < 1 && n > 0 ? n.toFixed(3) : n.toFixed(2));
+  const periodButtons = [7, 30, 90].map((d) => `<button class="seg-btn ${u.days === d ? 'active' : ''}" data-action="admin-ai-usage-${d}">${d} días</button>`).join('');
+  const head = `
+    <div class="table-panel-head">
+      <h3>Uso de la IA</h3>
+      <div class="seg-control">${periodButtons}</div>
+    </div>`;
+  if (u.status === 'loading' || u.status === 'idle') {
+    return `<div class="card table-panel" style="margin-bottom:16px">${head}<div class="state-panel loading"><div class="spinner"></div><p>Cargando el consumo…</p></div></div>`;
+  }
+  if (u.status === 'error') {
+    return `<div class="card table-panel" style="margin-bottom:16px">${head}<div class="error-panel">${escapeHtml(u.error)}</div></div>`;
+  }
+
+  const rows = u.rows || [];
+  const sum = (list, key) => list.reduce((t, r) => t + (r[key] || 0), 0);
+  const group = (keyFn) => {
+    const m = new Map();
+    rows.forEach((r) => {
+      const k = keyFn(r);
+      if (!m.has(k)) m.set(k, { key: k, calls: 0, input: 0, output: 0, cost: 0 });
+      const g = m.get(k);
+      g.calls += r.calls; g.input += r.input_tokens; g.output += r.output_tokens; g.cost += r.cost_usd;
+    });
+    return [...m.values()];
+  };
+  const total = { calls: sum(rows, 'calls'), input: sum(rows, 'input_tokens'), output: sum(rows, 'output_tokens'), cost: sum(rows, 'cost_usd') };
+  const byDay = group((r) => r.day).sort((x, y) => (x.key < y.key ? 1 : -1));
+  const byUser = group((r) => r.username).sort((x, y) => y.cost - x.cost);
+  const byFeature = group((r) => r.feature).sort((x, y) => y.cost - x.cost);
+  const activeDays = byDay.length;
+  const avgDay = activeDays ? total.cost / activeDays : 0;
+  const tokensCell = (g) => `${fmtInt(g.input)} / ${fmtInt(g.output)}`;
+  const tableRows = (list, label) => list.map((g) => `<tr><td>${escapeHtml(label ? label(g.key) : g.key)}</td><td>${fmtInt(g.calls)}</td><td>${tokensCell(g)}</td><td>${usd(g.cost)}</td></tr>`).join('');
+  const meta = u.meta || {};
+
+  if (!rows.length) {
+    return `<div class="card table-panel" style="margin-bottom:16px">${head}<p class="footnote">Todavía no hay consumo registrado en los últimos ${u.days} días. Se empieza a registrar con el primer análisis con IA después de este cambio.</p></div>`;
+  }
+  return `
+    <div class="card table-panel" style="margin-bottom:16px">
+      ${head}
+      <div class="stat-grid" style="margin-bottom:14px">
+        <div class="card stat-card"><div class="stat-label">Llamados</div><div class="stat-value lg">${fmtInt(total.calls)}</div><div class="stat-sub">${fmtInt(total.input)} tokens de entrada · ${fmtInt(total.output)} de salida</div></div>
+        <div class="card stat-card accent"><div class="stat-label">Costo estimado</div><div class="stat-value lg">${usd(total.cost)}</div><div class="stat-sub">${total.calls ? usd(total.cost / total.calls) + ' por llamado' : ''}</div></div>
+        <div class="card stat-card"><div class="stat-label">Promedio por día con uso</div><div class="stat-value lg">${usd(avgDay)}</div><div class="stat-sub">${fmtInt(activeDays)} día${activeDays === 1 ? '' : 's'} con uso · ≈ ${usd(avgDay * 22)} por 22 días laborables</div></div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px">
+        <div><h4 style="margin:0 0 6px">Por usuario</h4><div class="table-scroll" style="max-height:260px"><table>
+          <thead><tr><th>Usuario</th><th>Llamados</th><th>Tokens (entr. / sal.)</th><th>Costo</th></tr></thead><tbody>${tableRows(byUser)}</tbody></table></div></div>
+        <div><h4 style="margin:0 0 6px">Por función</h4><div class="table-scroll" style="max-height:260px"><table>
+          <thead><tr><th>Función</th><th>Llamados</th><th>Tokens (entr. / sal.)</th><th>Costo</th></tr></thead><tbody>${tableRows(byFeature, (k) => AI_FEATURE_LABELS[k] || k)}</tbody></table></div></div>
+        <div><h4 style="margin:0 0 6px">Por día</h4><div class="table-scroll" style="max-height:260px"><table>
+          <thead><tr><th>Día</th><th>Llamados</th><th>Tokens (entr. / sal.)</th><th>Costo</th></tr></thead><tbody>${tableRows(byDay)}</tbody></table></div></div>
+      </div>
+      <p class="footnote" style="margin-top:12px">Costo estimado con los precios de lista de ${escapeHtml(meta.model || 'Claude')} (${usd(meta.price_input_per_million || 0)} por millón de tokens de entrada y ${usd(meta.price_output_per_million || 0)} de salida); no es lo que factura Anthropic. Los días son hora de Colombia. Cuenta también los llamados que terminaron en error, porque esos tokens se cobran igual.</p>
+    </div>`;
 }
 
 function loadAdminUsers() {
@@ -11390,7 +11471,7 @@ function renderAdminPage() {
       </div>`;
   }
 
-  return `${usersBody}${mccGrantForm}${grantForm}${accessBody}`;
+  return `${usersBody}${renderAdminAiUsage()}${mccGrantForm}${grantForm}${accessBody}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -12610,6 +12691,9 @@ function handleAction(action) {
     case 'neg-mcc-clear': clearNegMccFilter(); break;
     case 'neg-api-fetch': fetchGoogleAdsSearchTerms(); break;
     case 'neg-tab-reglas': state.neg.tab = 'reglas'; render(); break;
+    case 'admin-ai-usage-7': state.admin.usage.days = 7; loadAdminAiUsage(); break;
+    case 'admin-ai-usage-30': state.admin.usage.days = 30; loadAdminAiUsage(); break;
+    case 'admin-ai-usage-90': state.admin.usage.days = 90; loadAdminAiUsage(); break;
     case 'neg-tab-ia': state.neg.tab = 'ia'; render(); break;
     case 'neg-ai-fetch': fetchNegAiTerms(); break;
     case 'neg-ai-run': runNegAiAnalysis(); break;

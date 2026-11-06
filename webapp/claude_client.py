@@ -9,6 +9,7 @@
 # de vuelta el texto de la narrativa.
 
 import json
+import threading
 import os
 import urllib.error
 import urllib.request
@@ -37,6 +38,44 @@ SYSTEM_PROMPT = (
     "ellas en términos relativos (\"la más cara\", \"casi el doble del "
     "óptimo\") cuando haga falta."
 )
+
+
+# --- Consumo de tokens -------------------------------------------------------------------------------
+# Cada llamado a Claude suma sus tokens (y cuántos llamados fueron) a un contador del hilo que atiende la
+# petición: el servidor lo abre con begin_usage() y lo cierra con end_usage() para guardarlo por usuario y
+# por día (ver track_ai_usage en server.py). Se anota también cuando la respuesta termina mal (cortada o
+# rechazada), porque esos tokens se cobran igual.
+_usage_tls = threading.local()
+
+# USD por millón de tokens (entrada, salida), precios de lista. Si cambian, se ajustan aquí.
+PRICES_PER_MILLION = {"claude-opus-5": (5.0, 25.0)}
+
+
+def begin_usage():
+    _usage_tls.rec = {"calls": 0, "input": 0, "output": 0}
+
+
+def _note_usage(payload):
+    rec = getattr(_usage_tls, "rec", None)
+    if rec is None:
+        return
+    usage = payload.get("usage") or {}
+    rec["calls"] += 1
+    # Los tokens de caché cuentan como entrada; hoy no se usa caché, así que suelen ser 0.
+    rec["input"] += int(usage.get("input_tokens") or 0) + int(usage.get("cache_creation_input_tokens") or 0) + int(usage.get("cache_read_input_tokens") or 0)
+    rec["output"] += int(usage.get("output_tokens") or 0)
+
+
+def estimate_cost(input_tokens, output_tokens, model=None):
+    price_in, price_out = PRICES_PER_MILLION.get(model or MODEL, (0.0, 0.0))
+    return (input_tokens * price_in + output_tokens * price_out) / 1_000_000
+
+
+def end_usage():
+    """Cierra el contador del hilo y devuelve {"calls", "input", "output", "cost_usd"}."""
+    rec = getattr(_usage_tls, "rec", None) or {"calls": 0, "input": 0, "output": 0}
+    _usage_tls.rec = None
+    return {**rec, "cost_usd": estimate_cost(rec["input"], rec["output"])}
 
 
 def is_configured():
@@ -74,6 +113,7 @@ def analizar_rendimiento(resumen, recs):
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
+            _note_usage(payload)
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Claude API respondió {e.code}: {detail}") from e
@@ -131,6 +171,7 @@ def analizar_auditoria(resumen, findings, no_verificables, contexto):
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
+            _note_usage(payload)
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Claude API respondió {e.code}: {detail}") from e
@@ -243,6 +284,7 @@ def _copy_http(system, user_content):
     try:
         with urllib.request.urlopen(req, timeout=COPY_TIMEOUT_SECONDS) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
+            _note_usage(payload)
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Claude API respondió {e.code}: {detail}") from e
@@ -463,6 +505,7 @@ def _neg_http(user_content):
     try:
         with urllib.request.urlopen(req, timeout=NEG_TIMEOUT_SECONDS) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
+            _note_usage(payload)
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Claude API respondió {e.code}: {detail}") from e

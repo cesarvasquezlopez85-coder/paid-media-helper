@@ -23,6 +23,7 @@ Correr con:
     python3 server.py
 """
 
+import contextlib
 import datetime
 import hashlib
 import http.cookies
@@ -420,6 +421,22 @@ def init_db():
             """
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_history_customer ON audit_history(customer_id, created_at)")
+        # Consumo de la IA (Claude) por usuario, por día y por función: llamados, tokens y costo estimado en USD.
+        # El día es el de Colombia (UTC-5), no el del servidor.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_usage (
+                day TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                feature TEXT NOT NULL,
+                calls INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cost_usd REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (day, user_id, feature)
+            )
+            """
+        )
         # PMH_ADMIN_USERNAMES es solo un piso mínimo garantizado en cada
         # arranque (para nunca quedar sin ningún admin) — SOLO sube a admin
         # a esos usernames, nunca baja a nadie. Bajar el flag a alguien más
@@ -431,6 +448,47 @@ def init_db():
         conn.commit()
     finally:
         conn.close()
+
+
+_COLOMBIA_TZ = datetime.timezone(datetime.timedelta(hours=-5))
+AI_USAGE_FEATURES = ("negativizacion", "auditoria", "rendimiento", "copys")
+
+
+def store_ai_usage(user_id, feature, calls, input_tokens, output_tokens, cost_usd):
+    day = datetime.datetime.now(_COLOMBIA_TZ).strftime("%Y-%m-%d")
+    conn = get_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO ai_usage (day, user_id, feature, calls, input_tokens, output_tokens, cost_usd)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(day, user_id, feature) DO UPDATE SET
+                calls = calls + excluded.calls,
+                input_tokens = input_tokens + excluded.input_tokens,
+                output_tokens = output_tokens + excluded.output_tokens,
+                cost_usd = cost_usd + excluded.cost_usd
+            """,
+            (day, user_id, feature, calls, input_tokens, output_tokens, cost_usd),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@contextlib.contextmanager
+def track_ai_usage(user_id, feature):
+    """Anota los tokens que gaste lo que corra dentro del bloque (incluso si termina con error) en ai_usage.
+    Un fallo al guardar el consumo nunca debe tumbar la respuesta al usuario."""
+    claude_client.begin_usage()
+    try:
+        yield
+    finally:
+        rec = claude_client.end_usage()
+        if rec["calls"]:
+            try:
+                store_ai_usage(user_id, feature, rec["calls"], rec["input"], rec["output"], rec["cost_usd"])
+            except Exception as e:  # noqa: BLE001
+                print(f"[ai-usage] no se pudo guardar el consumo: {' '.join(str(e).split())[:200]}", flush=True)
 
 
 def hash_password(password, salt_hex=None):
@@ -639,6 +697,13 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_admin_json():
                 return
             self._handle_admin_users()
+            return
+
+        # Consumo de la IA por usuario, día y función — solo admins.
+        if path == "/api/admin/ai-usage":
+            if not self._require_admin_json():
+                return
+            self._handle_admin_ai_usage(parse_qs(parsed.query))
             return
 
         # Qué customer_id de Google Ads puede tocar un usuario — solo admins.
@@ -997,6 +1062,34 @@ class Handler(SimpleHTTPRequestHandler):
             })
         else:
             self._send_json(200, {"authenticated": False})
+
+    def _handle_admin_ai_usage(self, query):
+        try:
+            days = max(1, min(120, int((query.get("days") or ["30"])[0])))
+        except ValueError:
+            days = 30
+        since = (datetime.datetime.now(_COLOMBIA_TZ) - datetime.timedelta(days=days - 1)).strftime("%Y-%m-%d")
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                """
+                SELECT a.day, a.user_id, COALESCE(u.username, '(usuario borrado)') AS username, a.feature,
+                       a.calls, a.input_tokens, a.output_tokens, a.cost_usd
+                FROM ai_usage a LEFT JOIN users u ON u.id = a.user_id
+                WHERE a.day >= ?
+                ORDER BY a.day DESC, username, a.feature
+                """,
+                (since,),
+            ).fetchall()
+        finally:
+            conn.close()
+        price_in, price_out = claude_client.PRICES_PER_MILLION.get(claude_client.MODEL, (0.0, 0.0))
+        self._send_json(200, {
+            "days": days, "since": since, "model": claude_client.MODEL,
+            "price_input_per_million": price_in, "price_output_per_million": price_out,
+            "timezone": "America/Bogota (UTC-5)",
+            "rows": [dict(r) for r in rows],
+        })
 
     def _handle_admin_users(self):
         conn = get_db()
@@ -2161,7 +2254,8 @@ class Handler(SimpleHTTPRequestHandler):
         no_verificables = payload.get("no_verificables") if isinstance(payload.get("no_verificables"), list) else []
         contexto = payload.get("contexto") if isinstance(payload.get("contexto"), dict) else {}
         try:
-            narrativa = claude_client.analizar_auditoria(resumen, findings, no_verificables, contexto)
+            with track_ai_usage(user["id"], "auditoria"):
+                narrativa = claude_client.analizar_auditoria(resumen, findings, no_verificables, contexto)
             self._send_json(200, {"narrativa": narrativa})
         except Exception as e:  # noqa: BLE001
             print(f"[claude-error] {e}", flush=True)
@@ -2183,7 +2277,8 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         try:
-            narrativa = claude_client.analizar_rendimiento(resumen, recs)
+            with track_ai_usage(user["id"], "rendimiento"):
+                narrativa = claude_client.analizar_rendimiento(resumen, recs)
             self._send_json(200, {"narrativa": narrativa})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             print(f"[claude-error] {e}", flush=True)
@@ -2239,7 +2334,8 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             chosen = negativos_ia.select_for_ai(terms)
             user_content = negativos_ia.build_user_content(ctx, chosen, existing.texts())
-            ai = claude_client.analizar_negativos(user_content)
+            with track_ai_usage(user["id"], "negativizacion"):
+                ai = claude_client.analizar_negativos(user_content)
             result = negativos_ia.build_result(ai, terms, chosen, ctx, existing)
             result["negativas_existentes"] = existing.total()
             result["negativas_fuentes"] = {**existing.counts, "errores": len(neg_errors)}
@@ -2277,7 +2373,8 @@ class Handler(SimpleHTTPRequestHandler):
             raw = signals.get(key)
             trimmed[key] = [str(x)[:width] for x in raw[:n]] if isinstance(raw, list) else []
         try:
-            result = claude_client.generar_copys(formato, trimmed, idioma, keywords)
+            with track_ai_usage(user["id"], "copys"):
+                result = claude_client.generar_copys(formato, trimmed, idioma, keywords)
             self._send_json(200, result)
         except Exception as e:  # noqa: BLE001
             print(f"[claude-error] copys: {e}", flush=True)
