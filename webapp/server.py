@@ -1762,7 +1762,8 @@ class Handler(SimpleHTTPRequestHandler):
                     continue
                 else:
                     pacing = google_ads_client.fetch_account_pacing(customer_id, month_from, month_to)
-                rows.append({"customer_id": customer_id, "account_name": name, "error": None, **pacing})
+                rows.append({"customer_id": customer_id, "account_name": name, "error": None, **pacing,
+                             "currency": "USD" if simulated else google_ads_client.fetch_customer_currency(customer_id)})
             except Exception as e:  # noqa: BLE001 — una cuenta con error no debe tumbar el resto del tablero
                 print(f"[pacing-error] customer_id={customer_id} {' '.join(str(e).split())}", flush=True)
                 rows.append({
@@ -1785,14 +1786,14 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
             return
         if not google_ads_client.is_configured():
-            self._send_json(200, {"rows": google_ads_client.simulated_account_campaigns_budget(customer_id), "simulated": True})
+            self._send_json(200, {"rows": google_ads_client.simulated_account_campaigns_budget(customer_id), "simulated": True, "currency": "USD"})
             return
         if not self._user_can_access_account(user, customer_id):
             self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
             return
         try:
             rows = google_ads_client.fetch_account_campaigns_budget(customer_id)
-            self._send_json(200, {"rows": rows, "simulated": False})
+            self._send_json(200, {"rows": rows, "simulated": False, "currency": google_ads_client.fetch_customer_currency(customer_id)})
         except Exception as e:  # noqa: BLE001
             self._send_google_ads_error(e)
 
@@ -1984,7 +1985,7 @@ class Handler(SimpleHTTPRequestHandler):
         if not google_ads_client.is_configured():
             pmax_rows = google_ads_client.simulated_pmax_search_terms() if pmax_terms else google_ads_client.simulated_pmax_search_term_insights()
             rows = google_ads_client.simulated_search_terms() + pmax_rows
-            self._send_json(200, {"rows": rows, "simulated": True})
+            self._send_json(200, {"rows": rows, "simulated": True, "currency": "USD"})
             return
 
         if not customer_id.isdigit():
@@ -2025,7 +2026,7 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception:
                 pass
 
-        self._send_json(200, {"rows": rows, "simulated": False, "pmax_fallback": pmax_fallback})
+        self._send_json(200, {"rows": rows, "simulated": False, "pmax_fallback": pmax_fallback, "currency": google_ads_client.fetch_customer_currency(customer_id)})
 
     def _handle_google_ads_campaign_list(self, query):
         # Listado liviano de TODAS las campañas activas de la cuenta (no
@@ -2135,7 +2136,7 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(200, {
                 "rows": google_ads_client.simulated_recommendations(),
                 "score": google_ads_client.simulated_optimization_score(),
-                "simulated": True,
+                "simulated": True, "currency": "USD",
             })
             return
 
@@ -2154,7 +2155,7 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             rows = google_ads_client.fetch_recommendations(customer_id)
             score = google_ads_client.fetch_optimization_score(customer_id)
-            self._send_json(200, {"rows": rows, "score": score, "simulated": False})
+            self._send_json(200, {"rows": rows, "score": score, "simulated": False, "currency": google_ads_client.fetch_customer_currency(customer_id)})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)
 
@@ -2894,7 +2895,7 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(200, {
                 "rows": google_ads_client.simulated_ai_max_served(campaign_id or None),
                 "negatives": google_ads_client.simulated_account_negative_keywords(),
-                "simulated": True,
+                "simulated": True, "currency": "USD",
             })
             return
 
@@ -2913,7 +2914,7 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             rows = google_ads_client.fetch_ai_max_served_combinations(customer_id, campaign_id or None)
             negatives = google_ads_client.fetch_account_negative_keywords(customer_id)
-            self._send_json(200, {"rows": rows, "negatives": negatives, "simulated": False})
+            self._send_json(200, {"rows": rows, "negatives": negatives, "simulated": False, "currency": google_ads_client.fetch_customer_currency(customer_id)})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)
 
@@ -2931,7 +2932,7 @@ class Handler(SimpleHTTPRequestHandler):
 
         if not google_ads_client.is_configured():
             data = google_ads_client.simulated_ai_max_created(campaign_id or None)
-            data.update({"simulated": True, "days": days, "errors": {}})
+            data.update({"simulated": True, "days": days, "errors": {}, "currency": "USD"})
             self._send_json(200, data)
             return
 
@@ -2948,7 +2949,7 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         out = {"assets": [], "combinations": [], "combinations_total": 0, "pages": [], "pages_total": 0,
-               "simulated": False, "days": days, "errors": {}}
+               "simulated": False, "days": days, "errors": {}, "currency": google_ads_client.fetch_customer_currency(customer_id)}
         failures = []
         try:
             out["assets"] = google_ads_client.fetch_ai_max_created_assets(customer_id, campaign_id or None, days)
@@ -3296,7 +3297,7 @@ class Handler(SimpleHTTPRequestHandler):
         include_adult = bool(payload.get("include_adult", False))
 
         if not google_ads_client.is_configured():
-            self._send_json(200, {**google_ads_client.simulated_keyword_ideas(seed_keywords, seed_url), "simulated": True})
+            self._send_json(200, {**google_ads_client.simulated_keyword_ideas(seed_keywords, seed_url), "simulated": True, "currency": "USD"})
             return
 
         if not customer_id.isdigit():
@@ -3315,7 +3316,7 @@ class Handler(SimpleHTTPRequestHandler):
                 geo_resource_names=geo_resource_names or None, language_resource_name=language_resource_name,
                 network=network, include_adult=include_adult,
             )
-            self._send_json(200, {**result, "simulated": False})
+            self._send_json(200, {**result, "simulated": False, "currency": google_ads_client.fetch_customer_currency(customer_id)})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)
 
@@ -3332,7 +3333,7 @@ class Handler(SimpleHTTPRequestHandler):
         include_adult = bool(payload.get("include_adult", False))
 
         if not google_ads_client.is_configured():
-            self._send_json(200, {**google_ads_client.simulated_keyword_historical_metrics(keywords), "simulated": True})
+            self._send_json(200, {**google_ads_client.simulated_keyword_historical_metrics(keywords), "simulated": True, "currency": "USD"})
             return
 
         if not customer_id.isdigit():
@@ -3350,7 +3351,7 @@ class Handler(SimpleHTTPRequestHandler):
                 customer_id, keywords, geo_resource_names=geo_resource_names or None,
                 language_resource_name=language_resource_name, network=network, include_adult=include_adult,
             )
-            self._send_json(200, {**result, "simulated": False})
+            self._send_json(200, {**result, "simulated": False, "currency": google_ads_client.fetch_customer_currency(customer_id)})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)
 

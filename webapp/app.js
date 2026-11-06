@@ -544,6 +544,13 @@ function fmtMoney(n) {
   const num = n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   return moneyCurrencyCode ? `${moneyCurrencyCode}\u00a0${num}` : '$' + num;
 }
+
+// Corre `fn` con los importes mostrados en la moneda `code` (o con "$" si no hay), y la restaura al terminar.
+function withMoneyCurrency(code, fn) {
+  const prev = moneyCurrencyCode;
+  moneyCurrencyCode = code || null;
+  try { return fn(); } finally { moneyCurrencyCode = prev; }
+}
 function fmtInt(n) {
   if (n === null || n === undefined || Number.isNaN(n)) return '0';
   return Math.round(n).toLocaleString('en-US');
@@ -845,6 +852,10 @@ function render() {
 // ---------------------------------------------------------------------------
 
 function renderRendPage() {
+  return withMoneyCurrency(state.rend.source === 'api' ? state.rend.currency : null, () => renderRendPageBody());
+}
+
+function renderRendPageBody() {
   const s = state.rend;
 
   let body = '';
@@ -1651,6 +1662,7 @@ function fetchGoogleAdsCampaigns() {
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
       a.simulated = !!data.simulated;
+      state.rend.currency = data.currency || '';
       const account = a.accounts.find((acc) => acc.id === customerId);
       const label = a.simulated
         ? `Google Ads (simulado) — ${a.dateFrom} a ${a.dateTo}`
@@ -2039,8 +2051,7 @@ function deltaBadge(pct, mode) {
 
 function renderComparePage() {
   const c = state.compare;
-  moneyCurrencyCode = c.source === 'api' && c.api.currency ? c.api.currency : null;
-  try { return renderComparePageBody(); } finally { moneyCurrencyCode = null; }
+  return withMoneyCurrency(c.source === 'api' ? c.api.currency : null, renderComparePageBody);
 }
 
 function renderComparePageBody() {
@@ -2335,13 +2346,21 @@ function fetchOpportunityGoogleAdsCampaigns() {
       .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
       .then(({ ok, data }) => {
         if (!ok) throw new Error(data.error || 'Error desconocido.');
-        return { id, rows: data.rows || [], simulated: !!data.simulated };
+        return { id, rows: data.rows || [], simulated: !!data.simulated, currency: data.currency || '' };
       })
       .catch((err) => ({ id, error: err.message || String(err) }));
   }).then((results) => {
     const good = results.filter((r) => !r.error);
     const bad = results.filter((r) => r.error);
     if (!good.length) throw new Error(bad[0].error + (bad.length > 1 ? ` (y ${bad.length - 1} cuentas más con error)` : ''));
+    // Un análisis conjunto suma cifras de todas las cuentas: no tiene sentido mezclar euros con pesos.
+    const byCurrency = new Map();
+    good.forEach((r) => { if (r.currency) byCurrency.set(r.currency, [...(byCurrency.get(r.currency) || []), accountName(r.id)]); });
+    if (byCurrency.size > 1) {
+      const detail = [...byCurrency.entries()].map(([cur, names]) => `${cur}: ${names.slice(0, 3).join(', ')}${names.length > 3 ? '…' : ''}`).join(' · ');
+      throw new Error(`Las cuentas elegidas usan monedas distintas (${detail}). Un análisis conjunto mezclaría monedas: elige cuentas con la misma.`);
+    }
+    state.opportunity.currency = byCurrency.size ? [...byCurrency.keys()][0] : '';
     a.simulated = good.some((r) => r.simulated);
     a.partial = bad.map((r) => `${accountName(r.id)}: ${r.error}`);
     const rows = good.flatMap((r) => r.rows);
@@ -2748,6 +2767,10 @@ function opportunityReportBodyHtml() {
 }
 
 function buildOpportunityHtml() {
+  return withMoneyCurrency(state.opportunity.source === 'api' ? state.opportunity.currency : null, () => buildOpportunityHtmlBody());
+}
+
+function buildOpportunityHtmlBody() {
   return `<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Oportunidad de ingresos</title>
@@ -2761,6 +2784,10 @@ function downloadOpportunityHtml() {
 }
 
 function renderOpportunityPage() {
+  return withMoneyCurrency(state.opportunity.source === 'api' ? state.opportunity.currency : null, () => renderOpportunityPageBody());
+}
+
+function renderOpportunityPageBody() {
   const s = state.opportunity;
 
   // El campo de palabras de marca solo se muestra subiendo archivo — en modo
@@ -3606,6 +3633,10 @@ function runForecastInvestmentAnalysis(text, fileName) {
 // ---------------------------------------------------------------------------
 
 function renderNegPage() {
+  return withMoneyCurrency((state.neg.tab === 'ia' && currentUser.isSuperAdmin) ? state.neg.ai.currency : (state.neg.source === 'api' ? state.neg.currency : null), () => renderNegPageBody());
+}
+
+function renderNegPageBody() {
   const s = state.neg;
   const tabs = currentUser.isSuperAdmin ? `
     <div class="seg-control" style="margin-bottom:20px">
@@ -4103,6 +4134,7 @@ function runNegAnalysis(text, fileName) {
     const coreTerms = s.core.split('\n').map((v) => v.trim()).filter(Boolean);
     if (!coreTerms.length) throw new Error('Escribe al menos un término núcleo para poder clasificar.');
     const exceptions = s.exceptions.split('\n').map((v) => v.trim()).filter(Boolean);
+    s.currency = '';
     const rows = engine.loadSearchTerms(text);
     const classified = engine.classifyTerms(rows, coreTerms, exceptions);
     Object.assign(s, { status: 'ready', rows: classified, fileName, campaignFilter: 'all' });
@@ -4195,6 +4227,7 @@ function fetchGoogleAdsSearchTerms() {
     .then(([termsResp, campaignsResp]) => {
       if (!termsResp.ok) throw new Error(termsResp.data.error || 'Error desconocido.');
       a.simulated = !!termsResp.data.simulated;
+      state.neg.currency = termsResp.data.currency || '';
       a.allCampaigns = campaignsResp.ok ? (campaignsResp.data.campaigns || []) : [];
       const account = a.accounts.find((acc) => acc.id === customerId);
       const label = a.simulated
@@ -4328,6 +4361,7 @@ function fetchNegAiTerms() {
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
       a.simulated = !!data.simulated;
+      ai.currency = data.currency || '';
       const account = a.accounts.find((acc) => acc.id === customerId);
       const label = a.simulated
         ? `Google Ads (simulado) — ${a.dateFrom} a ${a.dateTo}`
@@ -6309,6 +6343,7 @@ function fetchRecommendations() {
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
       a.simulated = !!data.simulated;
+      s.currency = data.currency || '';
       s.rows = data.rows || [];
       s.score = data.score || null;
       s.actions = {};
@@ -6540,6 +6575,10 @@ function renderRecsApiPanel() {
 }
 
 function renderRecsPage() {
+  return withMoneyCurrency(state.recs.currency, () => renderRecsPageBody());
+}
+
+function renderRecsPageBody() {
   const s = state.recs;
   // Igual que ROAS: no hay modo "Subir archivo" (esto no viene en ningún
   // CSV), así que hace falta disparar la consulta de estado apenas se
@@ -6657,7 +6696,7 @@ function renderRecsPage() {
 // bug real reportado por cesar (2026-08-19).
 function resetIaMaxAccountData() {
   const s = state.iamax;
-  s.status = 'idle'; s.error = null; s.rows = null;
+  s.status = 'idle'; s.error = null; s.rows = null; s.currency = '';
   s.toggle = { campaignId: null, status: 'idle', newEnable: null, preview: null, result: null, error: null };
   s.served = { status: 'idle', error: null, rows: null, negatives: null, campaignFilter: 'all' };
   s.created = { status: 'idle', error: null, data: null, sub: s.created ? s.created.sub : 'assets', campaignFilter: 'all', days: s.created ? s.created.days : 30, sort: { assets: null, combinations: null, pages: null }, selected: {} };
@@ -6786,6 +6825,7 @@ function fetchIaMaxServed() {
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
       a.simulated = !!data.simulated;
+      state.iamax.currency = data.currency || '';
       sv.rows = engine.crossReferenceAiMaxServed(data.rows || [], data.negatives || []);
       sv.negatives = data.negatives || [];
       sv.campaignFilter = 'all';
@@ -7143,6 +7183,7 @@ function fetchIaMaxCreated() {
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
       a.simulated = !!data.simulated;
+      state.iamax.currency = data.currency || '';
       cr.data = data;
       cr.campaignFilter = 'all';
       cr.status = 'ready';
@@ -7624,6 +7665,10 @@ function renderIaMaxCruceTab() {
 }
 
 function renderIaMaxPage() {
+  return withMoneyCurrency(state.iamax.currency, () => renderIaMaxPageBody());
+}
+
+function renderIaMaxPageBody() {
   const s = state.iamax;
   ensureIaMaxGoogleAdsStatusLoaded();
 
@@ -9036,6 +9081,7 @@ function fetchKeywordIdeas() {
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
       s.api.simulated = !!data.simulated;
+      s.currency = data.currency || '';
       i.rows = data.rows || [];
       i.totalSize = data.total_size || i.rows.length;
       i.status = 'ready';
@@ -9123,6 +9169,7 @@ function fetchKeywordHistorical() {
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
       s.api.simulated = !!data.simulated;
+      s.currency = data.currency || '';
       h.rows = data.rows || [];
       h.status = 'ready';
       h.modalKeyword = null;
@@ -9654,6 +9701,10 @@ function renderKeywordPlannerPronosticoTab() {
 }
 
 function renderKeywordPlannerPage() {
+  return withMoneyCurrency(state.keywordPlanner.tab === 'pronostico' ? state.keywordPlanner.pronostico.currencyCode : state.keywordPlanner.currency, () => renderKeywordPlannerPageBody());
+}
+
+function renderKeywordPlannerPageBody() {
   const s = state.keywordPlanner;
   ensureKeywordPlannerStatusLoaded();
 
@@ -11098,6 +11149,10 @@ function pacingProgressBar(c) {
 }
 
 function pacingRowHtml(r) {
+  return withMoneyCurrency(r.currency, () => pacingRowHtmlBody(r));
+}
+
+function pacingRowHtmlBody(r) {
   if (r.error) {
     return `
       <tr>
@@ -11203,6 +11258,7 @@ function openPacingCampaignsModal(customerId, accountName) {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
       cm.rows = data.rows || [];
       cm.simulated = !!data.simulated;
+      cm.currency = data.currency || '';
       cm.status = 'ready';
       render();
     })
@@ -11355,6 +11411,10 @@ function pacingCampaignRowHtml(row) {
 }
 
 function renderPacingCampaignsModal() {
+  return withMoneyCurrency(state.pacing.campaignsModal.currency, () => renderPacingCampaignsModalBody());
+}
+
+function renderPacingCampaignsModalBody() {
   const cm = state.pacing.campaignsModal;
   if (!cm.customerId) return '';
 
@@ -12295,7 +12355,7 @@ function bindEvents() {
     render();
     const reader = new FileReader();
     reader.onload = () => {
-      try { negAiSetRows(engine.loadSearchTerms(decodeFileText(reader.result)), file.name, ''); }
+      try { negAiSetRows(engine.loadSearchTerms(decodeFileText(reader.result)), file.name, ''); state.neg.ai.currency = ''; }
       catch (err) { state.neg.ai.rowsStatus = 'idle'; state.neg.ai.rowsError = (err && err.message) || 'No se pudo leer el archivo.'; render(); }
     };
     reader.onerror = () => { state.neg.ai.rowsStatus = 'idle'; state.neg.ai.rowsError = 'No se pudo leer el archivo.'; render(); };
