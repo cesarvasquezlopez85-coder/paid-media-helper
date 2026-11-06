@@ -9460,7 +9460,7 @@ function fmtDateTime(epochSeconds) {
 }
 
 function ensureAdminDataLoaded() {
-  if (state.admin.usage.status === 'idle') loadAdminAiUsage();
+  if (currentUser.isSuperAdmin && state.admin.usage.status === 'idle') loadAdminAiUsage();
   if (state.admin.usersStatus === 'idle') loadAdminUsers();
   if (state.admin.accessStatus === 'idle') loadAdminAccess();
 }
@@ -11471,7 +11471,8 @@ function renderAdminPage() {
       </div>`;
   }
 
-  return `${usersBody}${renderAdminAiUsage()}${mccGrantForm}${grantForm}${accessBody}`;
+  // El consumo y costo de la IA solo lo ve el super admin.
+  return `${usersBody}${currentUser.isSuperAdmin ? renderAdminAiUsage() : ''}${mccGrantForm}${grantForm}${accessBody}`;
 }
 
 // ---------------------------------------------------------------------------

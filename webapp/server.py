@@ -699,9 +699,9 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_admin_users()
             return
 
-        # Consumo de la IA por usuario, día y función — solo admins.
+        # Consumo de la IA por usuario, día y función — solo super admin (el costo no lo ven los demás admins).
         if path == "/api/admin/ai-usage":
-            if not self._require_admin_json():
+            if not self._require_super_admin_json():
                 return
             self._handle_admin_ai_usage(parse_qs(parsed.query))
             return
