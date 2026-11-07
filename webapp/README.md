@@ -25,8 +25,9 @@ Luego abre `http://localhost:8642` — te va a pedir iniciar sesión o crear cue
 - `google_ads_client.py` — cliente de la API de Google Ads (lectura y escritura) — solo `urllib`, sin la librería oficial, para no agregar dependencias pip al servidor.
 - `account_audit.py` — motor de reglas de la Auditoría de cuenta (66 reglas): Python puro, sin llamadas de red, recibe los datos que arma `fetch_audit_data()` de `google_ads_client.py` y devuelve hallazgos, puntaje y revisiones no verificables. Se prueba con `simulated_audit_data()`.
 - `bigquery_client.py` / `get_bigquery_refresh_token.py` — cliente de solo lectura de BigQuery (con tope de bytes por consulta) y el script que genera el refresh token. Sin las variables `BIGQUERY_PROJECT_ID` y `BIGQUERY_REFRESH_TOKEN` no hace nada.
-- `claude_client.py` — cliente de la API de Claude (análisis con IA en Rendimiento, Auditoría, Negativización y copys; registra el consumo en `ai_usage`) — mismo criterio que `google_ads_client.py`.
+- `claude_client.py` — cliente de la API de Claude (análisis con IA en Rendimiento, Auditoría, Negativización, copys y Hoteles; registra el consumo en `ai_usage`) — mismo criterio que `google_ads_client.py`.
 - `negativos_ia.py` — validación con código de la pestaña "Con IA" de Negativización (riesgo, marca, negativas existentes, choque con palabras clave, palabras frecuentes). Python puro, sin llamadas de red.
+- `hoteles_ia.py` — datos y validación con código del análisis con IA y de la nota para el revenue manager de Hoteles (evidencia mínima por tramo, saltos máximos, alzas con precio caro, revisión de las cifras de la nota). Python puro, sin llamadas de red.
 - `data.db` — se crea sola al arrancar el servidor por primera vez. Guarda usuarios, sesiones, a qué cuentas de Google Ads tiene acceso cada quien, la watchlist de Ritmo de consumo y el historial de auditorías por cuenta (`audit_history`), el registro de pausas y activaciones de campañas (`campaign_status_log`), el historial de negativas subidas con su deshacer (`neg_uploads` y `neg_upload_items`) y el consumo de la IA (`ai_usage`). No se sirve por HTTP. En producción vive en un volumen persistente de Railway, separado del código.
 
 ## Login
@@ -41,7 +42,7 @@ No hay todavía historial entre cargas (Fase 2 del roadmap sigue pendiente) — 
 
 ## Secciones solo para el super admin
 
-Hoteles, Campañas, Historial de cambios y la pestaña "Con IA" de Negativización las ve y usa solo quien esté en `PMH_SUPER_ADMIN_USERNAMES` (el menú las oculta y el servidor responde 403 a los demás, aunque sean administradores). El interruptor de Hoteles es `HOTEL_SECTION_VISIBLE` en `app.js`. Cualquier cambio en `webapp/` se despliega solo en Railway al subirlo a `main`; los cambios que solo tocan documentos no.
+Hoteles (con su panel de precio, el análisis con IA y la nota para el revenue manager), Campañas, Historial de cambios y la pestaña "Con IA" de Negativización las ve y usa solo quien esté en `PMH_SUPER_ADMIN_USERNAMES` (el menú las oculta y el servidor responde 403 a los demás, aunque sean administradores). El interruptor de Hoteles es `HOTEL_SECTION_VISIBLE` en `app.js`. Cualquier cambio en `webapp/` se despliega solo en Railway al subirlo a `main`; los cambios que solo tocan documentos no.
 
 ## Conexión de solo lectura a GA4, Tag Manager, Search Console y BigQuery
 
