@@ -12551,13 +12551,16 @@ function campanasTotalsHtml(rows) {
     </div>`).join('');
 }
 
-function renderCampanasRow(r) {
+const CAMPANAS_TABLE_HEAD = '<thead><tr><th style="min-width:240px">Campaña</th><th>Estado</th><th>Tipo</th><th>Estrategia de puja</th><th>Presupuesto/día</th><th>Gasto</th><th>Impr.</th><th>Clics</th><th>CTR</th><th>CPC</th><th>Conv.</th><th>CPA</th><th>ROAS</th><th>Cuota de impr.</th><th>Cuota de impr. superior</th><th>Cuota perdida (presupuesto)</th><th>Cuota perdida (ranking)</th></tr></thead>';
+
+function renderCampanasRow(r, plain) {
   const c = state.campanas;
   const active = r.status === 'ENABLED';
   const busy = !!c.busy[r.key];
   const target = active ? 'PAUSED' : 'ENABLED';
   let actionCell;
-  if (busy) actionCell = '<span class="field-hint">Aplicando…</span>';
+  if (plain) actionCell = '';
+  else if (busy) actionCell = '<span class="field-hint">Aplicando…</span>';
   else if (c.confirm === r.key) {
     actionCell = `
       <span class="field-hint" style="margin-right:6px;display:inline">¿${active ? 'Pausar' : 'Activar'}?</span>
@@ -12652,11 +12655,12 @@ function renderCampanasPage() {
   const nActive = rows.filter((r) => r.status === 'ENABLED').length;
   const table = `
     <div class="card table-panel">
-      <div class="table-panel-head"><h3>Campañas (${fmtInt(rows.length)}) · ${fmtInt(nActive)} activas <span class="field-hint" style="font-weight:400">· haz clic en una campaña para ver sus gráficas</span></h3></div>
+      <div class="table-panel-head"><h3>Campañas (${fmtInt(rows.length)}) · ${fmtInt(nActive)} activas <span class="field-hint" style="font-weight:400">· haz clic en una campaña para ver sus gráficas</span></h3>
+        <button class="btn-outline xs" data-action="camp-html" ${rows.length ? '' : 'disabled'}>Descargar HTML</button></div>
       <div class="table-scroll sticky-head">
         <table>
-          <thead><tr><th style="min-width:240px">Campaña</th><th>Estado</th><th>Tipo</th><th>Estrategia de puja</th><th>Presupuesto/día</th><th>Gasto</th><th>Impr.</th><th>Clics</th><th>CTR</th><th>CPC</th><th>Conv.</th><th>CPA</th><th>ROAS</th><th>Cuota de impr.</th><th>Cuota de impr. superior</th><th>Cuota perdida (presupuesto)</th><th>Cuota perdida (ranking)</th></tr></thead>
-          <tbody>${shown.map(renderCampanasRow).join('') || '<tr><td colspan="17" class="footnote">Ninguna campaña coincide con los filtros.</td></tr>'}</tbody>
+          ${CAMPANAS_TABLE_HEAD}
+          <tbody>${shown.map((r) => renderCampanasRow(r)).join('') || '<tr><td colspan="17" class="footnote">Ninguna campaña coincide con los filtros.</td></tr>'}</tbody>
         </table>
       </div>
       <p class="footnote" style="margin-top:10px">Las cuatro cuotas de impresiones son del rango elegido; Google no las da para todos los tipos de campaña (p. ej. Display), y ahí aparece N/D. "Cuota de impr. superior" es la parte de impresiones que salió en las posiciones de arriba.</p>
@@ -12667,6 +12671,10 @@ function renderCampanasPage() {
 }
 
 // ---- Campañas: ventana de detalle de una campaña, con pestañas ----
+// Mientras se arma el HTML descargable, las pestañas se dibujan sin la parte de Cambios (aviso del Resumen, bloque de
+// acciones y líneas rojas de las gráficas). La pantalla normal no cambia.
+let campanaExportMode = false;
+
 const CAMPANA_TABS = [
   ['resumen', 'Resumen'], ['graficas', 'Gráficas'], ['grupos', 'Grupos y regiones'], ['segmentos', 'Segmentos'],
   ['palabras', 'Palabras clave'], ['posicion', 'Posición en la subasta'], ['cambios', 'Cambios'],
@@ -12677,7 +12685,7 @@ function emptyCampanaPart() { return { status: 'idle', error: null, data: null }
 // `daily` (gráficas) guarda status/error/days; el resto de pestañas, una "parte" cada una.
 function emptyCampanaDetail(token) {
   return {
-    key: null, token, tab: 'resumen',
+    key: null, token, tab: 'resumen', exporting: false, exportError: null,
     status: 'idle', error: null, days: [], currency: '', simulated: false,
     breakdown: emptyCampanaPart(), ctx: emptyCampanaPart(), seg: emptyCampanaPart(), kw: emptyCampanaPart(), pos: emptyCampanaPart(),
   };
@@ -13009,7 +13017,7 @@ function renderCampanaSummaryTab(row, cur) {
       </div>`;
 
     const nChanges = (data.changes || []).length;
-    const changesNote = data.changes
+    const changesNote = campanaExportMode ? '' : data.changes
       ? `<p class="field-hint" style="margin:12px 0 0">${nChanges ? `Hay <strong>${nChanges}</strong> cambio${nChanges === 1 ? '' : 's'} en esta campaña en los últimos 30 días (pestaña <em>Cambios</em>).` : 'No hay cambios registrados en esta campaña en los últimos 30 días.'}</p>`
       : (data.errors && data.errors.changes ? campanaErrorPanel(data.errors.changes) : '');
     return `
@@ -13017,7 +13025,7 @@ function renderCampanaSummaryTab(row, cur) {
       <div class="stat-grid" style="margin-bottom:0">${cards}</div>
       <p class="field-hint" style="margin:10px 0 0">${p ? `Comparado con el periodo anterior de la misma duración (del ${escapeHtml(prev.from)} al ${escapeHtml(prev.to)}). Verde = mejora, rojo = empeora.` : ''}</p>
       ${changesNote}
-      ${actionsHtml}`;
+      ${campanaExportMode ? '' : actionsHtml}`;
   });
 }
 
@@ -13059,7 +13067,7 @@ function renderCampanaChartsTab(row, cur) {
 // Días del rango que tuvieron algún cambio en la campaña (Google solo guarda 30 días de cambios).
 function campanaChangeDates(series) {
   const ctx = state.campanas.detail.ctx;
-  if (ctx.status !== 'ready' || !ctx.data.changes) return new Set();
+  if (campanaExportMode || ctx.status !== 'ready' || !ctx.data.changes) return new Set();
   const inRange = new Set(series.map((x) => x.date));
   return new Set(ctx.data.changes.map((ch) => ch.date).filter((dt) => inRange.has(dt)));
 }
@@ -13271,6 +13279,11 @@ function renderCampanaChangesTab(row, cur) {
 }
 
 // ---- Ventana ----
+const CAMPANA_TAB_RENDERERS = {
+  resumen: renderCampanaSummaryTab, graficas: renderCampanaChartsTab, grupos: renderCampanaBreakdown, segmentos: renderCampanaSegmentsTab,
+  palabras: renderCampanaKeywordsTab, posicion: renderCampanaPositionTab, cambios: renderCampanaChangesTab,
+};
+
 function renderCampanaDetailModal() {
   const c = state.campanas;
   const d = c.detail;
@@ -13283,19 +13296,20 @@ function renderCampanaDetailModal() {
     <button class="modal-close" data-action="camp-detail-close" aria-label="Cerrar">${icon('x', 18)}</button>
     <h3 class="dense-chart-title" style="margin:0 0 4px;padding-right:28px">${escapeHtml(row.campaign_name)}</h3>
     <p class="field-hint" style="margin:0 0 14px">${escapeHtml(campanasHotelOf(row))} · ${escapeHtml(campanasTypeLabel(row.channel_type))} · ${escapeHtml(strat.label)}${strat.target ? ` (${escapeHtml(strat.target)})` : ''} · ${row.status === 'ENABLED' ? 'Activa' : 'Pausada'} · del ${escapeHtml(c.loadedFrom)} al ${escapeHtml(c.loadedTo)}</p>
+    <div style="margin:0 0 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button class="btn-outline xs" data-action="camp-detail-html" ${d.exporting ? 'disabled' : ''}>${d.exporting ? 'Preparando el HTML…' : 'Descargar HTML de esta campaña'}</button>
+      <span class="field-hint" style="margin:0">Incluye todas las pestañas menos Cambios.</span>
+      ${d.exportError ? `<span class="field-hint" style="margin:0;color:#b3261e">${escapeHtml(d.exportError)}</span>` : ''}
+    </div>
     <div class="seg-control" style="flex-wrap:wrap;margin-bottom:16px">
       ${CAMPANA_TABS.map(([k, label]) => `<button class="seg-btn ${d.tab === k ? 'active' : ''}" data-camp-tab="${k}">${label}</button>`).join('')}
     </div>
     ${d.simulated ? '<div class="ok-panel" style="margin:0 0 12px"><strong>Modo simulado.</strong> Datos de ejemplo.</div>' : ''}`;
-  const bodies = {
-    resumen: renderCampanaSummaryTab, graficas: renderCampanaChartsTab, grupos: renderCampanaBreakdown, segmentos: renderCampanaSegmentsTab,
-    palabras: renderCampanaKeywordsTab, posicion: renderCampanaPositionTab, cambios: renderCampanaChangesTab,
-  };
   return `
     <div class="modal-overlay camp-detail-overlay">
       <div class="modal-box card" data-modal-stop-propagation style="max-width:1100px">
         ${head}
-        ${bodies[d.tab](row, cur)}
+        ${CAMPANA_TAB_RENDERERS[d.tab](row, cur)}
       </div>
     </div>`;
 }
@@ -13409,6 +13423,173 @@ function mountCampanaCharts() {
     line('CPC medio', series.map((x) => (x.clicks ? x.cost / x.clicks : null)), col.navy, { yAxisID: 'y' }),
     line('ROAS', series.map((x) => (x.cost > 0 && x.conv_value > 0 ? x.conv_value / x.cost : null)), col.teal, { yAxisID: 'y1' }),
   ] }, options: o });
+}
+
+// ---- Campañas: descargas en HTML ----
+// El archivo sale autocontenido (estilos de la plataforma incrustados, gráficas como imágenes y sin botones) para
+// mandarlo por correo o guardarlo como PDF con Ctrl+P. Nunca lleva la parte de Cambios (ver campanaExportMode).
+let appCssCache = null;
+function appCssText() {
+  if (!appCssCache) {
+    const hrefs = [...document.querySelectorAll('link[rel="stylesheet"]')].map((l) => l.href);
+    appCssCache = Promise.all(hrefs.map((h) => fetch(h).then((r) => (r.ok ? r.text() : '')).catch(() => ''))).then((parts) => parts.join('\n'));
+  }
+  return appCssCache;
+}
+
+const CAMPANAS_EXPORT_CSS = `
+  body { margin: 0; background: #fff; }
+  .camp-export { max-width: 1200px; margin: 0 auto; padding: 28px 20px 40px; }
+  .camp-export h1 { font-size: 22px; margin: 0 0 6px; }
+  .camp-export h2 { font-size: 16px; margin: 30px 0 12px; padding-bottom: 6px; border-bottom: 2px solid var(--color-border, #e5e7eb); }
+  .camp-export p.meta { color: #6b7280; font-size: 13px; margin: 0 0 4px; }
+  .camp-export.wide { max-width: none; }
+  .camp-export .table-scroll { max-height: none !important; overflow-x: auto !important; overflow-y: visible !important; }
+  .camp-export.wide table { font-size: 11.5px; }
+  .camp-export.wide th, .camp-export.wide td { padding-left: 5px; padding-right: 5px; }
+  .camp-export.wide th:first-child { min-width: 170px !important; }
+  .camp-export.wide .card { padding-left: 14px; padding-right: 14px; }
+  .camp-export thead th { position: static !important; }
+  .camp-export img.camp-chart { width: 100%; height: auto; display: block; }
+  @page { size: landscape; margin: 10mm; }
+  @media print { .camp-export { padding: 0; } .camp-export.wide { zoom: .68; } .camp-export .table-scroll { overflow: visible !important; } .camp-export h2 { break-after: avoid; } .camp-export tr { break-inside: avoid; } }
+`;
+
+// Convierte el HTML de la pantalla en HTML estático: sin botones y con las gráficas como imágenes.
+function campanasStaticHtml(inner, charts = {}) {
+  const box = document.createElement('div');
+  box.innerHTML = inner;
+  box.querySelectorAll('button, .modal-close').forEach((el) => el.remove());
+  box.querySelectorAll('[data-camp-open]').forEach((el) => { el.removeAttribute('data-camp-open'); el.style.cursor = ''; el.removeAttribute('title'); });
+  box.querySelectorAll('canvas').forEach((cv) => {
+    const src = charts[cv.id.replace('camp-chart-', '')];
+    if (!src) { cv.remove(); return; }
+    const img = document.createElement('img');
+    img.className = 'camp-chart'; img.alt = ''; img.src = src;
+    cv.parentElement.style.height = 'auto';
+    cv.replaceWith(img);
+  });
+  return box.innerHTML;
+}
+
+async function campanasHtmlDocument(title, bodyHtml, wide) {
+  const css = await appCssText();
+  return `<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<style>${css}</style>
+<style>${CAMPANAS_EXPORT_CSS}</style></head><body><main class="camp-export${wide ? ' wide' : ''}">${bodyHtml}</main></body></html>`;
+}
+
+function campanasFilterSummary() {
+  const c = state.campanas;
+  const sortLabels = { cost: 'gasto', conversions: 'conversiones', clicks: 'clics', hotel: 'hotel', name: 'nombre' };
+  const out = [`Estado: ${({ ENABLED: 'activas', PAUSED: 'pausadas', all: 'todas' })[c.statusFilter] || c.statusFilter}`];
+  if (c.hotelFilter !== 'all') out.push(`Hotel (según ${c.hotelBy === 'nombre' ? 'el nombre de la campaña' : 'la cuenta'}): ${c.hotelFilter}`);
+  if (c.typeFilter !== 'all') out.push(`Tipo: ${campanasTypeLabel(c.typeFilter)}`);
+  if ((c.search || '').trim()) out.push(`Búsqueda: "${c.search.trim()}"`);
+  out.push(`Orden: ${sortLabels[c.sortBy] || c.sortBy}`);
+  return out;
+}
+
+// La tabla de campañas con los filtros y el orden de la pantalla, sin el tope de filas que tiene la pantalla.
+async function downloadCampanasHtml() {
+  const c = state.campanas;
+  const rows = campanasFilteredRows();
+  if (!rows.length) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const nAccounts = c.watchlist.length;
+  const body = `
+    <h1>Campañas</h1>
+    <p class="meta">${fmtInt(nAccounts)} cuenta${nAccounts === 1 ? '' : 's'} de la lista de Ritmo de consumo · del ${escapeHtml(c.loadedFrom)} al ${escapeHtml(c.loadedTo)} · ${fmtInt(rows.length)} campaña${rows.length === 1 ? '' : 's'} · generado el ${today}</p>
+    <p class="meta">${campanasFilterSummary().map(escapeHtml).join(' · ')}</p>
+    ${c.simulated ? '<p class="meta"><strong>Datos de ejemplo (modo simulado).</strong></p>' : ''}
+    ${c.partial.length ? `<p class="meta"><strong>No se pudieron leer ${c.partial.length} cuenta(s):</strong> ${c.partial.map(escapeHtml).join('; ')}</p>` : ''}
+    <div style="margin-top:14px">${campanasTotalsHtml(rows)}</div>
+    <div class="card table-panel" style="margin-top:16px">
+      <div class="table-scroll"><table>${CAMPANAS_TABLE_HEAD}<tbody>${rows.map((r) => renderCampanasRow(r, true)).join('')}</tbody></table></div>
+      <p class="footnote" style="margin-top:10px">Las cuotas de impresiones son del rango elegido; Google no las da para todos los tipos de campaña (p. ej. Display) y ahí aparece N/D.</p>
+    </div>`;
+  downloadTextFile(await campanasHtmlDocument('Campañas', campanasStaticHtml(body), true), `campanas_${today}.html`, 'text/html');
+}
+
+const CAMPANA_EXPORT_TABS = ['resumen', 'graficas', 'grupos', 'segmentos', 'palabras', 'posicion']; // todas menos Cambios
+
+// Pide todas las pestañas del detalle (cada una trae sus datos solo al abrirse) y espera a que terminen.
+function campanaLoadAllParts(token) {
+  const c = state.campanas;
+  const row = campanaDetailRow();
+  CAMPANA_EXPORT_TABS.forEach(ensureCampanaTab);
+  const statuses = () => {
+    const d = c.detail;
+    return [d.status, d.ctx.status, d.breakdown.status, d.seg.status, d.pos.status, ...(row.channel_type === 'SEARCH' ? [d.kw.status] : [])];
+  };
+  return new Promise((resolve, reject) => {
+    const t0 = Date.now();
+    const timer = setInterval(() => {
+      if (c.detail.token !== token) { clearInterval(timer); reject(new Error('Se cerró el detalle antes de terminar.')); return; }
+      if (statuses().every((st) => st === 'ready' || st === 'error')) { clearInterval(timer); resolve(); return; }
+      if (Date.now() - t0 > 90000) { clearInterval(timer); reject(new Error('Google Ads tardó demasiado en responder.')); }
+    }, 250);
+  });
+}
+
+// Las gráficas son canvas: se muestra un momento la pestaña Gráficas (sin las líneas de cambios) y se guardan como imágenes.
+function campanaChartImages(token) {
+  const c = state.campanas;
+  const d = c.detail;
+  const prevTab = d.tab;
+  d.tab = 'graficas';
+  render();
+  return new Promise((resolve) => setTimeout(() => {
+    const out = {};
+    ['is', 'lost', 'spend', 'clicks', 'conv', 'cpc'].forEach((k) => {
+      const cv = document.getElementById(`camp-chart-${k}`);
+      if (!cv) return;
+      const flat = document.createElement('canvas');
+      flat.width = cv.width; flat.height = cv.height;
+      const g = flat.getContext('2d');
+      g.fillStyle = '#fff'; g.fillRect(0, 0, flat.width, flat.height); g.drawImage(cv, 0, 0);
+      out[k] = flat.toDataURL('image/png');
+    });
+    if (c.detail.token === token) { c.detail.tab = prevTab; render(); }
+    resolve(out);
+  }, 900));
+}
+
+// El detalle completo de una campaña: todas las pestañas menos Cambios.
+async function downloadCampanaDetailHtml() {
+  const c = state.campanas;
+  const row = campanaDetailRow();
+  if (!row || c.detail.exporting) return;
+  const token = c.detail.token;
+  c.detail.exporting = true; c.detail.exportError = null;
+  render();
+  campanaExportMode = true;
+  try {
+    await campanaLoadAllParts(token);
+    const charts = await campanaChartImages(token);
+    const d = c.detail;
+    const cur = d.currency || row.currency;
+    const strat = campanasStrategy(row);
+    const prev = campanasPrevRange();
+    const today = new Date().toISOString().slice(0, 10);
+    const tabs = CAMPANA_TABS.filter(([k]) => CAMPANA_EXPORT_TABS.includes(k) && (k !== 'palabras' || row.channel_type === 'SEARCH'));
+    const sections = tabs.map(([k, label]) => `<section><h2>${escapeHtml(label)}</h2>${CAMPANA_TAB_RENDERERS[k](row, cur)}</section>`).join('');
+    const body = `
+      <h1>${escapeHtml(row.campaign_name)}</h1>
+      <p class="meta">${escapeHtml(campanasHotelOf(row))} · ${escapeHtml(campanasTypeLabel(row.channel_type))} · ${escapeHtml(strat.label)}${strat.target ? ` (${escapeHtml(strat.target)})` : ''} · ${row.status === 'ENABLED' ? 'Activa' : 'Pausada'} · Presupuesto/día ${row.budget == null ? 'N/D' : campanasMoney(row.budget, row.currency)}</p>
+      <p class="meta">Cuenta ${escapeHtml(row.account_name)} (${escapeHtml(row.customer_id)}) · del ${escapeHtml(c.loadedFrom)} al ${escapeHtml(c.loadedTo)}, comparado con el periodo anterior del ${escapeHtml(prev.from)} al ${escapeHtml(prev.to)} · generado el ${today}</p>
+      ${d.simulated ? '<p class="meta"><strong>Datos de ejemplo (modo simulado).</strong></p>' : ''}
+      ${sections}`;
+    const html = await campanasHtmlDocument(row.campaign_name, campanasStaticHtml(body, charts));
+    downloadTextFile(html, `campana_${cambiosSlug(row.campaign_name)}_${today}.html`, 'text/html');
+  } catch (err) {
+    if (c.detail.token === token) c.detail.exportError = err.message || String(err);
+  } finally {
+    campanaExportMode = false;
+    if (c.detail.token === token) { c.detail.exporting = false; render(); }
+  }
 }
 
 // ---- Historial de cambios de la cuenta ----
@@ -14647,6 +14828,8 @@ function handleAction(action) {
 
     case 'camp-refresh': loadCampanas(); break;
     case 'camp-detail-close': closeCampanaDetail(); break;
+    case 'camp-html': downloadCampanasHtml(); break;
+    case 'camp-detail-html': downloadCampanaDetailHtml(); break;
     case 'camp-go-pacing': state.page = 'pacing'; render(); break;
     case 'cambios-load': loadCambios(); break;
     case 'cambios-more': state.cambios.limit += CAMBIOS_PAGE_SIZE; render(); break;
