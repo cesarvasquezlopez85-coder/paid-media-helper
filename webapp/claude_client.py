@@ -535,3 +535,94 @@ def analizar_negativos(user_content):
     if not isinstance(data, dict):
         raise RuntimeError("La respuesta de Claude no trae el formato esperado.")
     return data
+
+
+# ---------------------------------------------------------------------------
+# Hoteles con IA — Claude lee el rendimiento por tramo y el precio frente a la
+# competencia de una campaña de hotel y propone modificadores; hoteles_ia.py
+# valida con código lo que devuelve (datos mínimos, rangos, saltos, alzas con
+# el precio por encima de la competencia) antes de mostrarlo.
+# ---------------------------------------------------------------------------
+HOTEL_MAX_TOKENS = 4000
+HOTEL_TIMEOUT_SECONDS = 120
+
+HOTEL_SYSTEM_PROMPT = (
+    "Eres un estratega senior de Google Ads especializado en campañas de Hotel Ads. Analizas una campaña y "
+    "propones ajustes a sus modificadores de oferta. Escribes para un equipo de medios pagados, en español claro "
+    "y sin relleno.\n\n"
+    "Recibes un JSON con: el periodo, la campaña (clics, costo, conversiones, CPA promedio), el precio frente a la "
+    "competencia (diferencia de precio promedio con el anunciante más barato en puntos porcentuales: positivo = el "
+    "hotel sale más caro; cómo quedó cada impresión; la tendencia reciente) y los tramos de modificadores con su "
+    "valor actual y su rendimiento. Un modificador es un multiplicador de la puja base: 1 = sin ajuste, 0,8 = "
+    "pujar 20 % menos, 1,3 = 30 % más.\n\n"
+    "Criterios:\n"
+    "- Empieza por el precio. Si el hotel sale más de 5 % más caro, el problema principal es la tarifa que se "
+    "envía a Google Hotel Ads, no la puja: dilo con claridad y NO propongas subir modificadores. Si va a la par o "
+    "más barato, el precio no es el obstáculo y los modificadores sí importan.\n"
+    "- Propón subir un tramo solo si su evidencia es \"suficiente\" y su CPA es al menos 15 % mejor que el de la "
+    "campaña. Propón bajar un tramo si su CPA es al menos 25 % peor, o si gasta sin convertir (evidencia "
+    "\"suficiente\" o \"solo_bajar\"). Los tramos con evidencia \"poca\" o \"sin_datos\", y los \"variado_entre_grupos\", "
+    "no se tocan: menciónalo en el diagnóstico si es relevante.\n"
+    "- Cambios moderados: como máximo 30 % sobre el valor actual por paso, y valores con dos decimales. Nunca "
+    "propongas 0 (no servir).\n"
+    "- Máximo 6 propuestas, las de más impacto primero. Si nada justifica un cambio, no propongas ninguno y "
+    "explícalo en \"sin_cambios\". No inventes cambios para llenar la lista.\n"
+    "- Usa SOLO cifras que estén en el JSON; no estimes reservas, ingresos ni mejoras futuras.\n"
+    "- El diagnóstico son de 2 a 4 párrafos cortos: primero el precio, luego lo que muestran los tramos, luego "
+    "lo que no se puede concluir por falta de datos. Cada razón de una propuesta es una o dos frases con las "
+    "cifras del tramo.\n\n"
+    "Responde SOLO con un JSON válido con esta forma exacta:\n"
+    "{\"diagnostico\": [\"párrafo\"], \"propuestas\": [{\"id\": id del tramo, \"valor\": nuevo modificador, "
+    "\"razon\": \"...\"}], \"sin_cambios\": \"texto o cadena vacía\"}"
+)
+
+HOTEL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "diagnostico": {"type": "array", "items": {"type": "string"}},
+        "propuestas": {"type": "array", "items": {"type": "object", "properties": {
+            "id": {"type": "integer"}, "valor": {"type": "number"}, "razon": {"type": "string"}},
+            "required": ["id", "valor", "razon"], "additionalProperties": False}},
+        "sin_cambios": {"type": "string"},
+    },
+    "required": ["diagnostico", "propuestas", "sin_cambios"], "additionalProperties": False,
+}
+
+
+def analizar_hotel(user_content):
+    """user_content: el JSON armado por hoteles_ia.build_input. Devuelve el dict de Claude (sin validar)."""
+    body = {
+        "model": MODEL,
+        "max_tokens": HOTEL_MAX_TOKENS,
+        "thinking": {"type": "disabled"},
+        "output_config": {"effort": "low", "format": {"type": "json_schema", "schema": HOTEL_SCHEMA}},
+        "system": HOTEL_SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": user_content}],
+    }
+    req = urllib.request.Request(
+        API_URL, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=HOTEL_TIMEOUT_SECONDS) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+            _note_usage(payload)
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Claude API respondió {e.code}: {detail}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"No se pudo conectar a la API de Claude: {e.reason}") from e
+    if payload.get("stop_reason") == "refusal":
+        raise RuntimeError("Claude no generó una respuesta para esta campaña (refusal).")
+    if payload.get("stop_reason") == "max_tokens":
+        raise RuntimeError("La respuesta de Claude se cortó por tamaño.")
+    text = "\n".join(b.get("text", "") for b in payload.get("content", []) if b.get("type") == "text").strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise RuntimeError("La respuesta de Claude no trae un JSON válido.")
+    try:
+        data = json.loads(text[start:end + 1])
+    except ValueError as e:
+        raise RuntimeError("La respuesta de Claude no es un JSON válido.") from e
+    if not isinstance(data, dict):
+        raise RuntimeError("La respuesta de Claude no trae el formato esperado.")
+    return data

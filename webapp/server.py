@@ -45,6 +45,7 @@ from urllib.parse import parse_qs, urlparse
 import account_audit
 import bigquery_client
 import claude_client
+import hoteles_ia
 import negativos_ia
 import google_ads_client
 
@@ -498,7 +499,7 @@ def init_db():
 
 
 _COLOMBIA_TZ = datetime.timezone(datetime.timedelta(hours=-5))
-AI_USAGE_FEATURES = ("negativizacion", "auditoria", "rendimiento", "copys")
+AI_USAGE_FEATURES = ("negativizacion", "auditoria", "rendimiento", "copys", "hoteles")
 
 
 def store_ai_usage(user_id, feature, calls, input_tokens, output_tokens, cost_usd):
@@ -970,6 +971,11 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_super_admin_json():
                 return
             self._handle_ai_analizar_negativos(payload)
+        elif path == "/api/ai/analizar-hotel":
+            # Sección Hoteles en afinado: solo super admin, como el resto de Hoteles.
+            if not self._require_super_admin_json():
+                return
+            self._handle_ai_analizar_hotel(payload)
         elif path == "/api/negativos/palabras":
             # Sin IA ni costo; en afinado (2026-11-05): solo super admin, como la pestaña "Con IA".
             if not self._require_super_admin_json():
@@ -2781,6 +2787,63 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(200, result)
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             print(f"[claude-error] neg-ia: {' '.join(str(e).split())[:300]}", flush=True)
+            self._send_json(502, {"error": "No se pudo generar el análisis con IA. Intenta de nuevo en unos minutos."})
+
+    def _handle_ai_analizar_hotel(self, payload):
+        """Diagnóstico y propuesta de modificadores de una campaña de hotel. Solo lee y propone: aplicar pasa
+        por el editor de tramos (vista previa de Google y confirmar)."""
+        user = self._get_current_user()
+        if not claude_client.is_configured():
+            self._send_json(503, {"error": "La integración con Claude no está configurada en el servidor (falta ANTHROPIC_API_KEY)."})
+            return
+        customer_id = str(payload.get("customer_id") or "").strip()
+        campaign_id = str(payload.get("campaign_id") or "").strip()
+        date_from, date_to = str(payload.get("date_from") or "").strip(), str(payload.get("date_to") or "").strip()
+        pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+        if not pattern.match(date_from) or not pattern.match(date_to):
+            self._send_json(400, {"error": "date_from y date_to deben tener formato AAAA-MM-DD."})
+            return
+        if not campaign_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido campaign_id."})
+            return
+        moneda = str(payload.get("moneda") or "")[:8]
+        simulated = not google_ads_client.is_configured()
+        try:
+            if simulated:
+                modifiers = google_ads_client.simulated_hotel_campaign_modifiers(campaign_id, date_from, date_to)
+                price = google_ads_client.simulated_hotel_price(campaign_id, date_from, date_to)
+            else:
+                if not self._hotel_account_access(customer_id):
+                    return
+                modifiers = google_ads_client.fetch_hotel_campaign_modifiers(customer_id, campaign_id, date_from, date_to)
+                try:
+                    price = google_ads_client.fetch_hotel_price(customer_id, campaign_id, date_from, date_to)
+                except Exception as e:  # noqa: BLE001 — sin el precio el análisis igual sirve
+                    print(f"[hotel-ia] no se pudo leer el precio: {' '.join(str(e).split())[:200]}", flush=True)
+                    price = None
+        except ValueError as e:
+            self._send_json(404, {"error": str(e)})
+            return
+        except Exception as e:  # noqa: BLE001
+            self._send_google_ads_error(e)
+            return
+        if not _ai_limiter.allow(f"user:{user['id']}", *AI_RATE_LIMIT):
+            self._send_json(429, {"error": "Alcanzaste el límite de análisis con IA por esta hora. Intenta más tarde."})
+            return
+        try:
+            user_content, by_id = hoteles_ia.build_input(modifiers, price, moneda, date_from, date_to)
+            if not by_id:
+                self._send_json(400, {"error": "Esta campaña no tiene modificadores editables que analizar."})
+                return
+            with track_ai_usage(user["id"], "hoteles"):
+                ai = claude_client.analizar_hotel(user_content)
+            locked = bool(modifiers.get("template_locked"))
+            result = hoteles_ia.build_result(ai, modifiers, price, by_id, locked)
+            result["campaign_id"] = campaign_id
+            result["simulated"] = simulated
+            self._send_json(200, result)
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            print(f"[claude-error] hotel-ia: {' '.join(str(e).split())[:300]}", flush=True)
             self._send_json(502, {"error": "No se pudo generar el análisis con IA. Intenta de nuevo en unos minutos."})
 
     def _handle_ai_generar_copys(self, payload):

@@ -8090,7 +8090,7 @@ function openHotelCampaign(campaignId, keepFlow) {
   const a = s.api;
   const d = s.detail;
   d.campaignId = campaignId; d.status = 'loading'; d.error = null;
-  if (!keepFlow) { d.edits = {}; d.flow = { status: 'idle', preview: null, result: null, error: null }; }
+  if (!keepFlow) { d.edits = {}; d.ai = null; d.flow = { status: 'idle', preview: null, result: null, error: null }; }
   render();
 
   const params = new URLSearchParams({ customer_id: hotelCustomerId() || '', campaign_id: campaignId, date_from: a.dateFrom, date_to: a.dateTo });
@@ -8235,6 +8235,110 @@ function renderHotelPrice() {
     <p class="footnote" style="margin:12px 0 0">Los precios que se comparan son los del feed de tarifas de Google Hotel Ads. Si el hotel no cambia sus tarifas, la puja y los modificadores de abajo no modifican esta posición de precio.</p>`);
 }
 
+// Análisis con IA de la campaña: diagnóstico y propuesta de modificadores. Solo propone: el servidor valida cada
+// propuesta (datos mínimos, rangos, alzas con precio caro) y aplicar sigue siendo el editor de tramos de abajo.
+function runHotelAi() {
+  const s = state.hotel;
+  const a = s.api;
+  const d = s.detail;
+  const campaignId = d.campaignId;
+  d.ai = { status: 'loading', error: null, data: null, campaignId };
+  render();
+  fetch('/api/ai/analizar-hotel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ customer_id: hotelCustomerId(), campaign_id: campaignId, date_from: a.dateFrom, date_to: a.dateTo, moneda: s.list.currency || '' }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      if (d.campaignId !== campaignId) return;
+      d.ai = { status: 'ready', error: null, data, campaignId };
+      render();
+    })
+    .catch((err) => {
+      if (d.campaignId !== campaignId) return;
+      d.ai = { status: 'error', error: err.message || String(err), data: null, campaignId };
+      render();
+    });
+}
+
+// Copia las propuestas a la columna "Nuevo modificador": de ahí siguen el camino de siempre (vista previa de Google y confirmar).
+function hotelAiToEditor() {
+  const d = state.hotel.detail;
+  if (!d.ai || !d.ai.data) return;
+  d.ai.data.propuestas.forEach((p) => { d.edits[`${p.type}|${p.label}`] = String(p.nuevo); });
+  d.ai.used = true;
+  d.flow = { status: 'idle', preview: null, result: null, error: null };
+  render();
+  setTimeout(() => {
+    const first = document.querySelector('[data-hotel-edit][style*="border-color"]');
+    if (first) first.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, 0);
+}
+
+function renderHotelAi() {
+  const d = state.hotel.detail;
+  const ai = d.ai;
+  const currency = state.hotel.list.currency;
+  const head = (inner) => `
+    <div class="card table-panel" style="margin-bottom:16px">
+      <div class="table-panel-head"><h3>Análisis con IA</h3><span class="footnote">Lee el precio y el rendimiento de cada tramo · solo propone, no cambia nada en Google Ads</span></div>
+      ${inner}
+    </div>`;
+  const runBtn = (label) => `<button class="btn-accent" data-action="hotel-ai-run">${label}</button>`;
+  if (!ai || ai.campaignId !== d.campaignId) {
+    return head(`
+      <p class="footnote" style="margin:0 0 12px">Claude explica qué dicen el precio y los tramos y propone nuevos modificadores. El sistema descarta lo que no cumple sus reglas (tramos con pocos datos, saltos de más de 30 %, alzas cuando el hotel sale más de 5 % más caro). Cada análisis queda registrado en el consumo de la IA.</p>
+      ${runBtn('Analizar con IA')}`);
+  }
+  if (ai.status === 'loading') return head('<div class="state-panel loading" style="padding:12px 0"><div class="spinner"></div><p>Claude está analizando la campaña…</p></div>');
+  if (ai.status === 'error') return head(`<div class="error-panel">${escapeHtml(ai.error)}</div><div style="margin-top:10px">${runBtn('Reintentar')}</div>`);
+
+  const r = ai.data;
+  const diag = r.diagnostico.length ? r.diagnostico.map((p) => `<p style="margin:0 0 10px">${escapeHtml(p)}</p>`).join('') : '';
+  let proposals;
+  if (r.bloqueada) {
+    proposals = '<p class="footnote">Esta cuenta es de solo lectura (plantilla externa de modificadores), así que no se proponen cambios.</p>';
+  } else if (!r.propuestas.length) {
+    proposals = `<p class="footnote"><strong>Sin cambios propuestos.</strong> ${escapeHtml(r.sin_cambios || 'Ningún tramo tiene datos suficientes para justificar un ajuste.')}</p>`;
+  } else {
+    const rows = r.propuestas.map((p) => {
+      const up = p.nuevo > p.actual;
+      const cpaTxt = p.cpa !== null ? `${hotelMoney(p.cpa, currency)}${p.cpa_vs_campana_pct !== null ? ` (${p.cpa_vs_campana_pct > 0 ? '+' : ''}${p.cpa_vs_campana_pct}%)` : ''}` : 'sin conv.';
+      return `
+        <tr>
+          <td>${escapeHtml(p.tipo_label)} · ${escapeHtml(p.text)}</td>
+          <td>${p.actual}</td>
+          <td><span class="delta-badge ${up ? 'warn' : 'neutral'}">${p.nuevo}</span>${p.limitado ? '<div title="La IA propuso un salto mayor; el sistema lo limitó a ±30 % por paso" style="font-size:11.5px;color:var(--color-text-muted)">limitado a ±30 %</div>' : ''}</td>
+          <td>${fmtInt(p.clicks)} clics · ${p.conversions} conv.<div style="font-size:11.5px;color:var(--color-text-muted)">CPA ${cpaTxt}</div></td>
+          <td>${escapeHtml(p.razon)}</td>
+        </tr>`;
+    }).join('');
+    proposals = `
+      <h4 style="margin:14px 0 8px">Cambios propuestos</h4>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Tramo</th><th>Actual (×)</th><th>Propuesto (×)</th><th>Rendimiento</th><th>Por qué</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+      <div style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <button class="btn-accent" data-action="hotel-ai-use">Pasar al editor de tramos</button>
+        <span style="font-size:11.5px;color:var(--color-text-muted)">${ai.used ? 'Ya están en la columna "Nuevo modificador": revísalos y usa Vista previa más abajo.' : 'No se aplica nada: se copian a la columna "Nuevo modificador" para que los revises y pidas la vista previa.'}</span>
+      </div>`;
+  }
+  const untouched = r.propuestas.length && r.sin_cambios ? `<p class="footnote" style="margin-top:12px"><strong>Lo que no se toca:</strong> ${escapeHtml(r.sin_cambios)}</p>` : '';
+  const dropped = r.descartadas.length ? `
+    <details style="margin-top:12px"><summary class="footnote" style="cursor:pointer">${r.descartadas.length} propuesta${r.descartadas.length === 1 ? '' : 's'} de la IA descartada${r.descartadas.length === 1 ? '' : 's'} por el sistema</summary>
+      <ul class="footnote" style="margin:6px 0 0 18px">${r.descartadas.map((x) => `<li><strong>${escapeHtml(x.tramo)}:</strong> ${escapeHtml(x.motivo)}</li>`).join('')}</ul>
+    </details>` : '';
+  return head(`
+    ${diag}
+    ${proposals}
+    ${untouched}
+    ${dropped}
+    <p class="footnote" style="margin-top:12px">Texto generado por IA a partir de los datos de esta pantalla; las cifras de las tablas salen de Google Ads. ${runBtn('Volver a analizar').replace('btn-accent', 'btn-outline sm')}</p>`);
+}
+
 function hotelTramoKey(t) { return `${t.type}|${t.label}`; }
 
 // Cambios que el usuario escribió y difieren de lo vigente. `invalid` junta lo que no cumple los límites.
@@ -8289,7 +8393,7 @@ function submitHotelModifiers(preview) {
         render();
       } else {
         f.status = 'done'; f.result = data;
-        d.edits = {};
+        d.edits = {}; d.ai = null; // la propuesta ya no corresponde a los valores vigentes
         openHotelCampaign(d.campaignId, true); // vuelve a leer lo vigente en Google
       }
     })
@@ -8436,6 +8540,7 @@ function renderHotelDetail() {
     <p class="footnote" style="margin:0 0 14px">Un <strong>modificador</strong> es un multiplicador que Google aplica sobre la puja base de la campaña en ese tramo: 1 = sin ajuste, 0,8 = pujar un 20 % menos, 1,3 = un 30 % más, 0 = no servir. El <strong>CPC pagado</strong> es lo que costó cada clic en el periodo, no la puja.</p>
     ${lockBanner}
     ${renderHotelPrice()}
+    ${renderHotelAi()}
     ${data.tramos.length ? groups : '<div class="error-panel">Esta campaña no tiene modificadores de hotel en sus grupos de anuncios.</div>'}
     <p class="footnote">El cambio se aplica por campaña: el mismo valor en el tramo para todos sus grupos de anuncios (si algún grupo no tiene el tramo, se crea). Valores entre 0,1 y 10 (fechas elegidas: 0,5 a 2); 1 = sin ajuste; 0 = no servir en ese tramo. El CPA de cada tramo es el del periodo elegido; con pocas conversiones no es concluyente.</p>
     ${flowHtml}`;
@@ -10198,7 +10303,7 @@ function loadAdminAiUsage() {
     .catch((err) => { u.status = 'error'; u.error = err.message || String(err); render(); });
 }
 
-const AI_FEATURE_LABELS = { negativizacion: 'Negativización', auditoria: 'Auditoría', rendimiento: 'Rendimiento', copys: 'Copys' };
+const AI_FEATURE_LABELS = { negativizacion: 'Negativización', auditoria: 'Auditoría', rendimiento: 'Rendimiento', copys: 'Copys', hoteles: 'Hoteles' };
 
 // Consumo de la IA por día, por usuario y por función. El costo es una estimación con los precios de lista
 // del modelo (el servidor manda los precios), no lo que factura Anthropic.
@@ -14591,11 +14696,13 @@ function handleAction(action) {
     case 'hotel-api-fetch': fetchHotelCampaigns(); break;
     case 'hotel-back': {
       const d = state.hotel.detail;
-      d.campaignId = null; d.status = 'idle'; d.data = null; d.edits = {};
+      d.campaignId = null; d.status = 'idle'; d.data = null; d.edits = {}; d.ai = null;
       d.flow = { status: 'idle', preview: null, result: null, error: null };
       render();
       break;
     }
+    case 'hotel-ai-run': runHotelAi(); break;
+    case 'hotel-ai-use': hotelAiToEditor(); break;
     case 'hotel-preview': submitHotelModifiers(true); break;
     case 'hotel-confirm': submitHotelModifiers(false); break;
     case 'hotel-cancel': {
