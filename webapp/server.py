@@ -755,6 +755,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_hotel_modifiers(parse_qs(parsed.query))
             return
 
+        if path == "/api/google-ads/hotel-price":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_hotel_price(parse_qs(parsed.query))
+            return
+
         # Historial de negativas subidas desde la plataforma (en afinado: solo super admin).
         if path == "/api/google-ads/negative-uploads":
             if not self._require_super_admin_json():
@@ -3083,6 +3089,29 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(200, {**google_ads_client.fetch_hotel_campaign_modifiers(customer_id, campaign_id, *dates), "simulated": False})
         except ValueError as e:
             self._send_json(404, {"error": str(e)})
+        except Exception as e:  # noqa: BLE001
+            self._send_google_ads_error(e)
+
+    def _handle_google_ads_hotel_price(self, query):
+        """Precio de una campaña de hotel frente a la competencia (solo lectura)."""
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        campaign_id = (query.get("campaign_id") or [""])[0].strip()
+        dates = self._hotel_dates(query)
+        if not dates:
+            return
+        if not campaign_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro campaign_id."})
+            return
+        if not google_ads_client.is_configured():
+            try:
+                self._send_json(200, {**google_ads_client.simulated_hotel_price(campaign_id, *dates), "simulated": True})
+            except ValueError as e:
+                self._send_json(404, {"error": str(e)})
+            return
+        if not self._hotel_account_access(customer_id):
+            return
+        try:
+            self._send_json(200, {**google_ads_client.fetch_hotel_price(customer_id, campaign_id, *dates), "simulated": False})
         except Exception as e:  # noqa: BLE001
             self._send_google_ads_error(e)
 

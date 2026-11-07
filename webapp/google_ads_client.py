@@ -4786,6 +4786,100 @@ def fetch_hotel_campaign_modifiers(customer_id, campaign_id, date_from, date_to)
     }
 
 
+# Precio frente a la competencia (solo lectura): hotel_performance_view trae, por
+# campaña de hotel, la diferencia de precio con el anunciante competidor más
+# barato (fracción: 0,045 = el hotel es 4,5 % más caro; negativa = más barato) y
+# en qué posición de precio quedó cada impresión.
+HOTEL_PRICE_BUCKET_LABELS_ES = {
+    "LOWEST_UNIQUE": "El más barato (único)",
+    "LOWEST_TIED": "Empatado como el más barato",
+    "NOT_LOWEST": "No es el más barato",
+    "ONLY_PARTNER_SHOWN": "Solo se mostró tu precio",
+    "UNKNOWN": "Sin dato",
+}
+HOTEL_PRICE_BUCKET_ORDER = ["LOWEST_UNIQUE", "LOWEST_TIED", "NOT_LOWEST", "ONLY_PARTNER_SHOWN", "UNKNOWN"]
+
+
+def _hotel_price_weighted(rows, impressions_of, diff_of):
+    """Diferencia de precio promedio ponderada por impresiones (None si ninguna fila la trae)."""
+    num = den = 0.0
+    for r in rows:
+        d = diff_of(r)
+        if d is None:
+            continue
+        w = impressions_of(r)
+        num += d * w
+        den += w
+    return num / den if den else None
+
+
+def fetch_hotel_price(customer_id, campaign_id, date_from, date_to):
+    """Precio de una campaña de hotel frente a la competencia en el periodo: resumen,
+    reparto por posición de precio y evolución diaria. Cada parte que Google rechace
+    se devuelve como no disponible, no como cero."""
+    customer_id = _hotel_valid_id(customer_id)
+    campaign_id = _hotel_valid_id(campaign_id)
+    where = f"campaign.id = {campaign_id} AND segments.date BETWEEN '{date_from}' AND '{date_to}'"
+
+    summary = buckets = daily = None
+    try:
+        rows = _search(customer_id, f"""
+            SELECT campaign.id, metrics.impressions, metrics.clicks, metrics.hotel_eligible_impressions,
+                   metrics.hotel_price_difference_percentage
+            FROM hotel_performance_view WHERE {where}
+        """)
+        imp = sum(int(r["metrics"].get("impressions", 0)) for r in rows)
+        summary = {
+            "impressions": imp,
+            "clicks": sum(int(r["metrics"].get("clicks", 0)) for r in rows),
+            "eligible": sum(int(float(r["metrics"].get("hotelEligibleImpressions", 0) or 0)) for r in rows),
+            "price_diff": _hotel_price_weighted(
+                rows, lambda r: int(r["metrics"].get("impressions", 0)),
+                lambda r: _float_or_none(r["metrics"].get("hotelPriceDifferencePercentage"))),
+        }
+    except RuntimeError:
+        summary = None
+    try:
+        rows = _search(customer_id, f"""
+            SELECT campaign.id, segments.hotel_price_bucket, metrics.impressions, metrics.clicks,
+                   metrics.hotel_price_difference_percentage
+            FROM hotel_performance_view WHERE {where}
+        """)
+        agg = {}
+        for r in rows:
+            key = r.get("segments", {}).get("hotelPriceBucket", "UNKNOWN")
+            m = r["metrics"]
+            a = agg.setdefault(key, [])
+            a.append((int(m.get("impressions", 0)), int(m.get("clicks", 0)), _float_or_none(m.get("hotelPriceDifferencePercentage"))))
+        buckets = []
+        for key in sorted(agg, key=lambda k: HOTEL_PRICE_BUCKET_ORDER.index(k) if k in HOTEL_PRICE_BUCKET_ORDER else 99):
+            items = agg[key]
+            buckets.append({
+                "bucket": key, "label": HOTEL_PRICE_BUCKET_LABELS_ES.get(key, key),
+                "impressions": sum(i[0] for i in items), "clicks": sum(i[1] for i in items),
+                "price_diff": _hotel_price_weighted(items, lambda i: i[0], lambda i: i[2]),
+            })
+    except RuntimeError:
+        buckets = None
+    try:
+        rows = _search(customer_id, f"""
+            SELECT campaign.id, segments.date, metrics.impressions, metrics.hotel_price_difference_percentage
+            FROM hotel_performance_view WHERE {where}
+        """)
+        by_day = {}
+        for r in rows:
+            day = r["segments"]["date"]
+            m = r["metrics"]
+            by_day.setdefault(day, []).append((int(m.get("impressions", 0)), _float_or_none(m.get("hotelPriceDifferencePercentage"))))
+        daily = [{
+            "date": day, "impressions": sum(i[0] for i in items),
+            "price_diff": _hotel_price_weighted(items, lambda i: i[0], lambda i: i[1]),
+        } for day, items in sorted(by_day.items())]
+    except RuntimeError:
+        daily = None
+    return {"campaign_id": campaign_id, "summary": summary, "buckets": buckets, "daily": daily}
+
+
 def _hotel_validate_changes(changes):
     if not isinstance(changes, list) or not changes:
         raise ValueError("No hay cambios que aplicar.")
@@ -4962,6 +5056,34 @@ def simulated_hotel_campaign_modifiers(campaign_id, date_from=None, date_to=None
         "tramos": tramos, "totals": totals,
         "perf_available": {"ventana": True, "estancia": True, "dia": True, "fechas_usuario": True},
         "template_locked": False,
+    }
+
+
+def simulated_hotel_price(campaign_id, date_from=None, date_to=None):
+    """Precio de ejemplo: la campaña de Cartagena sale más cara que la competencia y la de Santa Marta más barata."""
+    camp = next((c for c in _SIM_HOTEL_CAMPAIGNS if c["campaign_id"] == campaign_id), None)
+    if camp is None:
+        raise ValueError("No se encontró esa campaña de hotel en la cuenta.")
+    expensive = campaign_id == "9100000001"
+    shares = ([("LOWEST_UNIQUE", 0.12, -0.062), ("LOWEST_TIED", 0.31, 0.004), ("NOT_LOWEST", 0.52, 0.094), ("ONLY_PARTNER_SHOWN", 0.05, None)]
+              if expensive else
+              [("LOWEST_UNIQUE", 0.46, -0.081), ("LOWEST_TIED", 0.38, 0.002), ("NOT_LOWEST", 0.13, 0.057), ("ONLY_PARTNER_SHOWN", 0.03, None)])
+    imp = camp["impressions"]
+    buckets = [{"bucket": k, "label": HOTEL_PRICE_BUCKET_LABELS_ES[k], "impressions": round(imp * sh),
+                "clicks": round(camp["clicks"] * sh), "price_diff": d} for k, sh, d in shares]
+    diff = _hotel_price_weighted(buckets, lambda b: b["impressions"], lambda b: b["price_diff"])
+    start = datetime.date.fromisoformat(date_from) if date_from else datetime.date.today() - datetime.timedelta(days=30)
+    end = datetime.date.fromisoformat(date_to) if date_to else datetime.date.today() - datetime.timedelta(days=1)
+    n = max(1, (end - start).days + 1)
+    daily = []
+    for i in range(min(n, 120)):
+        wave = ((i * 7) % 11 - 5) / 100.0  # oscilación determinista de ±5 puntos
+        daily.append({"date": (start + datetime.timedelta(days=i)).isoformat(), "impressions": round(imp / n),
+                      "price_diff": round(diff + wave, 4)})
+    return {
+        "campaign_id": campaign_id,
+        "summary": {"impressions": imp, "clicks": camp["clicks"], "eligible": round(imp * 1.38), "price_diff": diff},
+        "buckets": buckets, "daily": daily,
     }
 
 

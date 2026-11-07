@@ -8094,6 +8094,7 @@ function openHotelCampaign(campaignId, keepFlow) {
   render();
 
   const params = new URLSearchParams({ customer_id: hotelCustomerId() || '', campaign_id: campaignId, date_from: a.dateFrom, date_to: a.dateTo });
+  if (!keepFlow || !d.price || d.price.campaignId !== campaignId) loadHotelPrice(campaignId);
   fetch(`/api/google-ads/hotel-modifiers?${params.toString()}`)
     .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
     .then(({ ok, data }) => {
@@ -8103,6 +8104,135 @@ function openHotelCampaign(campaignId, keepFlow) {
       render();
     })
     .catch((err) => { d.status = 'error'; d.error = err.message || String(err); render(); });
+}
+
+// Precio frente a la competencia (solo lectura): se trae aparte de los modificadores para que un fallo
+// de esta consulta no impida ver ni editar los tramos.
+function loadHotelPrice(campaignId) {
+  const s = state.hotel;
+  const a = s.api;
+  const d = s.detail;
+  d.price = { status: 'loading', error: null, data: null, campaignId };
+  const params = new URLSearchParams({ customer_id: hotelCustomerId() || '', campaign_id: campaignId, date_from: a.dateFrom, date_to: a.dateTo });
+  fetch(`/api/google-ads/hotel-price?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      if (d.campaignId !== campaignId) return; // el usuario ya abrió otra campaña
+      d.price = { status: 'ready', error: null, data, campaignId };
+      render();
+    })
+    .catch((err) => {
+      if (d.campaignId !== campaignId) return;
+      d.price = { status: 'error', error: err.message || String(err), data: null, campaignId };
+      render();
+    });
+}
+
+function hotelPct(f, digits = 1) {
+  if (f === null || f === undefined || Number.isNaN(f)) return 'N/D';
+  const v = f * 100;
+  return `${v > 0 ? '+' : ''}${v.toFixed(digits)} %`;
+}
+
+// Línea diaria de la diferencia de precio, con la línea del 0 % (mismo precio que el competidor más barato).
+function hotelPriceChartSvg(daily) {
+  const pts = daily.filter((x) => x.price_diff !== null && x.price_diff !== undefined);
+  if (pts.length < 2) return '<p class="footnote">Hay muy pocos días con precio comparable para dibujar la evolución.</p>';
+  const W = 640; const H = 170; const L = 46; const R = 10; const T = 12; const B = 26;
+  const vals = pts.map((x) => x.price_diff * 100);
+  let lo = Math.min(0, ...vals); let hi = Math.max(0, ...vals);
+  if (hi - lo < 4) { hi += 2; lo -= 2; }
+  const x = (i) => L + (i / (pts.length - 1)) * (W - L - R);
+  const y = (v) => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
+  const line = pts.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.price_diff * 100).toFixed(1)}`).join(' ');
+  const dots = pts.map((p, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(p.price_diff * 100).toFixed(1)}" r="2.6" fill="${p.price_diff > 0 ? 'var(--danger)' : 'var(--ok-text)'}"><title>${escapeHtml(p.date)}: ${hotelPct(p.price_diff)}</title></circle>`).join('');
+  const tick = (v) => `<text x="${L - 6}" y="${(y(v) + 4).toFixed(1)}" text-anchor="end" font-size="11" fill="var(--color-text-muted)">${v > 0 ? '+' : ''}${Math.round(v)} %</text>`;
+  return `
+    <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Diferencia de precio diaria frente a la competencia" style="width:100%;height:auto;max-height:220px">
+      <line x1="${L}" x2="${W - R}" y1="${y(0).toFixed(1)}" y2="${y(0).toFixed(1)}" stroke="var(--color-border)" stroke-dasharray="4 4" />
+      ${Math.abs(y(hi) - y(0)) > 14 ? tick(hi) : ''}${tick(0)}${Math.abs(y(lo) - y(0)) > 14 ? tick(lo) : ''}
+      <path d="${line}" fill="none" stroke="var(--navy-700, #14213d)" stroke-width="1.8" />
+      ${dots}
+      <text x="${L}" y="${H - 6}" font-size="11" fill="var(--color-text-muted)">${escapeHtml(pts[0].date)}</text>
+      <text x="${W - R}" y="${H - 6}" text-anchor="end" font-size="11" fill="var(--color-text-muted)">${escapeHtml(pts[pts.length - 1].date)}</text>
+    </svg>`;
+}
+
+function renderHotelPrice() {
+  const pr = state.hotel.detail.price;
+  if (!pr) return '';
+  const head = (inner) => `
+    <div class="card table-panel" style="margin-bottom:16px">
+      <div class="table-panel-head"><h3>Precio frente a la competencia</h3><span class="footnote">Lo que Google compara entre tu hotel y los otros anunciantes · solo lectura</span></div>
+      ${inner}
+    </div>`;
+  if (pr.status === 'loading') return head('<div class="state-panel loading" style="padding:12px 0"><div class="spinner"></div><p>Trayendo el precio frente a la competencia…</p></div>');
+  if (pr.status === 'error') return head(`<p class="footnote">No se pudo traer esta comparación de precio: ${escapeHtml(pr.error)}</p>`);
+  const data = pr.data || {};
+  const sm = data.summary;
+  if (!sm && !data.buckets && !data.daily) return head('<p class="footnote">Google no entregó la comparación de precio de esta campaña.</p>');
+  if (sm && !sm.impressions) return head('<p class="footnote">La campaña no tuvo impresiones en este periodo, así que Google no tiene precios que comparar.</p>');
+
+  let verdict = '';
+  if (sm) {
+    const diff = sm.price_diff;
+    const share = sm.eligible ? Math.min(100, (sm.impressions / sm.eligible) * 100) : null;
+    let msg;
+    let cls = 'ok-panel';
+    if (diff === null || diff === undefined) {
+      msg = 'Google no devolvió una diferencia de precio en este periodo.';
+      cls = '';
+    } else if (diff > 0.05) {
+      msg = `<strong>Tu hotel salió en promedio ${hotelPct(diff)} más caro</strong> que el anunciante más barato. Con un precio así, subir la puja no recupera esas reservas: conviene revisar las tarifas que se envían a Google.`;
+      cls = 'error-panel';
+    } else if (diff > 0.02) {
+      msg = `<strong>Tu hotel salió ${hotelPct(diff)} más caro</strong> que el anunciante más barato. Es una diferencia pequeña pero pesa en la comparación de precios.`;
+      cls = 'error-panel';
+    } else if (diff > -0.005) {
+      msg = `<strong>Tu hotel quedó prácticamente al mismo precio</strong> que el más barato (${hotelPct(diff)}).`;
+    } else {
+      msg = `<strong>Tu hotel salió ${hotelPct(diff)}</strong>, es decir, más barato que el competidor más barato.`;
+    }
+    verdict = `
+      ${cls ? `<div class="${cls}" style="margin-bottom:14px">${msg}</div>` : `<p style="margin:0 0 14px">${msg}</p>`}
+      <div class="stat-grid" style="margin-bottom:14px">
+        <div class="card stat-card"><div class="stat-label">Diferencia de precio</div><div class="stat-value lg">${hotelPct(diff)}</div><div class="stat-sub">promedio ponderado por impresiones</div></div>
+        <div class="card stat-card"><div class="stat-label">Impresiones</div><div class="stat-value lg">${fmtInt(sm.impressions)}</div><div class="stat-sub">${fmtInt(sm.clicks)} clics</div></div>
+        <div class="card stat-card"><div class="stat-label">Impresiones elegibles</div><div class="stat-value lg">${sm.eligible ? fmtInt(sm.eligible) : 'N/D'}</div><div class="stat-sub">${share !== null ? `se mostró en el ${share.toFixed(0)} %` : ''}</div></div>
+      </div>`;
+  }
+
+  let buckets = '';
+  if (data.buckets && data.buckets.length) {
+    const total = data.buckets.reduce((acc, b) => acc + b.impressions, 0) || 1;
+    buckets = `
+      <h4 style="margin:6px 0 8px">En qué posición de precio quedó cada impresión</h4>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Posición de precio</th><th>Impresiones</th><th>% del total</th><th>Clics</th><th title="Frente al competidor más barato; negativo = más barato">Diferencia de precio</th></tr></thead>
+        <tbody>${data.buckets.map((b) => `
+          <tr>
+            <td>${escapeHtml(b.label)}</td>
+            <td>${fmtInt(b.impressions)}</td>
+            <td><div style="display:flex;align-items:center;gap:8px"><div style="width:90px;height:8px;background:var(--gray-100);border-radius:4px;overflow:hidden"><div style="width:${((b.impressions / total) * 100).toFixed(1)}%;height:100%;background:${b.bucket === 'NOT_LOWEST' ? 'var(--danger)' : 'var(--ok-text)'}"></div></div>${((b.impressions / total) * 100).toFixed(1)} %</div></td>
+            <td>${fmtInt(b.clicks)}</td>
+            <td>${b.price_diff === null || b.price_diff === undefined ? '<span class="footnote">—</span>' : `<span class="delta-badge ${b.price_diff > 0.005 ? 'bad' : (b.price_diff < -0.005 ? 'good' : 'neutral')}">${hotelPct(b.price_diff)}</span>`}</td>
+          </tr>`).join('')}</tbody>
+      </table></div>`;
+  } else if (data.buckets === null) {
+    buckets = '<p class="footnote">No se pudo traer el reparto por posición de precio.</p>';
+  }
+
+  let daily = '';
+  if (data.daily && data.daily.length) {
+    daily = `<h4 style="margin:16px 0 6px">Evolución diaria de la diferencia de precio</h4>
+      <p class="footnote" style="margin:0 0 6px">Por encima de la línea punteada el hotel estuvo más caro que el competidor más barato; por debajo, más barato.</p>
+      ${hotelPriceChartSvg(data.daily)}`;
+  } else if (data.daily === null) {
+    daily = '<p class="footnote">No se pudo traer la evolución diaria.</p>';
+  }
+  return head(`${verdict}${buckets}${daily}
+    <p class="footnote" style="margin:12px 0 0">Los precios que se comparan son los del feed de tarifas de Google Hotel Ads. Si el hotel no cambia sus tarifas, la puja y los modificadores de abajo no modifican esta posición de precio.</p>`);
 }
 
 function hotelTramoKey(t) { return `${t.type}|${t.label}`; }
@@ -8305,6 +8435,7 @@ function renderHotelDetail() {
     </div>
     <p class="footnote" style="margin:0 0 14px">Un <strong>modificador</strong> es un multiplicador que Google aplica sobre la puja base de la campaña en ese tramo: 1 = sin ajuste, 0,8 = pujar un 20 % menos, 1,3 = un 30 % más, 0 = no servir. El <strong>CPC pagado</strong> es lo que costó cada clic en el periodo, no la puja.</p>
     ${lockBanner}
+    ${renderHotelPrice()}
     ${data.tramos.length ? groups : '<div class="error-panel">Esta campaña no tiene modificadores de hotel en sus grupos de anuncios.</div>'}
     <p class="footnote">El cambio se aplica por campaña: el mismo valor en el tramo para todos sus grupos de anuncios (si algún grupo no tiene el tramo, se crea). Valores entre 0,1 y 10 (fechas elegidas: 0,5 a 2); 1 = sin ajuste; 0 = no servir en ese tramo. El CPA de cada tramo es el del periodo elegido; con pocas conversiones no es concluyente.</p>
     ${flowHtml}`;
