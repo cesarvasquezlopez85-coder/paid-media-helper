@@ -276,6 +276,14 @@ Verificada con un dataset sintético de 30 meses con estacionalidad marcada (tem
 - **Descarga en HTML:** botón "Descargar HTML" que baja la página completa (tarjetas, gráfico, tabla mensual, prueba contra el pasado, temporada y nota de método), autocontenida y sin botones; mismo mecanismo que las descargas de Campañas. Nombre `proyeccion_ventas_<hotel>_<fecha>.html`.
 - Verificado con el dataset sintético y en el navegador. **Sigue pendiente probarlo con el histórico real de un hotel.**
 
+**Pantalla simplificada (2026-11-10, commit `6beb4ee`):** cesar dijo que la sección estaba "demasiado complicada", y se rediseñó para que se entienda sin conocer el modelo. Los cálculos no cambiaron; cambió lo que se muestra:
+- **Arriba, la respuesta:** "Lo que esperamos vender" para el horizonte, con el cambio frente al mismo periodo del año pasado y el rango probable. Junto a ella, un **semáforo de confiabilidad** (Alta, Media o Baja) con una frase de por qué (`forecastReliability`): sale de la prueba contra el pasado cuando hay 21+ meses; Baja con menos de 18 meses, con más de 15 % de error o si no supera a "repetir el año pasado"; Media con menos de 24 meses, más de 8 % de error o meses atípicos sin revisar; Alta en el resto. Reemplaza las tarjetas de precisión, R² y tendencia.
+- **Meta e inversión en una sola tarjeta** ("Meta e inversión"), en lenguaje de negocio: el retorno se dice "cada $1 invertido trajo $5,1 en ventas" en vez de "ROAS combinado 510 %". Los campos de meta de crecimiento e inversión pagada van en un desplegable **"Opcional"**.
+- **Gráfico y tabla más cortos:** el gráfico ya no dibuja la línea de "ajuste del modelo". La tabla "Mes a mes" muestra ventas esperadas, rango probable, mismo mes del año pasado, cambio y, si aplica, inversión, meta e inversión para la meta, con cifras cortas ($248,8M). El CSV conserva todo el detalle (rangos, brecha, meta vs. año pasado).
+- **Detalle plegado en "Ver cómo se calculó y qué tan confiable es":** prueba contra el pasado, temporada ("meses fuertes y flojos del año"), retorno de la inversión (con el selector de últimos 12 meses o todo el histórico) y el método en viñetas.
+- **Avisos en lenguaje llano** bajo "Revisa estos datos", con los botones "Excluir ese mes" y "Volver a incluir". La pantalla inicial explica en tres pasos qué subir y qué se obtiene. La descarga HTML sale igual de simple (sin campos ni botones y con el detalle ya desplegado).
+- **Arreglo de paso:** la app carga `styles-roiback.css`, no `styles.css`; el estilo de los avisos de calidad se había puesto en `styles.css` y nunca se aplicaba. Los estilos de la sección viven ahora en `styles-roiback.css`.
+
 ### Función 8 — ROAS (nueva, 2026-07-30)
 
 cesar preguntó si el ROAS de cada campaña es visible vía API y si se puede ajustar como optimización. Antes de construir nada se investigó contra la cuenta real de Spiwak Chipichape:
