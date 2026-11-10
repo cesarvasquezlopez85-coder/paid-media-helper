@@ -396,6 +396,7 @@ const state = {
     statusChecked: false, configured: false,
     accountsStatus: 'idle', accounts: [], accountToAdd: '', accountsError: null,
     watchlistStatus: 'idle', watchlist: null, // [{customer_id, account_name}]
+    mccGroups: [], // MCCs completos agregados: [{group_customer_id, group_name, watched}]
     rowsStatus: 'idle', rows: null, error: null, simulated: false,
     sortBy: 'account_name', sortDir: 'asc',
     hotelFilter: [], // customer_id de los hoteles marcados en el selector de la tabla; [] = todos
@@ -11678,6 +11679,7 @@ function loadPacingWatchlist() {
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
       p.watchlist = data.watchlist || [];
+      p.mccGroups = data.mcc_groups || [];
       p.watchlistStatus = 'ready';
       render();
       if (p.watchlist.length) loadPacingRows();
@@ -11727,9 +11729,34 @@ function addPacingWatchlistAccount() {
     .catch((err) => { p.error = err.message || String(err); render(); });
 }
 
+// Quitar cuentas no necesita volver a pedirle a Google Ads el gasto de las demás:
+// se sacan de la pantalla al instante y solo se refresca la lista liviana
+// (cuentas + MCCs agregados), sin tocar las filas ya cargadas.
+function dropPacingAccountsLocally(ids) {
+  const p = state.pacing;
+  const gone = new Set(ids);
+  p.watchlist = (p.watchlist || []).filter((w) => !gone.has(w.customer_id));
+  p.rows = (p.rows || []).filter((r) => !gone.has(r.customer_id));
+  p.hotelFilter = (p.hotelFilter || []).filter((id) => !gone.has(id));
+}
+
+function refreshPacingWatchlistOnly() {
+  const p = state.pacing;
+  return fetch('/api/google-ads/pacing/watchlist')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      p.watchlist = data.watchlist || [];
+      p.mccGroups = data.mcc_groups || [];
+      render();
+    });
+}
+
 function removePacingWatchlistAccount(customerId) {
   const p = state.pacing;
   p.error = null;
+  dropPacingAccountsLocally([customerId]);
+  render();
   fetch('/api/google-ads/pacing/watchlist/remove', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -11738,9 +11765,9 @@ function removePacingWatchlistAccount(customerId) {
     .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
-      loadPacingWatchlist();
+      return refreshPacingWatchlistOnly();
     })
-    .catch((err) => { p.error = err.message || String(err); render(); });
+    .catch((err) => { p.error = err.message || String(err); loadPacingWatchlist(); });
 }
 
 function clearPacingWatchlist() {
@@ -11783,7 +11810,7 @@ function addPacingMccGroup(groupCustomerId, groupName) {
   fetch('/api/google-ads/pacing/watchlist/add-mcc-group', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ group_customer_id: groupCustomerId }),
+    body: JSON.stringify({ group_customer_id: groupCustomerId, group_name: groupName }),
   })
     .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
     .then(({ ok, data }) => {
@@ -11796,6 +11823,49 @@ function addPacingMccGroup(groupCustomerId, groupName) {
       m.addStatus = 'error'; m.addError = err.message || String(err);
       render();
     });
+}
+
+function removePacingMccGroup(groupCustomerId) {
+  const p = state.pacing;
+  const g = (p.mccGroups || []).find((x) => x.group_customer_id === groupCustomerId);
+  if (!g) return;
+  const label = g.group_name || groupCustomerId;
+  if (!window.confirm(`¿Quitar el MCC "${label}" de la lista? Dejarás de vigilar sus ${g.watched} cuenta(s) (las que no vengan también de otro MCC de la lista). No borra nada en Google Ads y puedes volver a agregarlo cuando quieras.`)) return;
+  p.error = null;
+  p.mccRemoving = groupCustomerId;
+  render();
+  fetch('/api/google-ads/pacing/watchlist/remove-mcc-group', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group_customer_id: groupCustomerId }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      p.mccRemoving = null;
+      state.pacing.mcc.addResult = null;
+      dropPacingAccountsLocally(data.removed_ids || []);
+      if (!p.watchlist.length) p.rowsStatus = 'ready';
+      return refreshPacingWatchlistOnly();
+    })
+    .catch((err) => { p.mccRemoving = null; p.error = err.message || String(err); loadPacingWatchlist(); });
+}
+
+function renderPacingMccAddedList() {
+  const p = state.pacing;
+  const groups = p.mccGroups || [];
+  if (!groups.length) return '';
+  return `
+    <div style="margin-top:4px">
+      <p class="footnote" style="margin:0 0 6px;font-weight:600">MCCs agregados (${groups.length})</p>
+      <div class="pacing-mcc-list" style="display:flex;flex-wrap:wrap;gap:8px">
+        ${groups.map((g) => `
+          <span class="pacing-mcc-chip" style="display:inline-flex;align-items:center;gap:8px;border:1px solid var(--border, #d9d9d9);border-radius:999px;padding:4px 6px 4px 12px;font-size:13px">
+            <span>${escapeHtml(g.group_name || g.group_customer_id)} <span class="footnote">· ${g.watched} cuenta(s)</span></span>
+            <button type="button" class="btn-link" style="font-size:16px;line-height:1;padding:0 6px" data-pacing-mcc-remove="${escapeHtml(g.group_customer_id)}" title="Quitar este MCC y dejar de vigilar sus cuentas" aria-label="Quitar el MCC ${escapeHtml(g.group_name || g.group_customer_id)}" ${p.mccRemoving ? 'disabled' : ''}>×</button>
+          </span>`).join('')}
+      </div>
+    </div>`;
 }
 
 function renderPacingMccPanel() {
@@ -11846,6 +11916,7 @@ function renderPacingMccPanel() {
       <label style="font-weight:600">Agregar un MCC completo</label>
       <p class="footnote" style="margin:0">Para hoteles con muchas cuentas (40 o más) — agrega de un jalón todas las cuentas que cuelgan de un sub-MCC, en vez de elegirlas una por una.</p>
       ${body}
+      ${renderPacingMccAddedList()}
     </div>`;
 }
 
@@ -14971,6 +15042,9 @@ function bindEvents() {
   });
   document.querySelectorAll('[data-pacing-mcc-pick]').forEach((btn) => {
     btn.addEventListener('click', () => addPacingMccGroup(btn.dataset.pacingMccPick, btn.dataset.pacingMccPickName));
+  });
+  document.querySelectorAll('[data-pacing-mcc-remove]').forEach((btn) => {
+    btn.addEventListener('click', () => removePacingMccGroup(btn.dataset.pacingMccRemove));
   });
   document.querySelectorAll('[data-pacing-campaigns-open]').forEach((btn) => {
     btn.addEventListener('click', () => openPacingCampaignsModal(btn.dataset.pacingCampaignsOpen, btn.dataset.pacingCampaignsOpenName));

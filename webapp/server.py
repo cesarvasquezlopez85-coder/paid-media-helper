@@ -394,6 +394,32 @@ def init_db():
             )
             """
         )
+        # MCCs completos agregados desde "Agregar un MCC completo" (Ritmo de consumo)
+        # y qué cuentas trajo cada uno, para poder listarlos y quitar uno entero
+        # con una "X" sin tocar las cuentas que el usuario agregó a mano.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_pacing_mcc_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                group_customer_id TEXT NOT NULL,
+                group_name TEXT,
+                created_at REAL NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                UNIQUE(user_id, group_customer_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_pacing_mcc_group_accounts (
+                user_id INTEGER NOT NULL,
+                group_customer_id TEXT NOT NULL,
+                customer_id TEXT NOT NULL,
+                PRIMARY KEY(user_id, group_customer_id, customer_id)
+            )
+            """
+        )
         # Pausas y activaciones de campañas hechas desde la sección Campañas: quién, cuándo y de qué estado a cuál.
         conn.execute(
             """
@@ -883,6 +909,10 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_auth_json():
                 return
             self._handle_pacing_watchlist_add_mcc_group(payload)
+        elif path == "/api/google-ads/pacing/watchlist/remove-mcc-group":
+            if not self._require_auth_json():
+                return
+            self._handle_pacing_watchlist_remove_mcc_group(payload)
         elif path == "/api/google-ads/pacing/campaign-budget-adjust":
             if not self._require_auth_json():
                 return
@@ -1713,10 +1743,27 @@ class Handler(SimpleHTTPRequestHandler):
                 "SELECT customer_id, account_name FROM user_pacing_watchlist WHERE user_id = ? ORDER BY created_at",
                 (user["id"],),
             ).fetchall()
+            # MCCs completos agregados, con cuántas de sus cuentas siguen vigiladas.
+            groups = conn.execute(
+                """
+                SELECT g.group_customer_id, g.group_name,
+                       (SELECT COUNT(*) FROM user_pacing_mcc_group_accounts ga
+                         JOIN user_pacing_watchlist w
+                           ON w.user_id = ga.user_id AND w.customer_id = ga.customer_id
+                        WHERE ga.user_id = g.user_id AND ga.group_customer_id = g.group_customer_id) AS watched
+                FROM user_pacing_mcc_groups g
+                WHERE g.user_id = ? ORDER BY g.created_at
+                """,
+                (user["id"],),
+            ).fetchall()
         finally:
             conn.close()
         self._send_json(200, {
             "watchlist": [{"customer_id": r["customer_id"], "account_name": r["account_name"]} for r in rows],
+            "mcc_groups": [
+                {"group_customer_id": g["group_customer_id"], "group_name": g["group_name"], "watched": g["watched"]}
+                for g in groups
+            ],
         })
 
     def _handle_pacing_watchlist_add(self, payload):
@@ -1777,6 +1824,8 @@ class Handler(SimpleHTTPRequestHandler):
         conn = get_db()
         try:
             conn.execute("DELETE FROM user_pacing_watchlist WHERE user_id = ?", (user["id"],))
+            conn.execute("DELETE FROM user_pacing_mcc_groups WHERE user_id = ?", (user["id"],))
+            conn.execute("DELETE FROM user_pacing_mcc_group_accounts WHERE user_id = ?", (user["id"],))
             conn.commit()
         finally:
             conn.close()
@@ -2002,6 +2051,7 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             self._send_google_ads_error(e)
             return
+        group_name = str(payload.get("group_name") or "").strip()[:200] or None
         conn = get_db()
         try:
             added = 0
@@ -2013,10 +2063,73 @@ class Handler(SimpleHTTPRequestHandler):
                 )
                 if cur.rowcount:
                     added += 1
+                conn.execute(
+                    "INSERT OR IGNORE INTO user_pacing_mcc_group_accounts (user_id, group_customer_id, customer_id) "
+                    "VALUES (?, ?, ?)",
+                    (user["id"], group_customer_id, acc["id"]),
+                )
+            # Si el MCC ya estaba en la lista solo se actualiza el nombre.
+            conn.execute(
+                "INSERT INTO user_pacing_mcc_groups (user_id, group_customer_id, group_name, created_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(user_id, group_customer_id) DO UPDATE SET group_name = COALESCE(excluded.group_name, group_name)",
+                (user["id"], group_customer_id, group_name, time.time()),
+            )
             conn.commit()
         finally:
             conn.close()
         self._send_json(200, {"ok": True, "found": len(accounts), "added": added})
+
+    def _handle_pacing_watchlist_remove_mcc_group(self, payload):
+        """Quita un MCC de la lista y deja de vigilar sus cuentas, salvo las que
+        otro MCC de la lista también trae. No toca nada en Google Ads."""
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        group_customer_id = str(payload.get("group_customer_id") or "").strip()
+        if not group_customer_id.isdigit():
+            self._send_json(400, {"error": "group_customer_id debe ser numérico."})
+            return
+        conn = get_db()
+        try:
+            # Qué cuentas se van (las del MCC que ningún otro MCC de la lista trae y que
+            # siguen vigiladas): se devuelven para que la pantalla las quite sin recargar todo.
+            removed_ids = [
+                r["customer_id"] for r in conn.execute(
+                    """
+                    SELECT w.customer_id FROM user_pacing_watchlist w
+                    WHERE w.user_id = ?
+                      AND w.customer_id IN (
+                          SELECT customer_id FROM user_pacing_mcc_group_accounts
+                          WHERE user_id = ? AND group_customer_id = ?
+                      )
+                      AND w.customer_id NOT IN (
+                          SELECT customer_id FROM user_pacing_mcc_group_accounts
+                          WHERE user_id = ? AND group_customer_id <> ?
+                      )
+                    """,
+                    (user["id"], user["id"], group_customer_id, user["id"], group_customer_id),
+                ).fetchall()
+            ]
+            for cid in removed_ids:
+                conn.execute(
+                    "DELETE FROM user_pacing_watchlist WHERE user_id = ? AND customer_id = ?",
+                    (user["id"], cid),
+                )
+            removed = len(removed_ids)
+            conn.execute(
+                "DELETE FROM user_pacing_mcc_group_accounts WHERE user_id = ? AND group_customer_id = ?",
+                (user["id"], group_customer_id),
+            )
+            conn.execute(
+                "DELETE FROM user_pacing_mcc_groups WHERE user_id = ? AND group_customer_id = ?",
+                (user["id"], group_customer_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self._send_json(200, {"ok": True, "removed": removed, "removed_ids": removed_ids})
 
     def _handle_google_ads_campaigns(self, query):
         customer_id = (query.get("customer_id") or [""])[0].strip()
