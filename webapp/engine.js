@@ -1950,7 +1950,7 @@ export function computeSeasonalForecast(rows, monthsAhead, opts = {}) {
     .map((h) => ({ key: h.key, t: h.t, month: h.month, year: h.year, period: h.period, y: h.revenue }));
   if (points.length < MIN_MONTHS_FOR_FORECAST) {
     const extra = history.length > points.length ? ` (${history.length - points.length} excluido(s) del modelo)` : '';
-    throw new Error(`Se necesitan al menos ${MIN_MONTHS_FOR_FORECAST} meses de histórico para calcular una proyección con estacionalidad — este archivo/filtro tiene ${points.length}${extra}.`);
+    throw new Error(`Se necesitan al menos ${MIN_MONTHS_FOR_FORECAST} meses de ventas para proyectar; este archivo tiene ${points.length}${extra}. Con 24 o más la proyección es mucho más confiable.`);
   }
 
   const model = fitDecomposition(points);

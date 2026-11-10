@@ -603,3 +603,45 @@ main.content { flex: 1; overflow-y: auto; height: 100%; }
 
 /* Menú de hoteles de Ritmo de consumo: casillas con el verde azulado de Roiback */
 .pacing-hotel-menu input[type=checkbox] { accent-color: var(--accent-600); }
+
+/* Proyección de ventas — pantalla simple: respuesta arriba, detalle plegado */
+.fc-top { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-bottom: 16px; }
+@media (max-width: 800px) { .fc-top { grid-template-columns: 1fr; } }
+.fc-hero, .fc-rel { padding: 22px 24px; }
+.fc-eyebrow { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--color-text-muted); }
+.fc-big { font-family: var(--font-display); font-size: 46px; font-weight: 800; line-height: 1.1; margin: 8px 0 10px; color: var(--navy-800); }
+.fc-line { font-size: 14px; line-height: 1.5; margin-top: 4px; }
+.fc-line.muted, .fc-muted { color: var(--color-text-muted); font-size: 13px; }
+.fc-rel-level { font-family: var(--font-display); font-size: 28px; font-weight: 800; margin: 8px 0 8px; }
+.fc-rel-alta { border-color: var(--ok-text); } .fc-rel-alta .fc-rel-level { color: var(--ok-text); }
+.fc-rel-media { border-color: var(--warn-500); } .fc-rel-media .fc-rel-level { color: var(--warn-strong); }
+.fc-rel-baja { border-color: var(--danger-border); } .fc-rel-baja .fc-rel-level { color: var(--danger); }
+.fc-plan { padding: 20px 24px; margin-bottom: 16px; }
+.fc-plan-row { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 12px 0; border-top: 1px solid var(--color-border); flex-wrap: wrap; }
+.fc-plan-row:first-of-type { margin-top: 8px; }
+.fc-plan-title { font-size: 14px; font-weight: 600; color: var(--color-text-heading); }
+.fc-plan-big { font-family: var(--font-display); font-size: 24px; font-weight: 800; color: var(--navy-800); }
+.fc-steps { text-align: left; max-width: 520px; margin: 14px auto 0; padding-left: 22px; font-size: 14px; line-height: 1.7; }
+.fc-p { margin: 0 0 12px; font-size: 13.5px; line-height: 1.55; }
+.fc-h { margin: 22px 0 8px; font-size: 14px; color: var(--color-text-heading); }
+.fc-h:first-child { margin-top: 0; }
+.fc-list { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.6; color: var(--color-text-muted); }
+.fc-list li { margin: 4px 0; }
+.forecast-details { margin-bottom: 16px; }
+.forecast-details > summary {
+  cursor: pointer; font-size: 14px; font-weight: 700; color: var(--color-text-heading);
+  padding: 14px 18px; background: #fff; border: 1px solid var(--color-border); border-radius: var(--radius-md);
+}
+.forecast-details[open] > summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.fc-details-body {
+  background: #fff; border: 1px solid var(--color-border); border-top: 0; padding: 18px 20px;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+}
+.fc-options { display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-end; }
+.forecast-notice {
+  border: 1px solid var(--warn-500); background: var(--warn-bg); color: var(--warn-text);
+  border-radius: var(--radius-md); padding: 14px 18px; font-size: 13px; line-height: 1.5; margin-bottom: 16px;
+}
+.forecast-notice ul { margin: 6px 0 0; padding-left: 18px; }
+.forecast-notice li { margin: 8px 0; }
+.forecast-notice .btn-outline { margin-left: 6px; vertical-align: middle; }
