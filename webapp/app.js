@@ -250,7 +250,7 @@ const state = {
     loadedFrom: '', loadedTo: '', // rango con el que se trajo la tabla; el detalle de cada campaña usa el mismo
     detail: emptyCampanaDetail(0),
   },
-  // Historial de cambios (change_event) de una cuenta de la lista de Ritmo de consumo. Solo super admin mientras se afina.
+  // Historial de cambios (change_event) de una cuenta de la lista de Ritmo de consumo. Solo lectura; abierto a todos los usuarios.
   cambios: {
     watchlistStatus: 'idle', watchlist: [], accountId: '', days: 30,
     status: 'idle', error: null, rows: [], truncated: false, warnings: {}, simulated: false, currency: '',
@@ -13926,7 +13926,7 @@ const changeUserText = (ch) => ch.user || 'Google (sin usuario)';
 
 function ensureCambiosLoaded() {
   const s = state.cambios;
-  if (s.watchlistStatus !== 'idle' || !currentUser.isSuperAdmin) return;
+  if (s.watchlistStatus !== 'idle') return;
   s.watchlistStatus = 'loading';
   fetch('/api/google-ads/pacing/watchlist')
     .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
@@ -14047,9 +14047,6 @@ ${filters.length ? `<p class="meta">Filtros: ${filters.map(escapeHtml).join(' ·
 
 function renderCambiosPage() {
   const s = state.cambios;
-  if (!currentUser.isSuperAdmin) {
-    return `<div class="card state-panel idle"><p>Esta sección todavía no está disponible para tu usuario.</p></div>`;
-  }
   ensureCambiosLoaded();
 
   const opt = (value, label, current) => `<option value="${escapeHtml(value)}" ${current === value ? 'selected' : ''}>${escapeHtml(label)}</option>`;
@@ -15673,7 +15670,7 @@ fetch('/api/me').then((r) => r.json()).then((data) => {
   const navCampanas = document.getElementById('nav-campanas');
   if (navCampanas && currentUser.isSuperAdmin) navCampanas.style.display = '';
   const navCambios = document.getElementById('nav-cambios');
-  if (navCambios && currentUser.isSuperAdmin) navCambios.style.display = '';
+  if (navCambios) navCambios.style.display = '';
   const navHoteles = document.getElementById('nav-hoteles');
   if (navHoteles && HOTEL_SECTION_VISIBLE && currentUser.isSuperAdmin) navHoteles.style.display = '';
   if (data.must_change_password) {

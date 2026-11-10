@@ -765,7 +765,7 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/google-ads/account-changes":
-            if not self._require_super_admin_json():
+            if not self._require_auth_json():
                 return
             self._handle_google_ads_account_changes(parse_qs(parsed.query))
             return
