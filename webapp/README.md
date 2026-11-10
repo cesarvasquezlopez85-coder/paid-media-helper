@@ -19,7 +19,7 @@ Luego abre `http://localhost:8642` — te va a pedir iniciar sesión o crear cue
 - `styles-roiback.css` — el rediseño Roiback; desde el 2026-11-01 es el diseño de todos los usuarios (`index.html` lo carga y `app.js` fija `APP_THEME = 'roiback'`). `styles.css` se conserva como el diseño anterior y lo sigue usando la pantalla de login.
 - `login.html` / `login.js` — pantalla de inicio de sesión / creación de cuenta.
 - `styles.css` — tokens de diseño (color, tipografía, espaciado) portados del design system del handoff.
-- `engine.js` — lógica de negocio de las funciones que procesan un archivo (CSV/Excel) en el navegador, sin dependencias de UI.
+- `engine.js` — lógica de negocio de las funciones que procesan un archivo (CSV/Excel) en el navegador, sin dependencias de UI. Incluye el modelo de Proyección de ventas (`computeSeasonalForecast`, `computeRequiredInvestment`, `computeGrowthGoal`).
 - `app.js` — estado de todas las funciones, renderizado y manejo de eventos (un solo archivo, grande — el patrón de cada función nueva se agrega siguiendo el de la anterior).
 - `server.py` — servidor + login/registro/sesión/Administración + todos los endpoints `/api/*` (ver notas abajo).
 - `google_ads_client.py` — cliente de la API de Google Ads (lectura y escritura) — solo `urllib`, sin la librería oficial, para no agregar dependencias pip al servidor.
@@ -49,6 +49,9 @@ Hoteles (con su panel de precio, el análisis con IA y la nota para el revenue m
 Guía y script en `OUTPUTS/plataforma-google-ads/conexiones_lectura/`. Es una credencial aparte de la de Google Ads; el script no escribe claves en el repositorio y guarda las variables `GOOGLE_READ_*` en Railway.
 
 ## Otras notas
+
+- **Descargas en HTML:** Campañas (la tabla y el detalle de cada campaña) y Proyección de ventas bajan una página HTML autocontenida: estilos de la plataforma incrustados (`appCssText()`), gráficas como imagen o SVG y sin botones, lista para mandar por correo o guardar como PDF con Ctrl+P en horizontal. Comparten `campanasHtmlDocument()`. Las de Campañas nunca llevan la parte de Cambios (`campanaExportMode`).
+- **Proyección de ventas:** `buildForecastModel()` en `app.js` arma todo lo que ven la pantalla, el CSV y el HTML, para que los tres muestren los mismos números. La meta de crecimiento es proyección × (1 + %), no el año pasado × (1 + %).
 
 - **Generador de copys y CORS:** un `fetch()` hecho desde el navegador a otro dominio es bloqueado por casi todos los sitios (CORS). Por eso `server.py` descarga la página del lado del servidor (igual que hacía `requests` en el prototipo de Streamlit) y se la entrega a la app ya lista. Si aun así falla (el sitio bloquea bots, exige JavaScript para cargar contenido, timeout, etc.), usa el botón "¿No cargó? Pega el HTML": abre la página en el navegador, "Ver código fuente" (Ctrl/Cmd+U), copia y pega.
 - Sin la columna "Campaign type" en el archivo de campañas, todo se trata como Search (marca se detecta solo por el nombre) — comportamiento esperado documentado en `spec.md`.
