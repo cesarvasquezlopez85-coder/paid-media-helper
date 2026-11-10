@@ -1872,16 +1872,75 @@ function fitDecomposition(points) {
 
 const fcPredict = (model, t, month) => (model.intercept + model.slope * t) * model.seasonal[month];
 
+// Dos formas de proyectar. "trend": tendencia lineal × temporada. "flat": sin
+// tendencia — el nivel de los últimos 12 meses (ya sin temporada) × temporada.
+// Con ventas muy cambiantes (un año de auge seguido de una caída), la tendencia
+// lineal de toda la historia sobreestima; el nivel reciente acierta más.
+export const SELECTION_MIN_ORIGINS = 3;
+export const SELECTION_MARGIN = 0.95; // "sin tendencia" gana solo si acierta al menos 5% mejor
+const ROLLING_HORIZON = 6;
+const FLAT_LEVEL_MONTHS = 12;
+
+function fitFlat(points) {
+  const base = fitDecomposition(points);
+  const recent = points.slice(-FLAT_LEVEL_MONTHS);
+  const level = fcMean(recent.map((p) => p.y / base.seasonal[p.month]));
+  return { slope: 0, intercept: level, seasonal: base.seasonal, counts: base.counts, kind: 'flat' };
+}
+
+const fitByKind = (points, kind) => (kind === 'flat' ? fitFlat(points) : { ...fitDecomposition(points), kind: 'trend' });
+
+function errorMetrics(list) {
+  if (!list.length) return null;
+  const withNaive = list.filter((x) => x.naiveErr !== null);
+  const mape = fcMean(list.map((x) => Math.abs(x.err)));
+  const naiveMape = withNaive.length ? fcMean(withNaive.map((x) => Math.abs(x.naiveErr))) : null;
+  const modelOnNaive = withNaive.length ? fcMean(withNaive.map((x) => Math.abs(x.err))) : null;
+  return {
+    count: list.length, mape,
+    relRmse: Math.sqrt(fcMean(list.map((x) => x.err * x.err))),
+    naiveMape, naiveMonths: withNaive.length,
+    beatsNaive: naiveMape !== null && modelOnNaive !== null ? modelOnNaive < naiveMape : null,
+  };
+}
+
+// Prueba hacia atrás repetida: se entrena con los primeros k meses y se
+// proyectan los siguientes (hasta 6), para cada k posible. Un solo corte
+// depende demasiado de qué meses cayeron al final; varios cortes dan un error
+// más estable, y sirven para elegir con o sin tendencia y calibrar el rango.
+function runRolling(points) {
+  const n = points.length;
+  const firstOrigin = BACKTEST_MIN_TRAIN;
+  const lastOrigin = n - BACKTEST_MIN_HOLDOUT;
+  if (lastOrigin < firstOrigin) return null;
+  const actualByKey = new Map(points.map((p) => [p.key, p.y]));
+  const acc = { trend: [], flat: [] };
+  for (let k = firstOrigin; k <= lastOrigin; k++) {
+    const train = points.slice(0, k);
+    const test = points.slice(k, k + ROLLING_HORIZON);
+    for (const kind of ['trend', 'flat']) {
+      const model = fitByKind(train, kind);
+      test.forEach((p) => {
+        if (!(p.y > 0)) return;
+        const predicted = Math.max(0, fcPredict(model, p.t, p.month));
+        const naive = actualByKey.has(p.key - 12) ? actualByKey.get(p.key - 12) : null;
+        acc[kind].push({ err: (predicted - p.y) / p.y, naiveErr: naive !== null ? (naive - p.y) / p.y : null });
+      });
+    }
+  }
+  return { origins: lastOrigin - firstOrigin + 1, trend: errorMetrics(acc.trend), flat: errorMetrics(acc.flat) };
+}
+
 // Proyecta los últimos meses sin verlos y los compara con lo real. También
 // compara contra el método simple "igual que el mismo mes del año pasado",
 // para saber si el modelo de verdad aporta algo.
-function runBacktest(points) {
+function runBacktest(points, kind = 'trend') {
   const n = points.length;
   if (n < MIN_MONTHS_FOR_BACKTEST) return null;
   const holdout = Math.min(BACKTEST_MAX_HOLDOUT, n - BACKTEST_MIN_TRAIN);
   const train = points.slice(0, n - holdout);
   const test = points.slice(n - holdout);
-  const model = fitDecomposition(train);
+  const model = fitByKind(train, kind);
   const actualByKey = new Map(points.map((p) => [p.key, p.y]));
 
   const rows = test.map((p) => {
@@ -1993,16 +2052,24 @@ export function computeSeasonalForecast(rows, monthsAhead, opts = {}) {
     candidates = candidates.filter((p) => p !== worst.p);
   }
 
-  const backtest = runBacktest(points);
+  // Varias pruebas hacia atrás: eligen entre proyectar con o sin tendencia y
+  // calibran el rango con el error de verdad del método elegido.
+  const rolling = runRolling(points);
+  const canSelect = rolling && rolling.origins >= SELECTION_MIN_ORIGINS && rolling.trend && rolling.flat;
+  const kind = canSelect && rolling.flat.mape < rolling.trend.mape * SELECTION_MARGIN ? 'flat' : 'trend';
+  const forecastModel = kind === 'flat' ? fitFlat(points) : model;
+  const backtest = runBacktest(points, kind);
+  const chosenRolling = rolling ? rolling[kind] : null;
 
-  let relSd = inSampleRelSd;
+  let relSd = kind === 'trend' ? inSampleRelSd : 0;
   let intervalSource = 'ajuste';
   let floorApplied = false;
-  if (backtest && backtest.relRmse > relSd) { relSd = backtest.relRmse; intervalSource = 'backtest'; }
+  if (chosenRolling && chosenRolling.relRmse > relSd) { relSd = chosenRolling.relRmse; intervalSource = 'pruebas'; }
+  else if (!chosenRolling && backtest && backtest.relRmse > relSd) { relSd = backtest.relRmse; intervalSource = 'pruebas'; }
   if (points.length < SHORT_HISTORY_MONTHS && relSd < SHORT_HISTORY_MIN_REL_SD) { relSd = SHORT_HISTORY_MIN_REL_SD; floorApplied = true; }
 
-  // Intervalo de predicción de la regresión: se ensancha cuanto más lejos del
-  // centro del histórico cae el mes proyectado.
+  // Intervalo de predicción de la regresión: con tendencia, se ensancha cuanto
+  // más lejos del centro del histórico cae el mes; sin tendencia es constante.
   const n = points.length;
   const tBar = fcMean(points.map((p) => p.t));
   const sxx = points.reduce((s, p) => s + (p.t - tBar) ** 2, 0);
@@ -2014,8 +2081,8 @@ export function computeSeasonalForecast(rows, monthsAhead, opts = {}) {
     const year = Math.floor(key / 12);
     const month = (key % 12) + 1;
     const t = key - key0;
-    const value = Math.max(0, fcPredict(model, t, month));
-    const se = relSd * Math.sqrt(1 + 1 / n + (sxx > 0 ? (t - tBar) ** 2 / sxx : 0));
+    const value = Math.max(0, fcPredict(forecastModel, t, month));
+    const se = relSd * Math.sqrt(kind === 'flat' ? 1 + 1 / FLAT_LEVEL_MONTHS : 1 + 1 / n + (sxx > 0 ? (t - tBar) ** 2 / sxx : 0));
     const half = FORECAST_INTERVAL_Z * se * value;
     const prior = actualByKey.has(key - 12) ? actualByKey.get(key - 12) : null;
     forecast.push({
@@ -2045,6 +2112,14 @@ export function computeSeasonalForecast(rows, monthsAhead, opts = {}) {
     missingPeriods, excludedPartial,
     excludedPeriods: history.filter((h) => h.excluded).map((h) => h.period),
     outliers, backtest, yoy,
+    // Método elegido y su error medido en varias pruebas hacia atrás.
+    method: {
+      kind, auto: !!canSelect,
+      trendMape: rolling && rolling.trend ? rolling.trend.mape : null,
+      flatMape: rolling && rolling.flat ? rolling.flat.mape : null,
+      origins: rolling ? rolling.origins : 0,
+    },
+    rolling: chosenRolling ? { origins: rolling.origins, ...chosenRolling } : null,
     interval: { level: FORECAST_INTERVAL_LEVEL, source: intervalSource, floorApplied },
   };
 }

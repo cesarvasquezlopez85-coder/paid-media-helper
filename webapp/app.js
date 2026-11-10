@@ -3677,17 +3677,19 @@ function renderForecastOptions() {
 // Semáforo de confiabilidad en lenguaje llano. Sale de la prueba contra el
 // pasado cuando hay histórico suficiente; si no, solo de cuántos meses hay.
 function forecastReliability(result) {
-  const bt = result.backtest;
+  const rl = result.rolling;
   let level;
-  if (result.monthsUsed < 18 || (bt && (bt.mape > 0.15 || bt.beatsNaive === false))) level = 'baja';
-  else if (!bt || result.monthsUsed < engine.SHORT_HISTORY_MONTHS || bt.mape > 0.08 || result.outliers.length) level = 'media';
+  if (result.monthsUsed < 18 || (rl && (rl.mape > 0.15 || rl.beatsNaive === false))) level = 'baja';
+  else if (!rl || result.monthsUsed < engine.SHORT_HISTORY_MONTHS || rl.mape > 0.08 || result.outliers.length) level = 'media';
   else level = 'alta';
-  const reason = bt
-    ? `Probamos el método con los últimos ${bt.holdout} meses reales, sin mostrárselos: se equivocó ${(bt.mape * 100).toFixed(1)}% en promedio por mes.`
+  const reason = rl
+    ? `Probamos el método ${rl.origins} ${rl.origins === 1 ? 'vez' : 'veces'} hacia atrás, cada vez sin ver los meses que proyectaba: se equivocó ${(rl.mape * 100).toFixed(1)}% en promedio por mes.`
     : `Solo hay ${result.monthsUsed} meses de datos: no alcanza para comprobarlo contra meses reales (se necesitan ${engine.MIN_MONTHS_FOR_BACKTEST}).`;
   const hints = [];
-  if (bt && bt.beatsNaive === false) hints.push('No mejora al método simple de repetir el año pasado.');
-  if (bt && result.monthsUsed < engine.SHORT_HISTORY_MONTHS) hints.push('Con 24 meses o más sería más confiable.');
+  if (rl && rl.mape > 0.25) hints.push('Las ventas cambian mucho de un mes a otro: toma la cifra como una referencia, no como una promesa.');
+  if (rl && rl.beatsNaive === false) hints.push('No mejora al método simple de repetir el año pasado.');
+  if (result.method.kind === 'flat') hints.push('Se proyectó sin tendencia (con el nivel de los últimos 12 meses) porque así acertó más en las pruebas.');
+  if (rl && result.monthsUsed < engine.SHORT_HISTORY_MONTHS) hints.push('Con 24 meses o más sería más confiable.');
   if (result.outliers.length) hints.push('Hay meses atípicos por revisar.');
   return { level, label: { alta: 'Alta', media: 'Media', baja: 'Baja' }[level], reason, hints };
 }
@@ -3872,8 +3874,11 @@ function renderForecastReady() {
   const first = result.history[0], last = result.history[result.history.length - 1];
   const fc = result.forecast;
   const totalForecast = fc.reduce((s2, f) => s2 + f.value, 0);
-  const totalLow = fc.reduce((s2, f) => s2 + f.low, 0);
-  const totalHigh = fc.reduce((s2, f) => s2 + f.high, 0);
+  // El rango del total NO es la suma de los rangos de cada mes: los errores de
+  // meses distintos no se dan todos a la vez, y sumarlos exagera. Se combinan
+  // los márgenes de cada mes en cuadratura (como errores independientes).
+  const totalLow = Math.max(0, totalForecast - Math.sqrt(fc.reduce((s2, f) => s2 + (f.value - f.low) ** 2, 0)));
+  const totalHigh = totalForecast + Math.sqrt(fc.reduce((s2, f) => s2 + (f.high - f.value) ** 2, 0));
   const yoy = result.yoy;
   const rel = forecastReliability(result);
   const trendPct = result.intercept > 0 ? (12 * result.slope / result.intercept) * 100 : null;
@@ -3892,6 +3897,7 @@ function renderForecastReady() {
       <summary>Ver cómo se calculó y qué tan confiable es</summary>
       <div class="fc-details-body">
         <h4 class="fc-h">¿Qué tan bien funciona?</h4>
+        ${result.method.auto ? `<p class="fc-p">Se probaron dos formas de proyectar, ${result.method.origins} veces hacia atrás cada una: <strong>con tendencia</strong> (se equivocó ${(result.method.trendMape * 100).toFixed(1)}% en promedio por mes) y <strong>sin tendencia</strong>, usando el nivel de los últimos 12 meses (${(result.method.flatMape * 100).toFixed(1)}%). Se usó la que acertó más: <strong>${result.method.kind === 'flat' ? 'sin tendencia' : 'con tendencia'}</strong>.</p>` : ''}
         ${renderForecastBacktest(result)}
 
         <h4 class="fc-h">Meses fuertes y flojos del año</h4>
@@ -3904,9 +3910,9 @@ function renderForecastReady() {
 
         <h4 class="fc-h">Cómo se calcula</h4>
         <ul class="fc-list">
-          <li>Se usaron ${result.monthsOfHistory} meses (${shortPeriodLabel(first.year, first.month)} a ${shortPeriodLabel(last.year, last.month)})${result.monthsUsed !== result.monthsOfHistory ? `, ${result.monthsUsed} en el cálculo` : ''}. La tendencia es ${trendPct === null ? 'N/D' : (trendPct >= 0 ? '+' : '') + trendPct.toFixed(1) + '%'} por año, sin contar la temporada.</li>
+          <li>Se usaron ${result.monthsOfHistory} meses (${shortPeriodLabel(first.year, first.month)} a ${shortPeriodLabel(last.year, last.month)})${result.monthsUsed !== result.monthsOfHistory ? `, ${result.monthsUsed} en el cálculo` : ''}. ${result.method.kind === 'flat' ? 'Se proyecta con el nivel de los últimos 12 meses y la temporada, sin tendencia.' : `La tendencia es ${trendPct === null ? 'N/D' : (trendPct >= 0 ? '+' : '') + trendPct.toFixed(1) + '%'} por año, sin contar la temporada.`}</li>
           <li>Se separa lo que sube o baja con el tiempo (tendencia) de lo que se repite cada año (temporada), y se proyectan juntas.</li>
-          <li>El rango probable cubre cerca del ${Math.round(result.interval.level * 100)}% de los casos y se ensancha cuanto más lejos está el mes${result.interval.floorApplied ? `; con menos de 24 meses se usa un mínimo de ±${(engine.SHORT_HISTORY_MIN_REL_SD * 100).toFixed(0)}%` : ''}. Es una referencia, no una garantía.</li>
+          <li>El rango probable cubre cerca del ${Math.round(result.interval.level * 100)}% de los casos${result.interval.source === 'pruebas' ? ' y sale del error real de las pruebas hacia atrás' : ''}${result.method.kind === 'trend' ? ' y se ensancha cuanto más lejos está el mes' : ''}${result.interval.floorApplied ? `; con menos de 24 meses se usa un mínimo de ±${(engine.SHORT_HISTORY_MIN_REL_SD * 100).toFixed(0)}%` : ''}. Es una referencia, no una garantía.</li>
           <li>No puede ver lo que el histórico no muestra: aperturas, remodelaciones, cambios de tarifa o eventos.</li>
           ${investment ? '<li>La inversión asume que cada $1 seguirá trayendo lo mismo que antes; si se escala mucho, ese retorno suele bajar.</li>' : ''}
           ${goal ? '<li>La meta es lo esperado × (1 + el % que escribiste).</li>' : ''}
