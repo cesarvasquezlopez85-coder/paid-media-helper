@@ -3623,6 +3623,7 @@ function renderForecastPage() {
       </div>
       <button class="btn-outline" data-action="forecast-demo">Usar datos de ejemplo</button>
       ${s.fileName ? `<div class="filename-hint">Archivo: <strong>${escapeHtml(s.fileName)}</strong></div>` : ''}
+      ${s.status === 'ready' ? '<button class="btn-outline" data-action="download-forecast-html">Descargar HTML</button>' : ''}
       ${hotelFieldHtml}
       <div class="seg-control">
         <button class="seg-btn ${s.monthsAhead === 3 ? 'active' : ''}" data-action="forecast-horizon-3">Proyectar 3 meses</button>
@@ -3821,7 +3822,7 @@ function renderForecastReady() {
   const yoy = result.yoy;
 
   const roasToolbar = (investment && investment.recentAvailable) ? `
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+    <div class="forecast-toolbar" style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
       <span style="font-size:12px;color:var(--color-text-muted)">ROAS combinado usado para la inversión:</span>
       <div class="seg-control">
         <button class="seg-btn ${investment.windowUsed === 'recent' ? 'active' : ''}" data-action="forecast-roas-recent">Últimos ${engine.ROAS_RECENT_MONTHS} meses</button>
@@ -4042,6 +4043,46 @@ function renderForecastChart(history, forecast, goalByPeriod, investmentByPeriod
       </svg>
       <div class="forecast-tooltip"></div>
     </div>`;
+}
+
+// Descarga de toda la proyección como una página HTML autocontenida (estilos
+// de la plataforma incrustados, gráficos en SVG, sin botones), para mandarla
+// por correo o guardarla como PDF con Ctrl+P. Usa los mismos renderizadores
+// de la pantalla, así que muestra exactamente los mismos números.
+async function downloadForecastHtml() {
+  const s = state.forecast;
+  if (s.status !== 'ready') return;
+  let model;
+  try { model = buildForecastModel(); } catch (err) { return; }
+  const { result, investment, goal, growthGoalPctNum } = model;
+
+  const box = document.createElement('div');
+  box.innerHTML = renderForecastReady();
+  box.querySelectorAll('button, .forecast-toolbar, .forecast-hover-col, .forecast-hover-guide, .forecast-tooltip').forEach((el) => el.remove());
+
+  const first = result.history[0], last = result.history[result.history.length - 1];
+  const allHotels = engine.listRevenueHotels(s.rows || []).filter((h) => h !== 'N/D');
+  const hotel = s.hotelFilter !== 'all' ? s.hotelFilter : (allHotels.length > 1 ? 'Todos los hoteles (sumados)' : (allHotels[0] || ''));
+  const meta = [
+    hotel ? `Hotel: ${hotel}` : null,
+    s.fileName ? `Archivo: ${s.fileName}` : null,
+    `Histórico: ${shortPeriodLabel(first.year, first.month)} a ${shortPeriodLabel(last.year, last.month)}`,
+    `Horizonte: ${s.monthsAhead} meses`,
+  ].filter(Boolean);
+  const meta2 = [
+    goal ? `Meta de crecimiento: proyección +${growthGoalPctNum}%` : null,
+    investment ? `ROAS combinado: ${investment.windowUsed === 'recent' ? `últimos ${investment.roasMonths} meses` : 'histórico completo'}` : null,
+    result.excludedPeriods.length ? `Meses excluidos del modelo: ${result.excludedPeriods.join(', ')}` : null,
+  ].filter(Boolean);
+  const today = new Date().toISOString().slice(0, 10);
+  const body = `
+    <h1>Proyección de ventas</h1>
+    <p class="meta">${meta.map(escapeHtml).join(' · ')}</p>
+    ${meta2.length ? `<p class="meta">${meta2.map(escapeHtml).join(' · ')}</p>` : ''}
+    <p class="meta">Generado el ${today}</p>
+    <div style="margin-top:16px">${box.innerHTML}</div>`;
+  const html = await campanasHtmlDocument('Proyección de ventas', body, true);
+  downloadTextFile(html, `proyeccion_ventas${hotel ? '_' + cambiosSlug(hotel) : ''}_${today}.html`, 'text/html');
 }
 
 function runForecastAnalysis(text, fileName) {
@@ -15282,6 +15323,7 @@ function handleAction(action) {
     case 'forecast-roas-recent': state.forecast.roasWindow = 'recent'; render(); break;
     case 'forecast-roas-all': state.forecast.roasWindow = 'all'; render(); break;
     case 'forecast-investment-demo': runForecastInvestmentAnalysis(engine.SAMPLE_INVESTMENT_CSV, 'inversion_ejemplo.csv'); break;
+    case 'download-forecast-html': downloadForecastHtml(); break;
     case 'download-forecast': {
       let model;
       try { model = buildForecastModel(); } catch (err) { break; }
