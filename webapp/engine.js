@@ -1805,60 +1805,247 @@ function linearRegression(points) {
 
 export const MIN_MONTHS_FOR_FORECAST = 12;
 
-// rows: salida de loadRevenueHistory, ya filtrada a un solo hotel y
-// ordenada cronológicamente con `t` reasignado desde 0 por el llamador.
-// monthsAhead: cuántos meses futuros proyectar.
-export function computeSeasonalForecast(rows, monthsAhead) {
-  if (rows.length < MIN_MONTHS_FOR_FORECAST) {
-    throw new Error(`Se necesitan al menos ${MIN_MONTHS_FOR_FORECAST} meses de histórico para calcular una proyección con estacionalidad — este archivo/filtro tiene ${rows.length}.`);
+// Backtest: se oculta el final del histórico, se proyecta y se compara contra
+// lo que de verdad pasó. Necesita al menos 18 meses para ajustar y 3 para
+// comparar. Más de 6 meses de prueba no aporta y le quita datos al ajuste.
+export const BACKTEST_MIN_TRAIN = 18;
+export const BACKTEST_MIN_HOLDOUT = 3;
+export const BACKTEST_MAX_HOLDOUT = 6;
+export const MIN_MONTHS_FOR_BACKTEST = BACKTEST_MIN_TRAIN + BACKTEST_MIN_HOLDOUT;
+
+// Rango de la proyección: cubre ~80% de los casos (z = 1.2816). Con menos de
+// 24 meses el error "dentro de la muestra" es engañosamente bajo (el modelo
+// tiene casi tantos parámetros como datos), así que se aplica un piso.
+export const FORECAST_INTERVAL_Z = 1.2816;
+export const FORECAST_INTERVAL_LEVEL = 0.8;
+export const SHORT_HISTORY_MONTHS = 24;
+export const SHORT_HISTORY_MIN_REL_SD = 0.08;
+
+const OUTLIER_MAD_MULT = 3;
+const OUTLIER_MIN_REL_DEV = 0.15;
+
+function fcMean(list) {
+  return list.length ? list.reduce((s, v) => s + v, 0) / list.length : 0;
+}
+
+function fcMedian(list) {
+  if (!list.length) return 0;
+  const sorted = list.slice().sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+const fcMonthKey = (year, month) => year * 12 + (month - 1);
+const fcPeriod = (year, month) => `${year}-${String(month).padStart(2, '0')}`;
+
+// Descomposición multiplicativa por iteraciones: se ajusta la tendencia sobre
+// la serie ya sin temporada, se recalcula la temporada contra esa tendencia, y
+// se repite hasta que se estabiliza. Así la tendencia no queda sesgada por la
+// temporada cuando el histórico no son años completos (la versión anterior
+// ajustaba la tendencia sobre los datos crudos, una sola vez).
+// points: [{ t, month, y }], con t = meses reales desde el primer mes.
+function fitDecomposition(points) {
+  let seasonal = new Array(13).fill(1);
+  let slope = 0;
+  let intercept = fcMean(points.map((p) => p.y));
+  for (let iter = 0; iter < 50; iter++) {
+    ({ slope, intercept } = linearRegression(points.map((p) => ({ x: p.t, y: p.y / seasonal[p.month] }))));
+    const ratios = Array.from({ length: 13 }, () => []);
+    points.forEach((p) => {
+      const trend = intercept + slope * p.t;
+      if (trend > 0) ratios[p.month].push(p.y / trend);
+    });
+    const raw = ratios.map((list) => (list.length ? fcMean(list) : 1));
+    const avg = fcMean(raw.slice(1));
+    const next = raw.map((v) => (avg > 0 ? v / avg : 1));
+    let delta = 0;
+    for (let m = 1; m <= 12; m++) delta = Math.max(delta, Math.abs(next[m] - seasonal[m]));
+    seasonal = next;
+    if (delta < 1e-7) break;
+  }
+  const counts = new Array(13).fill(0);
+  points.forEach((p) => {
+    if (intercept + slope * p.t > 0) counts[p.month] += 1;
+  });
+  return { slope, intercept, seasonal, counts };
+}
+
+const fcPredict = (model, t, month) => (model.intercept + model.slope * t) * model.seasonal[month];
+
+// Proyecta los últimos meses sin verlos y los compara con lo real. También
+// compara contra el método simple "igual que el mismo mes del año pasado",
+// para saber si el modelo de verdad aporta algo.
+function runBacktest(points) {
+  const n = points.length;
+  if (n < MIN_MONTHS_FOR_BACKTEST) return null;
+  const holdout = Math.min(BACKTEST_MAX_HOLDOUT, n - BACKTEST_MIN_TRAIN);
+  const train = points.slice(0, n - holdout);
+  const test = points.slice(n - holdout);
+  const model = fitDecomposition(train);
+  const actualByKey = new Map(points.map((p) => [p.key, p.y]));
+
+  const rows = test.map((p) => {
+    const predicted = Math.max(0, fcPredict(model, p.t, p.month));
+    const naive = actualByKey.has(p.key - 12) ? actualByKey.get(p.key - 12) : null;
+    return {
+      period: p.period, year: p.year, month: p.month,
+      actual: p.y, predicted, naive,
+      errPct: p.y > 0 ? (predicted - p.y) / p.y : null,
+    };
+  });
+
+  const measurable = rows.filter((r) => r.errPct !== null);
+  const mape = fcMean(measurable.map((r) => Math.abs(r.errPct)));
+  const relRmse = Math.sqrt(fcMean(measurable.map((r) => r.errPct * r.errPct)));
+  const totalActual = rows.reduce((s, r) => s + r.actual, 0);
+  const totalPredicted = rows.reduce((s, r) => s + r.predicted, 0);
+  const totalErrPct = totalActual > 0 ? (totalPredicted - totalActual) / totalActual : null;
+
+  const comparable = measurable.filter((r) => r.naive !== null);
+  const naiveMape = comparable.length ? fcMean(comparable.map((r) => Math.abs((r.naive - r.actual) / r.actual))) : null;
+  const modelMapeComparable = comparable.length ? fcMean(comparable.map((r) => Math.abs(r.errPct))) : null;
+  return {
+    holdout, rows, mape, relRmse, totalErrPct,
+    naiveMape, naiveMonths: comparable.length,
+    beatsNaive: naiveMape !== null && modelMapeComparable !== null ? modelMapeComparable < naiveMape : null,
+  };
+}
+
+// rows: salida de loadRevenueHistory ya filtrada a un solo hotel y ordenada
+// cronológicamente. El tiempo se calcula con el mes calendario real (no con el
+// número de fila), así que un mes faltante en el archivo no corre la tendencia
+// ni la temporada. monthsAhead: cuántos meses futuros proyectar.
+// opts.today: fecha de referencia (por defecto hoy) — el mes en curso y
+// cualquier mes posterior se descartan porque todavía no están completos.
+// opts.excludePeriods: ['2024-03', ...] meses reales que se conservan en la
+// gráfica pero no entran al ajuste (evento puntual, cierre, remodelación).
+export function computeSeasonalForecast(rows, monthsAhead, opts = {}) {
+  const today = opts.today || new Date();
+  const currentKey = fcMonthKey(today.getFullYear(), today.getMonth() + 1);
+  const excludeSet = new Set(opts.excludePeriods || []);
+
+  const sorted = rows.slice().sort((a, b) => (a.year - b.year) || (a.month - b.month));
+  const excludedPartial = sorted.filter((r) => fcMonthKey(r.year, r.month) >= currentKey).map((r) => r.period);
+  const complete = sorted.filter((r) => fcMonthKey(r.year, r.month) < currentKey);
+  if (!complete.length) {
+    throw new Error('Todos los meses del archivo son del mes en curso o posteriores; se necesitan meses ya cerrados.');
   }
 
-  const { slope, intercept } = linearRegression(rows.map((r) => ({ x: r.t, y: r.revenue })));
-  const trendAt = (t) => intercept + slope * t;
+  const key0 = fcMonthKey(complete[0].year, complete[0].month);
+  const history = complete.map((r) => ({
+    ...r,
+    key: fcMonthKey(r.year, r.month),
+    t: fcMonthKey(r.year, r.month) - key0,
+    excluded: excludeSet.has(r.period),
+  }));
+  const lastKey = history[history.length - 1].key;
 
-  const ratiosByMonth = Array.from({ length: 13 }, () => []);
-  rows.forEach((r) => {
-    const trend = trendAt(r.t);
-    if (trend > 0) ratiosByMonth[r.month].push(r.revenue / trend);
-  });
-  const rawIndex = ratiosByMonth.map((list) => list.length ? list.reduce((s, v) => s + v, 0) / list.length : 1);
-  const avgIndex = rawIndex.slice(1).reduce((s, v) => s + v, 0) / 12;
+  const missingPeriods = [];
+  const presentKeys = new Set(history.map((h) => h.key));
+  for (let k = key0; k <= lastKey; k++) {
+    if (!presentKeys.has(k)) missingPeriods.push(fcPeriod(Math.floor(k / 12), (k % 12) + 1));
+  }
+
+  const points = history.filter((h) => !h.excluded)
+    .map((h) => ({ key: h.key, t: h.t, month: h.month, year: h.year, period: h.period, y: h.revenue }));
+  if (points.length < MIN_MONTHS_FOR_FORECAST) {
+    const extra = history.length > points.length ? ` (${history.length - points.length} excluido(s) del modelo)` : '';
+    throw new Error(`Se necesitan al menos ${MIN_MONTHS_FOR_FORECAST} meses de histórico para calcular una proyección con estacionalidad — este archivo/filtro tiene ${points.length}${extra}.`);
+  }
+
+  const model = fitDecomposition(points);
+  const { slope, intercept, seasonal } = model;
   const seasonalIndex = {};
-  for (let m = 1; m <= 12; m++) seasonalIndex[m] = avgIndex > 0 ? rawIndex[m] / avgIndex : 1;
-  const monthsWithLowSample = [...Array(12).keys()].map((i) => i + 1).filter((m) => ratiosByMonth[m].length < 2);
+  for (let m = 1; m <= 12; m++) seasonalIndex[m] = seasonal[m];
+  const monthsWithLowSample = [...Array(12).keys()].map((i) => i + 1).filter((m) => model.counts[m] < 2);
 
-  const fitted = rows.map((r) => trendAt(r.t) * seasonalIndex[r.month]);
-  const residuals = rows.map((r, i) => r.revenue - fitted[i]);
-  const residualStd = Math.sqrt(residuals.reduce((s, e) => s + e * e, 0) / Math.max(1, rows.length - 2));
-  const meanAbsPctError = rows.reduce((s, r, i) => s + (r.revenue > 0 ? Math.abs(residuals[i]) / r.revenue : 0), 0) / rows.length;
-  const meanRevenue = rows.reduce((s, r) => s + r.revenue, 0) / rows.length;
-  const ssTot = rows.reduce((s, r) => s + (r.revenue - meanRevenue) ** 2, 0);
-  const ssRes = residuals.reduce((s, e) => s + e * e, 0);
+  history.forEach((h) => { h.fitted = fcPredict(model, h.t, h.month); });
+
+  // Error relativo (contra el valor ajustado) de los meses que sí entran al modelo.
+  const relErrors = history.filter((h) => !h.excluded && h.fitted > 0).map((h) => ({ h, e: (h.revenue - h.fitted) / h.fitted }));
+  const distinctMonths = new Set(points.map((p) => p.month)).size;
+  const dof = Math.max(1, points.length - (distinctMonths + 2));
+  const inSampleRelSd = Math.sqrt(relErrors.reduce((s, r) => s + r.e * r.e, 0) / dof);
+  const meanAbsPctError = fcMean(history.filter((h) => !h.excluded && h.revenue > 0).map((h) => Math.abs(h.revenue - h.fitted) / h.revenue));
+  const meanRevenue = fcMean(points.map((p) => p.y));
+  const ssTot = points.reduce((s, p) => s + (p.y - meanRevenue) ** 2, 0);
+  const ssRes = history.filter((h) => !h.excluded).reduce((s, h) => s + (h.revenue - h.fitted) ** 2, 0);
   const r2 = ssTot > 0 ? 1 - ssRes / ssTot : 0;
 
-  const history = rows.map((r, i) => ({ ...r, fitted: fitted[i] }));
+  // Meses que se desvían mucho del modelo: pueden ser un evento puntual que
+  // distorsiona la temporada. Se avisan, no se excluyen solos. Un mes muy
+  // atípico arrastra el índice de su mes calendario y hace parecer atípicos a
+  // los mismos meses de otros años; por eso se marca el peor, se reajusta sin
+  // él y solo se conservan los que siguen desviados.
+  const mad = fcMedian(relErrors.map((r) => Math.abs(r.e))) * 1.4826;
+  const devThreshold = Math.max(OUTLIER_MIN_REL_DEV, OUTLIER_MAD_MULT * mad);
+  const outliers = [];
+  let candidates = points.slice();
+  for (let round = 0; round < 5 && candidates.length >= MIN_MONTHS_FOR_FORECAST; round++) {
+    const m = round === 0 ? model : fitDecomposition(candidates);
+    const devs = candidates
+      .map((p) => ({ p, f: fcPredict(m, p.t, p.month) }))
+      .filter((d) => d.f > 0)
+      .map((d) => ({ ...d, e: (d.p.y - d.f) / d.f }));
+    const worst = devs.reduce((w, d) => (!w || Math.abs(d.e) > Math.abs(w.e) ? d : w), null);
+    if (!worst || Math.abs(worst.e) <= devThreshold) break;
+    outliers.push({ period: worst.p.period, year: worst.p.year, month: worst.p.month, revenue: worst.p.y, fitted: worst.f, devPct: worst.e });
+    candidates = candidates.filter((p) => p !== worst.p);
+  }
 
-  const lastRow = rows[rows.length - 1];
+  const backtest = runBacktest(points);
+
+  let relSd = inSampleRelSd;
+  let intervalSource = 'ajuste';
+  let floorApplied = false;
+  if (backtest && backtest.relRmse > relSd) { relSd = backtest.relRmse; intervalSource = 'backtest'; }
+  if (points.length < SHORT_HISTORY_MONTHS && relSd < SHORT_HISTORY_MIN_REL_SD) { relSd = SHORT_HISTORY_MIN_REL_SD; floorApplied = true; }
+
+  // Intervalo de predicción de la regresión: se ensancha cuanto más lejos del
+  // centro del histórico cae el mes proyectado.
+  const n = points.length;
+  const tBar = fcMean(points.map((p) => p.t));
+  const sxx = points.reduce((s, p) => s + (p.t - tBar) ** 2, 0);
+
+  const actualByKey = new Map(history.map((h) => [h.key, h.revenue]));
   const forecast = [];
   for (let i = 1; i <= monthsAhead; i++) {
-    const t = lastRow.t + i;
-    let month = lastRow.month + i;
-    let year = lastRow.year;
-    while (month > 12) { month -= 12; year += 1; }
-    const value = Math.max(0, trendAt(t) * seasonalIndex[month]);
+    const key = lastKey + i;
+    const year = Math.floor(key / 12);
+    const month = (key % 12) + 1;
+    const t = key - key0;
+    const value = Math.max(0, fcPredict(model, t, month));
+    const se = relSd * Math.sqrt(1 + 1 / n + (sxx > 0 ? (t - tBar) ** 2 / sxx : 0));
+    const half = FORECAST_INTERVAL_Z * se * value;
+    const prior = actualByKey.has(key - 12) ? actualByKey.get(key - 12) : null;
     forecast.push({
-      period: `${year}-${String(month).padStart(2, '0')}`,
-      year, month, t,
-      value,
-      low: Math.max(0, value - residualStd),
-      high: value + residualStd,
+      period: fcPeriod(year, month), year, month, t, value,
+      low: Math.max(0, value - half),
+      high: value + half,
+      prior,
+      yoyPct: prior !== null && prior > 0 ? value / prior - 1 : null,
     });
   }
 
+  const compared = forecast.filter((f) => f.prior !== null && f.prior > 0);
+  const yoyForecast = compared.reduce((s, f) => s + f.value, 0);
+  const yoyPrior = compared.reduce((s, f) => s + f.prior, 0);
+  const yoy = {
+    monthsCompared: compared.length,
+    forecastTotal: yoyForecast,
+    priorTotal: yoyPrior,
+    pct: yoyPrior > 0 ? yoyForecast / yoyPrior - 1 : null,
+  };
+
   return {
     history, forecast, seasonalIndex, monthsWithLowSample,
-    slope, intercept, r2, mape: meanAbsPctError, residualStd,
-    monthsOfHistory: rows.length,
+    slope, intercept, r2, mape: meanAbsPctError, relSd,
+    monthsOfHistory: history.length,
+    monthsUsed: points.length,
+    missingPeriods, excludedPartial,
+    excludedPeriods: history.filter((h) => h.excluded).map((h) => h.period),
+    outliers, backtest, yoy,
+    interval: { level: FORECAST_INTERVAL_LEVEL, source: intervalSource, floorApplied },
   };
 }
 
@@ -1946,22 +2133,36 @@ export function loadInvestmentHistory(text) {
 
 export const MIN_MONTHS_OVERLAP_FOR_ROAS = 3;
 
+// Con más de 12 meses en común, el ROAS "reciente" usa solo los últimos 12:
+// la eficiencia de hace dos o tres años rara vez es la de hoy. El ROAS
+// "histórico" usa todos los meses en común. Con 12 o menos, ambos coinciden.
+export const ROAS_RECENT_MONTHS = 12;
+
 // revenueHistory: `history` de computeSeasonalForecast (o cualquier arreglo
 // con period/revenue). investmentRows: salida de loadInvestmentHistory.
 // forecastRows: `forecast` de computeSeasonalForecast.
-export function computeRequiredInvestment(revenueHistory, investmentRows, forecastRows) {
+// opts.window: 'recent' (por defecto) o 'all'.
+export function computeRequiredInvestment(revenueHistory, investmentRows, forecastRows, opts = {}) {
   const investByPeriod = new Map(investmentRows.map((r) => [r.period, r.investment]));
   const overlap = revenueHistory
     .filter((r) => investByPeriod.has(r.period) && investByPeriod.get(r.period) > 0)
-    .map((r) => ({ period: r.period, revenue: r.revenue, investment: investByPeriod.get(r.period) }));
+    .map((r) => ({ period: r.period, revenue: r.revenue, investment: investByPeriod.get(r.period) }))
+    .sort((a, b) => (a.period < b.period ? -1 : a.period > b.period ? 1 : 0));
 
   if (overlap.length < MIN_MONTHS_OVERLAP_FOR_ROAS) {
     throw new Error(`Se necesitan al menos ${MIN_MONTHS_OVERLAP_FOR_ROAS} meses en común entre el histórico de ingresos y el de inversión para calcular un ROAS combinado — hay ${overlap.length}.`);
   }
 
-  const totalRevenue = overlap.reduce((s, o) => s + o.revenue, 0);
-  const totalInvestment = overlap.reduce((s, o) => s + o.investment, 0);
-  const blendedRoas = totalInvestment > 0 ? totalRevenue / totalInvestment : null;
+  const roasOf = (list) => {
+    const inv = list.reduce((s, o) => s + o.investment, 0);
+    return inv > 0 ? list.reduce((s, o) => s + o.revenue, 0) / inv : null;
+  };
+  const recentAvailable = overlap.length > ROAS_RECENT_MONTHS;
+  const recentList = recentAvailable ? overlap.slice(-ROAS_RECENT_MONTHS) : overlap;
+  const roasAll = roasOf(overlap);
+  const roasRecent = roasOf(recentList);
+  const windowUsed = opts.window === 'all' || !recentAvailable ? 'all' : 'recent';
+  const blendedRoas = windowUsed === 'recent' ? roasRecent : roasAll;
 
   const forecastWithInvestment = forecastRows.map((f) => ({
     ...f,
@@ -1969,17 +2170,21 @@ export function computeRequiredInvestment(revenueHistory, investmentRows, foreca
   }));
   const totalInvestmentNeeded = forecastWithInvestment.reduce((s, f) => s + (f.investmentNeeded || 0), 0);
 
-  return { blendedRoas, overlapMonths: overlap.length, forecastWithInvestment, totalInvestmentNeeded };
+  return {
+    blendedRoas, roasAll, roasRecent, recentAvailable, windowUsed,
+    overlapMonths: overlap.length,
+    roasMonths: windowUsed === 'recent' ? recentList.length : overlap.length,
+    forecastWithInvestment, totalInvestmentNeeded,
+  };
 }
 
 // ---------------------------------------------------------------------------
 // Meta de crecimiento (extensión de Función 7) — un gerente puede pedir
-// "quiero crecer X% los próximos meses". A pedido de cesar, ese X% se mide
-// contra el mismo mes real del año anterior (como se piensan las metas en
-// hotelería), no contra la proyección del modelo — son dos números
-// distintos a propósito: la proyección es "si nada cambia", la meta es "lo
-// que el gerente quiere lograr", y la brecha entre ambas es información útil
-// por sí misma.
+// "quiero crecer X% los próximos meses". El X% se SUMA A LA PROYECCIÓN del
+// modelo: meta = proyección × (1 + X%). (Hasta 2026-11-10 se medía contra el
+// mismo mes del año pasado; cesar lo corrigió: la meta es crecer X% por
+// encima de lo que el modelo espera "si nada cambia".) La comparación contra
+// el año pasado se conserva como dato informativo.
 // ---------------------------------------------------------------------------
 
 // history: `history` de computeSeasonalForecast (meses reales). forecastRows:
@@ -1988,19 +2193,31 @@ export function computeGrowthGoal(history, forecastRows, growthPct) {
   const byPeriod = new Map(history.map((r) => [r.period, r.revenue]));
   const factor = 1 + growthPct / 100;
 
-  let monthsWithoutBase = 0;
+  let monthsWithoutPrior = 0;
   const forecastWithGoal = forecastRows.map((f) => {
-    const priorPeriod = `${f.year - 1}-${String(f.month).padStart(2, '0')}`;
-    const priorRevenue = byPeriod.get(priorPeriod);
-    if (priorRevenue === undefined) {
-      monthsWithoutBase += 1;
-      return { ...f, goal: null };
-    }
-    return { ...f, goal: priorRevenue * factor };
+    const goal = f.value * factor;
+    const priorRevenue = byPeriod.get(`${f.year - 1}-${String(f.month).padStart(2, '0')}`);
+    if (priorRevenue === undefined || !(priorRevenue > 0)) monthsWithoutPrior += 1;
+    return {
+      ...f, goal, gap: goal - f.value,
+      goalVsPriorPct: priorRevenue > 0 ? goal / priorRevenue - 1 : null,
+    };
   });
 
-  const totalGoal = forecastWithGoal.reduce((s, f) => s + (f.goal || 0), 0);
-  return { forecastWithGoal, totalGoal, monthsWithoutBase };
+  const totalGoal = forecastWithGoal.reduce((s, f) => s + f.goal, 0);
+  const totalProjection = forecastWithGoal.reduce((s, f) => s + f.value, 0);
+  // Contra el año pasado solo se comparan los meses que tienen su equivalente.
+  const comparable = forecastWithGoal.filter((f) => f.goalVsPriorPct !== null);
+  const goalOnComparable = comparable.reduce((s, f) => s + f.goal, 0);
+  const projectionOnComparable = comparable.reduce((s, f) => s + f.value, 0);
+  const priorOnComparable = comparable.reduce((s, f) => s + f.prior, 0);
+  return {
+    forecastWithGoal, totalGoal, totalProjection,
+    gapTotal: totalGoal - totalProjection,
+    monthsWithoutPrior,
+    goalVsPriorPct: priorOnComparable > 0 ? goalOnComparable / priorOnComparable - 1 : null,
+    projectionVsPriorPct: priorOnComparable > 0 ? projectionOnComparable / priorOnComparable - 1 : null,
+  };
 }
 
 // Mismos 30 meses del ejemplo de ingresos, con una inversión mensual

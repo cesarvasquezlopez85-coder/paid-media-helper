@@ -133,6 +133,9 @@ const state = {
     rows: null, hotelFilter: 'all', monthsAhead: 6,
     investmentRows: null, investmentFileName: null, investmentError: null,
     growthGoalPct: '',
+    // Meses reales que el usuario excluye del ajuste (evento puntual), y
+    // qué ventana de meses usa el ROAS combinado ('recent' | 'all').
+    excludedPeriods: [], roasWindow: 'recent',
   },
 
   // Sección ROAS — solo existe conectada a Google Ads (el ROAS objetivo de
@@ -3629,7 +3632,7 @@ function renderForecastPage() {
       <div class="field">
         <label>Meta de crecimiento vs. mismo mes año pasado (opcional)</label>
         <input type="number" id="forecast-growth-goal" value="${escapeHtml(s.growthGoalPct)}" placeholder="ej. 20" step="0.1" style="width:100px" />
-        <p class="field-hint">Ej. "20" = cada mes proyectado se compara contra ese mismo mes real del año anterior × 1.20 — es la meta del gerente, no lo que el modelo espera "si nada cambia".</p>
+        <p class="field-hint">Ej. "20" = cada mes proyectado × 1.20 — la meta es crecer 20% por encima de lo que el modelo espera "si nada cambia". La tabla muestra además cuánto es esa meta frente al mismo mes del año pasado.</p>
       </div>
     </div>
     ${s.status === 'ready' ? renderForecastInvestmentPanel() : ''}
@@ -3656,30 +3659,23 @@ function renderForecastInvestmentPanel() {
     </div>`;
 }
 
-function renderForecastReady() {
+const fmtSignedPct = (v) => (v === null || v === undefined || Number.isNaN(v) ? 'N/D' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%`);
+
+// Arma todo lo que la pantalla y la descarga CSV necesitan, en un solo lugar,
+// para que los dos muestren exactamente los mismos números. Lanza si el
+// histórico no alcanza para proyectar.
+function buildForecastModel() {
   const s = state.forecast;
   const allRows = s.rows || [];
   const source = s.hotelFilter === 'all' ? aggregateRevenueByPeriod(allRows) : allRows.filter((r) => r.hotel === s.hotelFilter);
   const rows = source.slice().sort((a, b) => (a.year - b.year) || (a.month - b.month));
-  rows.forEach((r, i) => { r.t = i; });
-
-  let result;
-  try {
-    result = engine.computeSeasonalForecast(rows, s.monthsAhead);
-  } catch (err) {
-    return `<div class="error-panel"><strong>No se pudo calcular la proyección.</strong> ${escapeHtml(err.message)}</div>`;
-  }
-
-  const trendAt0 = result.intercept;
-  const growthPerYearPct = trendAt0 > 0 ? (12 * result.slope / trendAt0) * 100 : null;
-  const first = result.history[0], last = result.history[result.history.length - 1];
-  const totalForecast = result.forecast.reduce((s2, f) => s2 + f.value, 0);
+  const result = engine.computeSeasonalForecast(rows, s.monthsAhead, { excludePeriods: s.excludedPeriods });
 
   let investment = null;
   let investmentError = null;
   if (s.investmentRows && s.investmentRows.length) {
     try {
-      investment = engine.computeRequiredInvestment(result.history, s.investmentRows, result.forecast);
+      investment = engine.computeRequiredInvestment(result.history, s.investmentRows, result.forecast, { window: s.roasWindow });
     } catch (err) {
       investmentError = err.message || String(err);
     }
@@ -3688,72 +3684,208 @@ function renderForecastReady() {
 
   let goal = null;
   const growthGoalPctNum = parseFloat(s.growthGoalPct);
-  if (!Number.isNaN(growthGoalPctNum)) {
-    goal = engine.computeGrowthGoal(result.history, result.forecast, growthGoalPctNum);
-  }
+  if (!Number.isNaN(growthGoalPctNum)) goal = engine.computeGrowthGoal(result.history, result.forecast, growthGoalPctNum);
   const goalByPeriod = goal ? new Map(goal.forecastWithGoal.map((f) => [f.period, f.goal])) : null;
+  const gapByPeriod = goal ? new Map(goal.forecastWithGoal.map((f) => [f.period, f.gap])) : null;
+  const goalVsPriorByPeriod = goal ? new Map(goal.forecastWithGoal.map((f) => [f.period, f.goalVsPriorPct])) : null;
   const goalInvestmentByPeriod = (goal && investment && investment.blendedRoas)
     ? new Map(goal.forecastWithGoal.map((f) => [f.period, f.goal != null ? f.goal / investment.blendedRoas : null]))
     : null;
 
-  const lowDataWarning = (result.monthsOfHistory < 24 || result.monthsWithLowSample.length) ? `
-    <div class="error-panel" style="margin-bottom:16px">
-      <strong>Calidad del histórico limitada.</strong>
-      ${result.monthsOfHistory < 24 ? `Solo hay ${result.monthsOfHistory} meses de datos — con menos de 24 (2 años completos), el índice de temporada de algunos meses se calcula con una sola observación o ninguna.` : ''}
-      ${result.monthsWithLowSample.length ? ` Meses con muy poco dato para estimar su estacionalidad: ${result.monthsWithLowSample.map((m) => MONTH_ABBR_ES[m]).join(', ')}.` : ''}
-      Trata esta proyección como una referencia direccional, no como un número exacto.
+  // Cuánto más hay que invertir para llegar a la meta que para sostener la
+  // proyección, solo en los meses que tienen meta.
+  let extraInvestment = null;
+  if (goalInvestmentByPeriod && investmentByPeriod) {
+    let goalInv = 0, baseInv = 0;
+    goalInvestmentByPeriod.forEach((v, period) => {
+      if (v != null) { goalInv += v; baseInv += investmentByPeriod.get(period) || 0; }
+    });
+    extraInvestment = goalInv - baseInv;
+  }
+
+  return {
+    result, investment, investmentError, investmentByPeriod,
+    goal, growthGoalPctNum, goalByPeriod, gapByPeriod, goalVsPriorByPeriod, goalInvestmentByPeriod, extraInvestment,
+  };
+}
+
+function renderForecastNotices(result) {
+  const items = [];
+  const label = (p) => { const [y, m] = p.split('-').map(Number); return shortPeriodLabel(y, m); };
+
+  if (result.excludedPartial.length) {
+    items.push(`<li>Se dejó fuera ${result.excludedPartial.map(label).join(', ')} porque el mes todavía no termina: un mes a medias baja la tendencia y subestima la proyección. Ese mes sí se proyecta como parte del horizonte.</li>`);
+  }
+  if (result.missingPeriods.length) {
+    const shown = result.missingPeriods.slice(0, 6).map(label).join(', ');
+    items.push(`<li>Al archivo le faltan ${result.missingPeriods.length} mes(es): ${shown}${result.missingPeriods.length > 6 ? '…' : ''}. El modelo usa las fechas reales, así que la tendencia no se corre, pero confirma que no sean datos que se perdieron en la exportación.</li>`);
+  }
+  if (result.monthsUsed < engine.SHORT_HISTORY_MONTHS) {
+    items.push(`<li>Solo hay ${result.monthsUsed} meses de datos en el modelo: con menos de 24 (2 años completos), la temporada de algunos meses sale de una sola observación.${result.interval.floorApplied ? ` El rango se calcula con un piso de ±${(engine.SHORT_HISTORY_MIN_REL_SD * 100).toFixed(0)}% porque el error interno de un histórico corto es engañosamente bajo.` : ''}</li>`);
+  }
+  if (result.monthsWithLowSample.length) {
+    items.push(`<li>Meses con muy poco dato para estimar su temporada: ${result.monthsWithLowSample.map((m) => MONTH_ABBR_ES[m]).join(', ')}.</li>`);
+  }
+  result.outliers.forEach((o) => {
+    items.push(`<li><strong>${shortPeriodLabel(o.year, o.month)}</strong> se desvía ${fmtSignedPct(o.devPct)} de lo esperado (real ${fmtMoneyShort(o.revenue)} vs. ${fmtMoneyShort(o.fitted)}). Si fue un evento puntual (cierre, remodelación, evento), excluirlo evita que distorsione la temporada.
+      <button class="btn-outline sm" data-forecast-exclude="${escapeHtml(o.period)}">Excluir del modelo</button></li>`);
+  });
+  if (result.excludedPeriods.length) {
+    items.push(`<li>Excluidos del modelo: ${result.excludedPeriods.map((p) => `<strong>${label(p)}</strong> <button class="btn-outline sm" data-forecast-restore="${escapeHtml(p)}">Restaurar</button>`).join(' &nbsp; ')}</li>`);
+  }
+  if (!items.length) return '';
+  return `<div class="forecast-notice"><strong>Calidad del histórico</strong><ul>${items.join('')}</ul></div>`;
+}
+
+// Índice de temporada de cada mes calendario: cuánto se desvía de un mes
+// "normal" del año (+20% = un mes 20% por encima del promedio).
+function renderSeasonalIndexChart(seasonalIndex, lowSample) {
+  const W = 680, H = 200, ML = 16, MR = 16, MT = 26, MB = 30;
+  const plotW = W - ML - MR, plotH = H - MT - MB;
+  const vals = [...Array(12).keys()].map((i) => seasonalIndex[i + 1]);
+  const maxDev = Math.max(0.15, ...vals.map((v) => Math.abs(v - 1))) * 1.35;
+  const yMid = MT + plotH / 2;
+  const k = (plotH / 2) / maxDev;
+  const bw = plotW / 12;
+  const bars = vals.map((v, i) => {
+    const m = i + 1;
+    const low = lowSample.includes(m);
+    const h = Math.abs(v - 1) * k;
+    const x = ML + i * bw + bw * 0.18;
+    const y = v >= 1 ? yMid - h : yMid;
+    const color = v >= 1 ? 'var(--accent-600)' : 'var(--navy-800)';
+    const txtY = v >= 1 ? y - 5 : y + h + 12;
+    return `<g>
+      <title>${MONTH_ABBR_ES[m]}: ${fmtSignedPct(v - 1)} vs. un mes normal${low ? ' (menos de 2 observaciones, poco confiable)' : ''}</title>
+      <rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${(bw * 0.64).toFixed(1)}" height="${Math.max(1, h).toFixed(1)}" fill="${color}" fill-opacity="${low ? 0.35 : 0.9}" rx="2" />
+      <text x="${(x + bw * 0.32).toFixed(1)}" y="${txtY.toFixed(1)}" font-size="10" fill="var(--color-text-muted)" text-anchor="middle">${fmtSignedPct(v - 1).replace('.0%', '%')}${low ? '*' : ''}</text>
+      <text x="${(x + bw * 0.32).toFixed(1)}" y="${H - 8}" font-size="10" fill="var(--color-text-muted)" text-anchor="middle">${MONTH_ABBR_ES[m]}</text>
+    </g>`;
+  }).join('');
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;max-height:230px;display:block" xmlns="http://www.w3.org/2000/svg">
+      <line x1="${ML}" y1="${yMid.toFixed(1)}" x2="${W - MR}" y2="${yMid.toFixed(1)}" stroke="var(--color-border)" stroke-width="1" />
+      ${bars}
+    </svg>`;
+}
+
+function renderForecastBacktest(result) {
+  const bt = result.backtest;
+  if (!bt) {
+    return `<div class="card chart-card">
+      <h3 class="dense-chart-title">Prueba contra el pasado</h3>
+      <p style="margin:0;font-size:13px;color:var(--color-text-muted)">Se necesitan al menos ${engine.MIN_MONTHS_FOR_BACKTEST} meses de histórico para poder ocultar los últimos meses, proyectarlos y compararlos con lo real. Con ${result.monthsUsed} meses solo se ve el ajuste interno (error ${(result.mape * 100).toFixed(1)}%, R² ${result.r2.toFixed(2)}), que siempre luce mejor que la precisión real del modelo.</p>
+    </div>`;
+  }
+  const over = bt.totalErrPct !== null && bt.totalErrPct > 0;
+  const verdict = bt.beatsNaive === null ? ''
+    : bt.beatsNaive ? ' El modelo supera a ese método simple, así que sí aporta.'
+      : ' El modelo no supera a ese método simple: toma la proyección con cautela.';
+  return `<div class="card table-panel" style="margin-bottom:20px">
+      <div class="table-panel-head"><h3>Prueba contra el pasado</h3></div>
+      <p style="margin:0 0 12px;font-size:13px;line-height:1.5">
+        Se ocultaron los últimos ${bt.holdout} meses reales, se proyectaron sin verlos y se compararon con lo que pasó.
+        El modelo se desvió <strong>${(bt.mape * 100).toFixed(1)}%</strong> en promedio mes a mes y <strong>${bt.totalErrPct === null ? 'N/D' : Math.abs(bt.totalErrPct * 100).toFixed(1) + '% ' + (over ? 'de más' : 'de menos')}</strong> en el total.
+        ${bt.naiveMape !== null ? `El método simple "igual que el mismo mes del año pasado" se desvió ${(bt.naiveMape * 100).toFixed(1)}%.` : ''}${verdict}
+      </p>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Mes</th><th>Real</th><th>Proyectado sin verlo</th><th>Error</th><th>"Igual que año pasado"</th></tr></thead>
+          <tbody>${bt.rows.map((r) => `
+            <tr>
+              <td>${shortPeriodLabel(r.year, r.month)}</td>
+              <td>${fmtMoney(r.actual)}</td>
+              <td>${fmtMoney(r.predicted)}</td>
+              <td>${fmtSignedPct(r.errPct)}</td>
+              <td>${r.naive !== null && r.actual > 0 ? fmtSignedPct((r.naive - r.actual) / r.actual) : 'N/D'}</td>
+            </tr>`).join('')}</tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function renderForecastReady() {
+  const s = state.forecast;
+  let model;
+  try {
+    model = buildForecastModel();
+  } catch (err) {
+    return `<div class="error-panel"><strong>No se pudo calcular la proyección.</strong> ${escapeHtml(err.message)}${s.excludedPeriods.length ? ' <button class="btn-outline sm" data-forecast-restore-all="1">Restaurar meses excluidos</button>' : ''}</div>`;
+  }
+  const { result, investment, investmentError, investmentByPeriod, goal, growthGoalPctNum, goalByPeriod, gapByPeriod, goalVsPriorByPeriod, goalInvestmentByPeriod, extraInvestment } = model;
+
+  const trendAt0 = result.intercept;
+  const growthPerYearPct = trendAt0 > 0 ? (12 * result.slope / trendAt0) * 100 : null;
+  const first = result.history[0], last = result.history[result.history.length - 1];
+  const totalForecast = result.forecast.reduce((s2, f) => s2 + f.value, 0);
+  const bt = result.backtest;
+  const yoy = result.yoy;
+
+  const roasToolbar = (investment && investment.recentAvailable) ? `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+      <span style="font-size:12px;color:var(--color-text-muted)">ROAS combinado usado para la inversión:</span>
+      <div class="seg-control">
+        <button class="seg-btn ${investment.windowUsed === 'recent' ? 'active' : ''}" data-action="forecast-roas-recent">Últimos ${engine.ROAS_RECENT_MONTHS} meses</button>
+        <button class="seg-btn ${investment.windowUsed === 'all' ? 'active' : ''}" data-action="forecast-roas-all">Histórico completo</button>
+      </div>
     </div>` : '';
 
+  const gapText = goal ? `hay que vender ${fmtMoneyShort(goal.gapTotal)} más que la proyección` : '';
+
   return `
+    ${roasToolbar}
     <div class="stat-grid">
       <div class="card stat-card">
         <div class="stat-label">Histórico analizado</div>
         <div class="stat-value lg">${result.monthsOfHistory} meses</div>
-        <div class="stat-sub">${shortPeriodLabel(first.year, first.month)} a ${shortPeriodLabel(last.year, last.month)}</div>
+        <div class="stat-sub">${shortPeriodLabel(first.year, first.month)} a ${shortPeriodLabel(last.year, last.month)}${result.monthsUsed !== result.monthsOfHistory ? ` · ${result.monthsUsed} en el modelo` : ''}</div>
       </div>
       <div class="card stat-card ${growthPerYearPct !== null && growthPerYearPct < 0 ? 'danger' : 'accent'}">
         <div class="stat-label">Tendencia</div>
         <div class="stat-value lg">${growthPerYearPct === null ? 'N/D' : (growthPerYearPct >= 0 ? '+' : '') + growthPerYearPct.toFixed(1) + '%'}</div>
-        <div class="stat-sub">estimado por año, antes de aplicar temporada</div>
+        <div class="stat-sub">estimado por año, ya sin temporada</div>
       </div>
       <div class="card stat-card">
-        <div class="stat-label">Calidad del ajuste</div>
-        <div class="stat-value lg">${(result.mape * 100).toFixed(1)}%</div>
-        <div class="stat-sub">error promedio mes a mes (MAPE) · R² ${result.r2.toFixed(2)}</div>
+        <div class="stat-label">${bt ? 'Precisión comprobada' : 'Calidad del ajuste'}</div>
+        <div class="stat-value lg">${((bt ? bt.mape : result.mape) * 100).toFixed(1)}%</div>
+        <div class="stat-sub">${bt
+          ? `error mes a mes proyectando los últimos ${bt.holdout} meses sin verlos · ${fmtSignedPct(bt.totalErrPct)} en el total`
+          : `solo ajuste interno (R² ${result.r2.toFixed(2)}) · faltan datos para probarlo contra meses reales`}</div>
       </div>
       <div class="card stat-card accent">
         <div class="stat-label">Proyección próximos ${s.monthsAhead} meses</div>
         <div class="stat-value lg">${fmtMoneyShort(totalForecast)}</div>
-        <div class="stat-sub">suma de los ${s.monthsAhead} meses proyectados</div>
+        <div class="stat-sub">${yoy.pct !== null
+          ? `${fmtSignedPct(yoy.pct)} vs. el mismo periodo del año pasado${yoy.monthsCompared < s.monthsAhead ? ` (${yoy.monthsCompared} de ${s.monthsAhead} meses comparables)` : ''}`
+          : `suma de los ${s.monthsAhead} meses proyectados`}</div>
       </div>
       ${investment ? `
       <div class="card stat-card">
-        <div class="stat-label">ROAS combinado histórico</div>
+        <div class="stat-label">ROAS combinado ${investment.windowUsed === 'recent' ? `(últimos ${investment.roasMonths} meses)` : 'histórico'}</div>
         <div class="stat-value lg">${(investment.blendedRoas * 100).toFixed(0)}%</div>
-        <div class="stat-sub">todos los canales pagados · ${investment.overlapMonths} meses en común</div>
+        <div class="stat-sub">todos los canales pagados · ${investment.roasMonths} meses${investment.recentAvailable ? ` · ${investment.windowUsed === 'recent' ? 'histórico completo' : `últimos ${engine.ROAS_RECENT_MONTHS}`}: ${((investment.windowUsed === 'recent' ? investment.roasAll : investment.roasRecent) * 100).toFixed(0)}%` : ''}</div>
       </div>
       <div class="card stat-card accent">
         <div class="stat-label">Inversión necesaria (${s.monthsAhead} meses)</div>
         <div class="stat-value lg">${fmtMoneyShort(investment.totalInvestmentNeeded)}</div>
-        <div class="stat-sub">para sostener la venta proyectada, al ROAS histórico</div>
+        <div class="stat-sub">para sostener la venta proyectada, al ROAS indicado</div>
       </div>` : ''}
       ${goal ? `
       <div class="card stat-card" style="border-color:var(--ok-text)">
-        <div class="stat-label" style="color:var(--ok-text)">Meta (+${growthGoalPctNum}% vs. año pasado)</div>
+        <div class="stat-label" style="color:var(--ok-text)">Meta (proyección +${growthGoalPctNum}%)</div>
         <div class="stat-value lg">${fmtMoneyShort(goal.totalGoal)}</div>
-        <div class="stat-sub">${goal.monthsWithoutBase ? `${goal.monthsWithoutBase} mes(es) sin dato del año pasado, no incluidos` : `suma de los ${s.monthsAhead} meses`}</div>
+        <div class="stat-sub">${gapText}${goal.goalVsPriorPct !== null ? ` · equivale a ${fmtSignedPct(goal.goalVsPriorPct)} vs. el mismo periodo del año pasado` : ''}${goal.monthsWithoutPrior ? ` · ${goal.monthsWithoutPrior} mes(es) sin dato del año pasado para comparar` : ''}</div>
       </div>
       ${goalInvestmentByPeriod ? `
       <div class="card stat-card" style="border-color:var(--ok-text)">
         <div class="stat-label" style="color:var(--ok-text)">Inversión necesaria para la meta</div>
         <div class="stat-value lg">${fmtMoneyShort([...goalInvestmentByPeriod.values()].reduce((s2, v) => s2 + (v || 0), 0))}</div>
-        <div class="stat-sub">mismo ROAS histórico, aplicado a la meta en vez de la proyección</div>
+        <div class="stat-sub">${extraInvestment !== null ? `${extraInvestment >= 0 ? '+' : '−'}${fmtMoneyShort(Math.abs(extraInvestment))} sobre sostener la proyección` : 'mismo ROAS, aplicado a la meta'}</div>
       </div>` : ''}` : ''}
     </div>
 
     ${investmentError ? `<div class="error-panel" style="margin-bottom:16px"><strong>No se pudo calcular la inversión necesaria.</strong> ${escapeHtml(investmentError)}</div>` : ''}
 
-    ${lowDataWarning}
+    ${renderForecastNotices(result)}
 
     <div class="card chart-card">
       <h3 class="dense-chart-title">Histórico vs. ajuste del modelo, y proyección</h3>
@@ -3762,38 +3894,51 @@ function renderForecastReady() {
         <span style="color:var(--navy-800)">■</span> real &nbsp;
         <span style="color:var(--color-text-muted)">┄</span> ajuste del modelo (tendencia × temporada) &nbsp;
         <span style="color:var(--accent-600)">■</span> proyección &nbsp;
-        <span style="color:var(--accent-600);opacity:.4">■</span> rango estimado
+        <span style="color:var(--accent-600);opacity:.4">■</span> rango ~${Math.round(result.interval.level * 100)}% (se ensancha con el horizonte)
         ${goal ? `&nbsp; <span style="color:var(--ok-text)">┄</span> meta` : ''}
+        ${result.excludedPeriods.length ? `&nbsp; <span style="color:var(--danger)">○</span> excluido del modelo` : ''}
       </p>
     </div>
 
-    <div class="card table-panel">
+    <div class="card table-panel" style="margin-bottom:20px">
       <div class="table-panel-head">
         <h3>Proyección mensual</h3>
         <button class="btn-outline sm" data-action="download-forecast">Descargar CSV</button>
       </div>
       <div class="table-scroll">
         <table>
-          <thead><tr><th>Mes</th><th>Proyección</th><th>Rango bajo</th><th>Rango alto</th>${investment ? '<th>Inversión necesaria</th>' : ''}${goal ? '<th>Meta</th>' : ''}${goalInvestmentByPeriod ? '<th>Inversión para la meta</th>' : ''}</tr></thead>
+          <thead><tr><th>Mes</th><th>Proyección</th><th>Rango bajo</th><th>Rango alto</th><th>Mismo mes año pasado</th><th>Var. %</th>${investment ? '<th>Inversión necesaria</th>' : ''}${goal ? '<th>Meta</th><th>Meta vs. año pasado</th><th>Brecha vs. proyección</th>' : ''}${goalInvestmentByPeriod ? '<th>Inversión para la meta</th>' : ''}</tr></thead>
           <tbody>${result.forecast.map((f) => `
             <tr>
               <td>${shortPeriodLabel(f.year, f.month)}</td>
               <td>${fmtMoney(f.value)}</td>
               <td>${fmtMoney(f.low)}</td>
               <td>${fmtMoney(f.high)}</td>
+              <td>${f.prior !== null ? fmtMoney(f.prior) : 'N/D'}</td>
+              <td>${fmtSignedPct(f.yoyPct)}</td>
               ${investment ? `<td>${fmtMoney(investmentByPeriod.get(f.period))}</td>` : ''}
-              ${goal ? `<td>${goalByPeriod.get(f.period) != null ? fmtMoney(goalByPeriod.get(f.period)) : 'N/D'}</td>` : ''}
+              ${goal ? `<td>${goalByPeriod.get(f.period) != null ? fmtMoney(goalByPeriod.get(f.period)) : 'N/D'}</td>
+              <td>${fmtSignedPct(goalVsPriorByPeriod.get(f.period))}</td>
+              <td>${gapByPeriod.get(f.period) != null ? fmtMoney(gapByPeriod.get(f.period)) : 'N/D'}</td>` : ''}
               ${goalInvestmentByPeriod ? `<td>${goalInvestmentByPeriod.get(f.period) != null ? fmtMoney(goalInvestmentByPeriod.get(f.period)) : 'N/D'}</td>` : ''}
             </tr>`).join('')}</tbody>
         </table>
       </div>
     </div>
 
+    ${renderForecastBacktest(result)}
+
+    <div class="card chart-card">
+      <h3 class="dense-chart-title">Temporada por mes</h3>
+      ${renderSeasonalIndexChart(result.seasonalIndex, result.monthsWithLowSample)}
+      <p style="margin:10px 0 0;font-size:11.5px;color:var(--color-text-muted)">Cuánto se desvía cada mes de un mes "normal" del año: +20% = un mes 20% por encima del promedio. ${result.monthsWithLowSample.length ? '* = menos de 2 observaciones, poco confiable.' : ''}</p>
+    </div>
+
     <p class="footnote">
-      Método: regresión lineal de ingresos contra el tiempo para la tendencia, más un índice de temporada por mes calendario (promedio de cuánto se desvía cada mes de la tendencia en el histórico) — no es un modelo estadístico de caja negra, y no reemplaza el criterio de quien conoce la operación del hotel.
-      El rango bajo/alto se calcula con el error histórico del modelo (±1 desviación estándar de los residuos) — es una referencia de incertidumbre, no un intervalo de confianza estadístico riguroso.
-      ${investment ? ' La inversión necesaria usa un ROAS combinado (todo lo pagado vs. todo el ingreso del hotel en los meses donde hay ambos datos) — no distingue canal de inversión ni canal de venta, y asume que esa eficiencia histórica se mantiene igual hacia adelante; no considera rendimientos decrecientes.' : ''}
-      ${goal ? ` La meta de crecimiento no sale del modelo — es lo que el gerente quiere lograr, calculada contra el mismo mes real del año anterior (no contra la proyección). Si algún mes no tiene su equivalente del año pasado en el histórico cargado, queda como N/D en vez de inventar un número.` : ''}
+      Método: descomposición multiplicativa por iteraciones — se ajusta una tendencia lineal sobre la serie ya sin temporada, se recalcula la temporada de cada mes contra esa tendencia, y se repite hasta que se estabiliza. El tiempo usa los meses reales del calendario (un mes faltante no corre el modelo) y el mes en curso se descarta porque aún no está completo. No es un modelo de caja negra, y no reemplaza el criterio del equipo ante eventos que el histórico no puede ver (aperturas, remodelaciones, cambios de tarifa).
+      El rango cubre ~${Math.round(result.interval.level * 100)}% de los casos y se ensancha cuanto más lejos está el mes proyectado. Se calcula con el mayor entre el error interno del ajuste y el error de la prueba contra el pasado${result.interval.floorApplied ? `, con un piso de ±${(engine.SHORT_HISTORY_MIN_REL_SD * 100).toFixed(0)}% por histórico corto` : ''} — es una referencia de incertidumbre, no un intervalo de confianza estadístico riguroso.
+      ${investment ? ` La inversión necesaria usa un ROAS combinado (todo lo pagado vs. todo el ingreso del hotel en los meses donde hay ambos datos${investment.windowUsed === 'recent' ? `, últimos ${investment.roasMonths}` : ''}) — no distingue canal de inversión ni canal de venta, y asume que esa eficiencia se mantiene igual a distintos niveles de inversión, algo que en la práctica deja de cumplirse cuando se escala mucho.` : ''}
+      ${goal ? ` La meta de crecimiento es la proyección × (1 + el % escrito): lo que el gerente quiere lograr por encima de lo que el modelo espera "si nada cambia". La brecha es meta − proyección, y "Meta vs. año pasado" es solo informativa.` : ''}
     </p>
   `;
 }
@@ -3862,12 +4007,17 @@ function renderForecastChart(history, forecast, goalByPeriod, investmentByPeriod
     let lines;
     if (isHistory) {
       lines = [shortPeriodLabel(src.year, src.month), `Real: ${fmtMoney(src.revenue)}`, `Ajuste del modelo: ${fmtMoney(src.fitted)}`];
+      if (src.excluded) lines.push('Excluido del modelo');
     } else {
       lines = [shortPeriodLabel(src.year, src.month), `Proyección: ${fmtMoney(src.value)}`, `Rango: ${fmtMoney(src.low)} – ${fmtMoney(src.high)}`];
+      if (src.prior !== null && src.prior !== undefined) lines.push(`Mismo mes año pasado: ${fmtMoney(src.prior)} (${src.yoyPct === null ? 'N/D' : (src.yoyPct >= 0 ? '+' : '') + (src.yoyPct * 100).toFixed(1) + '%'})`);
       const inv = investmentByPeriod && investmentByPeriod.get(src.period);
       if (inv != null) lines.push(`Inversión necesaria: ${fmtMoney(inv)}`);
       const g = goalByPeriod && goalByPeriod.get(src.period);
-      if (g != null) lines.push(`Meta: ${fmtMoney(g)}`);
+      if (g != null) {
+        const prior = src.prior;
+        lines.push(`Meta: ${fmtMoney(g)}${prior > 0 ? ` (${g / prior - 1 >= 0 ? '+' : ''}${((g / prior - 1) * 100).toFixed(1)}% vs. año pasado)` : ''}`);
+      }
       const gInv = goalInvestmentByPeriod && goalInvestmentByPeriod.get(src.period);
       if (gInv != null) lines.push(`Inversión para la meta: ${fmtMoney(gInv)}`);
     }
@@ -3884,6 +4034,7 @@ function renderForecastChart(history, forecast, goalByPeriod, investmentByPeriod
         <path d="${forecastPath}" fill="none" stroke="var(--accent-600)" stroke-width="2.5" />
         <path d="${actualPath}" fill="none" stroke="var(--navy-800)" stroke-width="2.5" />
         ${goalPath ? `<path d="${goalPath}" fill="none" stroke="var(--ok-text)" stroke-width="2" stroke-dasharray="1 4" stroke-linecap="round" />` : ''}
+        ${history.filter((h) => h.excluded).map((h) => `<circle cx="${x(h.t).toFixed(1)}" cy="${y(h.revenue).toFixed(1)}" r="4.5" fill="#fff" stroke="var(--danger)" stroke-width="1.8" />`).join('')}
         <line x1="${x(lastHist.t).toFixed(1)}" y1="${MT}" x2="${x(lastHist.t).toFixed(1)}" y2="${H - MB}" stroke="var(--color-border)" stroke-width="1" stroke-dasharray="2 3" />
         <line class="forecast-hover-guide" x1="0" y1="${MT}" x2="0" y2="${H - MB}" stroke="var(--navy-800)" stroke-width="1" style="opacity:0" />
         ${xLabels}
@@ -3898,7 +4049,7 @@ function runForecastAnalysis(text, fileName) {
   try {
     const rows = engine.loadRevenueHistory(text);
     if (!rows.length) throw new Error('No se encontraron filas válidas — revisa el formato de las columnas de mes e ingresos.');
-    Object.assign(s, { status: 'ready', rows, fileName, hotelFilter: 'all' });
+    Object.assign(s, { status: 'ready', rows, fileName, hotelFilter: 'all', excludedPeriods: [] });
   } catch (err) {
     Object.assign(s, { status: 'error', error: err.message || String(err), fileName });
   }
@@ -14437,8 +14588,23 @@ function bindEvents() {
   const forecastHotelFilter = document.getElementById('forecast-hotel-filter');
   if (forecastHotelFilter) forecastHotelFilter.addEventListener('change', (e) => {
     state.forecast.hotelFilter = e.target.value;
+    state.forecast.excludedPeriods = [];
     render();
   });
+
+  document.querySelectorAll('[data-forecast-exclude]').forEach((btn) => btn.addEventListener('click', () => {
+    const p = btn.dataset.forecastExclude;
+    if (!state.forecast.excludedPeriods.includes(p)) state.forecast.excludedPeriods = [...state.forecast.excludedPeriods, p];
+    render();
+  }));
+  document.querySelectorAll('[data-forecast-restore]').forEach((btn) => btn.addEventListener('click', () => {
+    state.forecast.excludedPeriods = state.forecast.excludedPeriods.filter((p) => p !== btn.dataset.forecastRestore);
+    render();
+  }));
+  document.querySelectorAll('[data-forecast-restore-all]').forEach((btn) => btn.addEventListener('click', () => {
+    state.forecast.excludedPeriods = [];
+    render();
+  }));
 
   const forecastGrowthGoal = document.getElementById('forecast-growth-goal');
   // 'change' (no 'input') a propósito: re-renderizar en cada tecla reconstruye
@@ -15113,34 +15279,26 @@ function handleAction(action) {
     case 'forecast-horizon-3': state.forecast.monthsAhead = 3; render(); break;
     case 'forecast-horizon-6': state.forecast.monthsAhead = 6; render(); break;
     case 'forecast-horizon-12': state.forecast.monthsAhead = 12; render(); break;
+    case 'forecast-roas-recent': state.forecast.roasWindow = 'recent'; render(); break;
+    case 'forecast-roas-all': state.forecast.roasWindow = 'all'; render(); break;
     case 'forecast-investment-demo': runForecastInvestmentAnalysis(engine.SAMPLE_INVESTMENT_CSV, 'inversion_ejemplo.csv'); break;
     case 'download-forecast': {
-      const s = state.forecast;
-      const source = s.hotelFilter === 'all' ? aggregateRevenueByPeriod(s.rows || []) : (s.rows || []).filter((r) => r.hotel === s.hotelFilter);
-      const rows = source.slice().sort((a, b) => (a.year - b.year) || (a.month - b.month));
-      rows.forEach((r, i) => { r.t = i; });
-      const result = engine.computeSeasonalForecast(rows, s.monthsAhead);
-      let investment = null;
-      if (s.investmentRows && s.investmentRows.length) {
-        try { investment = engine.computeRequiredInvestment(result.history, s.investmentRows, result.forecast); } catch (err) { /* se omite la columna si no se puede calcular */ }
-      }
-      let goal = null;
-      const growthGoalPctNum = parseFloat(s.growthGoalPct);
-      if (!Number.isNaN(growthGoalPctNum)) goal = engine.computeGrowthGoal(result.history, result.forecast, growthGoalPctNum);
-      const goalByPeriod = goal ? new Map(goal.forecastWithGoal.map((f) => [f.period, f.goal])) : null;
-      const goalInvestmentByPeriod = (goal && investment && investment.blendedRoas)
-        ? new Map(goal.forecastWithGoal.map((f) => [f.period, f.goal != null ? f.goal / investment.blendedRoas : null]))
-        : null;
-
-      const header = ['Mes', 'Proyección', 'Rango bajo', 'Rango alto'];
+      let model;
+      try { model = buildForecastModel(); } catch (err) { break; }
+      const { result, investment, investmentByPeriod, goal, goalByPeriod, gapByPeriod, goalVsPriorByPeriod, goalInvestmentByPeriod } = model;
+      const header = ['Mes', 'Proyección', 'Rango bajo', 'Rango alto', 'Mismo mes año pasado', 'Var. % vs. año pasado'];
       if (investment) header.push('Inversión necesaria');
-      if (goal) header.push('Meta');
+      if (goal) header.push('Meta', 'Meta vs. año pasado', 'Brecha vs. proyección');
       if (goalInvestmentByPeriod) header.push('Inversión para la meta');
-      const investmentByPeriod = investment ? new Map(investment.forecastWithInvestment.map((f) => [f.period, f.investmentNeeded])) : null;
       const data = [header, ...result.forecast.map((f) => {
-        const row = [f.period, f.value.toFixed(2), f.low.toFixed(2), f.high.toFixed(2)];
+        const row = [f.period, f.value.toFixed(2), f.low.toFixed(2), f.high.toFixed(2),
+          f.prior !== null ? f.prior.toFixed(2) : '', f.yoyPct !== null ? (f.yoyPct * 100).toFixed(1) + '%' : ''];
         if (investment) row.push((investmentByPeriod.get(f.period) || 0).toFixed(2));
-        if (goal) row.push(goalByPeriod.get(f.period) != null ? goalByPeriod.get(f.period).toFixed(2) : '');
+        if (goal) {
+          row.push(goalByPeriod.get(f.period) != null ? goalByPeriod.get(f.period).toFixed(2) : '');
+          row.push(goalVsPriorByPeriod.get(f.period) != null ? (goalVsPriorByPeriod.get(f.period) * 100).toFixed(1) + '%' : '');
+          row.push(gapByPeriod.get(f.period) != null ? gapByPeriod.get(f.period).toFixed(2) : '');
+        }
         if (goalInvestmentByPeriod) row.push(goalInvestmentByPeriod.get(f.period) != null ? goalInvestmentByPeriod.get(f.period).toFixed(2) : '');
         return row;
       })];
