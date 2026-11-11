@@ -1756,12 +1756,27 @@ class Handler(SimpleHTTPRequestHandler):
                 """,
                 (user["id"],),
             ).fetchall()
+            # Cuentas de cada MCC que siguen vigiladas (sirve para filtrar Campañas por MCC).
+            group_accounts = {}
+            for r in conn.execute(
+                """
+                SELECT ga.group_customer_id, ga.customer_id
+                FROM user_pacing_mcc_group_accounts ga
+                JOIN user_pacing_watchlist w ON w.user_id = ga.user_id AND w.customer_id = ga.customer_id
+                WHERE ga.user_id = ?
+                """,
+                (user["id"],),
+            ).fetchall():
+                group_accounts.setdefault(r["group_customer_id"], []).append(r["customer_id"])
         finally:
             conn.close()
         self._send_json(200, {
             "watchlist": [{"customer_id": r["customer_id"], "account_name": r["account_name"]} for r in rows],
             "mcc_groups": [
-                {"group_customer_id": g["group_customer_id"], "group_name": g["group_name"], "watched": g["watched"]}
+                {
+                    "group_customer_id": g["group_customer_id"], "group_name": g["group_name"], "watched": g["watched"],
+                    "account_ids": group_accounts.get(g["group_customer_id"], []),
+                }
                 for g in groups
             ],
         })
