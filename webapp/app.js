@@ -245,7 +245,7 @@ const state = {
   campanas: {
     watchlistStatus: 'idle', watchlist: [], status: 'idle', error: null, partial: [], rows: [], simulated: false,
     dateFrom: hotelDefaultDates().from, dateTo: hotelDefaultDates().to, loadToken: 0,
-    hotelBy: 'cuenta', hotelFilter: 'all', typeFilter: 'all', statusFilter: 'ENABLED', sortBy: 'cost', search: '',
+    hotelBy: 'cuenta', hotelFilter: 'all', typeFilter: [], statusFilter: 'ENABLED', sortBy: 'cost', search: '',
     mccGroups: [], mccFilter: 'all', // MCCs agregados en Ritmo de consumo: [{group_customer_id, group_name, account_ids}]
     confirm: null, busy: {}, notice: null,
     loadedFrom: '', loadedTo: '', // rango con el que se trajo la tabla; el detalle de cada campaña usa el mismo
@@ -12777,7 +12777,7 @@ function loadCampanas() {
       })));
       c.partial = results.filter((x) => x.error).map((x) => `${nameOf(x.acc)}: ${x.error}`);
       c.simulated = results.some((x) => x.d && x.d.simulated);
-      c.hotelFilter = 'all'; c.typeFilter = 'all';
+      c.hotelFilter = 'all'; c.typeFilter = [];
       c.status = 'ready';
       render();
     })
@@ -12828,7 +12828,7 @@ function campanasFilteredRows() {
   let rows = campanasMccRows().filter((r) => {
     if (c.statusFilter !== 'all' && r.status !== c.statusFilter) return false;
     if (c.hotelFilter !== 'all' && campanasHotelOf(r) !== c.hotelFilter) return false;
-    if (c.typeFilter !== 'all' && r.channel_type !== c.typeFilter) return false;
+    if (c.typeFilter.length && !c.typeFilter.includes(r.channel_type)) return false;
     if (q && !r.campaign_name.toLowerCase().includes(q) && !r.account_name.toLowerCase().includes(q)) return false;
     return true;
   });
@@ -12937,6 +12937,7 @@ function renderCampanasPage() {
   const hotels = [...new Set(mccRows.map(campanasHotelOf))].sort((a, b) => a.localeCompare(b));
   const types = [...new Set(mccRows.map((r) => r.channel_type))].sort((a, b) => campanasTypeLabel(a).localeCompare(campanasTypeLabel(b)));
   const opt = (value, label, current) => `<option value="${escapeHtml(value)}" ${current === value ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+  const typeChip = (on, attrs, label) => `<button type="button" class="${on ? 'btn-accent' : 'btn-outline'} xs" ${attrs} aria-pressed="${on}">${escapeHtml(label)}</button>`;
   const mccField = c.mccGroups.length ? `
       <div class="field"><label>MCC</label>
         <select id="camp-mcc-filter" style="width:260px">${opt('all', 'Todos los MCC', c.mccFilter)}${c.mccGroups.map((g) => opt(g.group_customer_id, `${g.group_name || g.group_customer_id} (${g.account_ids.length} ${g.account_ids.length === 1 ? 'cuenta' : 'cuentas'})`, c.mccFilter)).join('')}</select>
@@ -12950,8 +12951,11 @@ function renderCampanasPage() {
       <div class="field"><label>Hotel</label>
         <select id="camp-hotel-filter" style="width:240px">${opt('all', 'Todos los hoteles', c.hotelFilter)}${hotels.map((h) => opt(h, h, c.hotelFilter)).join('')}</select>
       </div>
-      <div class="field"><label>Tipo de campaña</label>
-        <select id="camp-type-filter" style="width:200px">${opt('all', 'Todos los tipos', c.typeFilter)}${types.map((t) => opt(t, campanasTypeLabel(t), c.typeFilter)).join('')}</select>
+      <div class="field"><label>Tipo de campaña <span class="field-hint" style="font-weight:400">(puedes marcar varios)</span></label>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;max-width:480px">
+          ${typeChip(!c.typeFilter.length, 'data-camp-type="__all"', 'Todos')}
+          ${types.map((t) => typeChip(c.typeFilter.includes(t), `data-camp-type="${escapeHtml(t)}"`, campanasTypeLabel(t))).join('')}
+        </div>
       </div>
       <div class="field"><label>Estado</label>
         <select id="camp-status-filter" style="width:150px">${opt('ENABLED', 'Activas', c.statusFilter)}${opt('PAUSED', 'Pausadas', c.statusFilter)}${opt('all', 'Todas', c.statusFilter)}</select>
@@ -13805,7 +13809,7 @@ function campanasFilterSummary() {
     out.push(`MCC: ${g ? (g.group_name || g.group_customer_id) : c.mccFilter}`);
   }
   if (c.hotelFilter !== 'all') out.push(`Hotel (según ${c.hotelBy === 'nombre' ? 'el nombre de la campaña' : 'la cuenta'}): ${c.hotelFilter}`);
-  if (c.typeFilter !== 'all') out.push(`Tipo: ${campanasTypeLabel(c.typeFilter)}`);
+  if (c.typeFilter.length) out.push(`Tipo: ${c.typeFilter.map(campanasTypeLabel).join(' + ')}`);
   if ((c.search || '').trim()) out.push(`Búsqueda: "${c.search.trim()}"`);
   out.push(`Orden: ${sortLabels[c.sortBy] || c.sortBy}`);
   return out;
@@ -14192,9 +14196,17 @@ function bindEvents() {
   campOn('camp-date-from', 'change', (e) => { state.campanas.dateFrom = e.target.value; });
   campOn('camp-date-to', 'change', (e) => { state.campanas.dateTo = e.target.value; });
   campOn('camp-hotel-by', 'change', (e) => { state.campanas.hotelBy = e.target.value; state.campanas.hotelFilter = 'all'; render(); });
-  campOn('camp-mcc-filter', 'change', (e) => { state.campanas.mccFilter = e.target.value; state.campanas.hotelFilter = 'all'; state.campanas.typeFilter = 'all'; render(); });
+  campOn('camp-mcc-filter', 'change', (e) => { state.campanas.mccFilter = e.target.value; state.campanas.hotelFilter = 'all'; state.campanas.typeFilter = []; render(); });
   campOn('camp-hotel-filter', 'change', (e) => { state.campanas.hotelFilter = e.target.value; render(); });
-  campOn('camp-type-filter', 'change', (e) => { state.campanas.typeFilter = e.target.value; render(); });
+  document.querySelectorAll('[data-camp-type]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const c = state.campanas;
+      const t = btn.dataset.campType;
+      if (t === '__all') c.typeFilter = [];
+      else c.typeFilter = c.typeFilter.includes(t) ? c.typeFilter.filter((x) => x !== t) : [...c.typeFilter, t];
+      render();
+    });
+  });
   campOn('camp-status-filter', 'change', (e) => { state.campanas.statusFilter = e.target.value; render(); });
   campOn('camp-sort', 'change', (e) => { state.campanas.sortBy = e.target.value; render(); });
   campOn('camp-search', 'input', (e) => { state.campanas.search = e.target.value; render(); hotelRefocus('camp-search'); });
