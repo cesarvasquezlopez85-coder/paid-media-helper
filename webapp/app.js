@@ -8338,7 +8338,7 @@ function openHotelCampaign(campaignId, keepFlow) {
   const a = s.api;
   const d = s.detail;
   d.campaignId = campaignId; d.status = 'loading'; d.error = null;
-  if (!keepFlow) { d.edits = {}; d.ai = null; d.note = null; d.flow = { status: 'idle', preview: null, result: null, error: null }; }
+  if (!keepFlow) { d.edits = {}; d.ai = null; d.flow = { status: 'idle', preview: null, result: null, error: null }; }
   render();
 
   const params = new URLSearchParams({ customer_id: hotelCustomerId() || '', campaign_id: campaignId, date_from: a.dateFrom, date_to: a.dateTo });
@@ -8479,90 +8479,8 @@ function renderHotelPrice() {
   } else if (data.daily === null) {
     daily = '<p class="footnote">No se pudo traer la evolución diaria.</p>';
   }
-  return head(`${verdict}${buckets}${daily}${renderHotelNote(data)}
+  return head(`${verdict}${buckets}${daily}
     <p class="footnote" style="margin:12px 0 0">Los precios que se comparan son los del feed de tarifas de Google Hotel Ads. Si el hotel no cambia sus tarifas, la puja y los modificadores de abajo no modifican esta posición de precio.</p>`);
-}
-
-// Nota para el revenue manager del hotel: se ofrece cuando el precio sale caro. El servidor arma los datos y revisa
-// que cada cifra del texto salga de ellos; la persona edita y envía la nota por su cuenta (la plataforma no envía nada).
-function hotelPriceNeedsNote(price) {
-  const sm = price && price.summary;
-  if (!sm || !sm.impressions || sm.price_diff === null || sm.price_diff === undefined) return false;
-  const bs = price.buckets || [];
-  const total = bs.reduce((acc, b) => acc + b.impressions, 0);
-  const notLowest = total ? (bs.filter((b) => b.bucket === 'NOT_LOWEST').reduce((acc, b) => acc + b.impressions, 0) / total) * 100 : 0;
-  return sm.price_diff > 0.02 || notLowest >= 30;
-}
-
-function runHotelNote() {
-  const s = state.hotel;
-  const a = s.api;
-  const d = s.detail;
-  const campaignId = d.campaignId;
-  d.note = { status: 'loading', error: null, data: null, copied: false, campaignId };
-  render();
-  fetch('/api/ai/nota-hotel', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ customer_id: hotelCustomerId(), campaign_id: campaignId, campaign_name: (d.data && d.data.campaign_name) || '', date_from: a.dateFrom, date_to: a.dateTo }),
-  })
-    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
-    .then(({ ok, data }) => {
-      if (!ok) throw new Error(data.error || 'Error desconocido.');
-      if (d.campaignId !== campaignId) return;
-      d.note = { status: 'ready', error: null, data, copied: false, campaignId };
-      render();
-    })
-    .catch((err) => {
-      if (d.campaignId !== campaignId) return;
-      d.note = { status: 'error', error: err.message || String(err), data: null, copied: false, campaignId };
-      render();
-    });
-}
-
-function copyHotelNote() {
-  const d = state.hotel.detail;
-  if (!d.note || !d.note.data) return;
-  const text = `Asunto: ${d.note.data.asunto}\n\n${d.note.data.mensaje}`;
-  const done = () => { d.note.copied = true; render(); };
-  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done).catch(() => {});
-  else {
-    const ta = document.createElement('textarea');
-    ta.value = text; document.body.appendChild(ta); ta.select();
-    try { document.execCommand('copy'); done(); } finally { document.body.removeChild(ta); }
-  }
-}
-
-function renderHotelNote(price) {
-  const d = state.hotel.detail;
-  const note = d.note && d.note.campaignId === d.campaignId ? d.note : null;
-  if (!note && !hotelPriceNeedsNote(price)) return '';
-  const small = 'font-size:11.5px;color:var(--color-text-muted)';
-  let inner;
-  if (!note) {
-    inner = `<p style="margin:0 0 10px;${small}">Cuando el hotel sale más caro, la palanca está en las tarifas que el hotel envía a Google. Claude redacta un borrador con estas cifras para que se lo mandes a su revenue manager; tú lo revisas y lo envías.</p>
-      <button class="btn-outline" data-action="hotel-note-run">Redactar nota para el revenue manager</button>`;
-  } else if (note.status === 'loading') {
-    inner = '<div class="state-panel loading" style="padding:12px 0"><div class="spinner"></div><p>Redactando la nota…</p></div>';
-  } else if (note.status === 'error') {
-    inner = `<div class="error-panel">${escapeHtml(note.error)}</div><div style="margin-top:10px"><button class="btn-outline" data-action="hotel-note-run">Reintentar</button></div>`;
-  } else {
-    const r = note.data;
-    const warn = r.cifras_no_verificadas && r.cifras_no_verificadas.length
-      ? `<div class="error-panel" style="margin-bottom:10px"><strong>Revisa estas cifras antes de enviar:</strong> ${r.cifras_no_verificadas.map(escapeHtml).join(', ')} no salen de los datos de esta pantalla.</div>` : '';
-    inner = `
-      ${warn}
-      <label style="${small}">Asunto</label>
-      <input type="text" data-hotel-note-subject value="${escapeHtml(r.asunto)}" style="width:100%;margin:2px 0 10px" />
-      <label style="${small}">Mensaje (puedes editarlo)</label>
-      <textarea data-hotel-note-text rows="11" style="width:100%;margin-top:2px;font:inherit;line-height:1.45">${escapeHtml(r.mensaje)}</textarea>
-      <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-        <button class="btn-accent" data-action="hotel-note-copy">${note.copied ? 'Copiado ✓' : 'Copiar nota'}</button>
-        <button class="btn-outline sm" data-action="hotel-note-run">Redactar de nuevo</button>
-        <span style="${small}">Borrador generado por IA: la plataforma no envía nada. Las cifras salen de la comparación de precio de arriba.</span>
-      </div>`;
-  }
-  return `<h4 style="margin:16px 0 8px">Nota para el revenue manager del hotel</h4>${inner}`;
 }
 
 // Análisis con IA de la campaña: diagnóstico y propuesta de modificadores. Solo propone: el servidor valida cada
@@ -15713,13 +15631,6 @@ function bindEvents() {
   document.querySelectorAll('[data-hotel-open]').forEach((btn) => {
     btn.addEventListener('click', () => openHotelCampaign(btn.dataset.hotelOpen, false));
   });
-  // La nota se puede editar: se guarda al escribir (sin redibujar) para que otro render no la pise.
-  document.querySelectorAll('[data-hotel-note-text]').forEach((el) => {
-    el.addEventListener('input', () => { const n = state.hotel.detail.note; if (n && n.data) { n.data.mensaje = el.value; n.copied = false; } });
-  });
-  document.querySelectorAll('[data-hotel-note-subject]').forEach((el) => {
-    el.addEventListener('input', () => { const n = state.hotel.detail.note; if (n && n.data) { n.data.asunto = el.value; n.copied = false; } });
-  });
   document.querySelectorAll('[data-hotel-edit]').forEach((input) => {
     input.addEventListener('change', (e) => {
       const d = state.hotel.detail;
@@ -16600,13 +16511,11 @@ function handleAction(action) {
     case 'hotel-api-fetch': fetchHotelCampaigns(); break;
     case 'hotel-back': {
       const d = state.hotel.detail;
-      d.campaignId = null; d.status = 'idle'; d.data = null; d.edits = {}; d.ai = null; d.note = null;
+      d.campaignId = null; d.status = 'idle'; d.data = null; d.edits = {}; d.ai = null;
       d.flow = { status: 'idle', preview: null, result: null, error: null };
       render();
       break;
     }
-    case 'hotel-note-run': runHotelNote(); break;
-    case 'hotel-note-copy': copyHotelNote(); break;
     case 'hotel-ai-run': runHotelAi(); break;
     case 'hotel-ai-use': hotelAiToEditor(); break;
     case 'hotel-preview': submitHotelModifiers(true); break;

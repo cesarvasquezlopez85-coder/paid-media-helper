@@ -631,39 +631,3 @@ def _hotel_json_call(system, schema, user_content, max_tokens=HOTEL_MAX_TOKENS):
 def analizar_hotel(user_content):
     """user_content: el JSON armado por hoteles_ia.build_input. Devuelve el dict de Claude (sin validar)."""
     return _hotel_json_call(HOTEL_SYSTEM_PROMPT, HOTEL_SCHEMA, user_content)
-
-
-HOTEL_NOTE_SYSTEM_PROMPT = (
-    "Eres un estratega senior de Google Ads especializado en Hotel Ads. Redactas una nota breve, en español, para "
-    "el revenue manager (o responsable de tarifas y distribución) de un hotel cliente de la agencia. La nota la "
-    "revisará y enviará una persona del equipo.\n\n"
-    "Recibes un JSON con la comparación de precio de la campaña frente al anunciante más barato en el periodo: "
-    "diferencia de precio promedio en porcentaje (positivo = el hotel sale más caro), en qué porcentaje de las "
-    "impresiones no es el más barato y cuánto más caro sale en ellas, y la tendencia reciente si existe.\n\n"
-    "Reglas:\n"
-    "- De 90 a 150 palabras, tono profesional y cercano, sin jerga de Google Ads. Empieza con \"Hola,\" sin "
-    "inventar nombres y cierra con \"Quedamos atentos.\"\n"
-    "- Abre con el dato clave. Explica en una frase que Google compara las tarifas que el hotel envía a Hotel Ads "
-    "con las de otros anunciantes, y que en esas búsquedas el hotel pierde posición; subir la inversión en "
-    "anuncios no corrige eso.\n"
-    "- Pide revisar, sin afirmar causas: las tarifas que se envían a Hotel Ads frente a las que se ven en la "
-    "competencia y en otros canales, y si hay tarifas o promociones que no se están enviando.\n"
-    "- Usa SOLO cifras del JSON, escritas en porcentaje. No inventes fechas, causas, montos, nombres de "
-    "competidores ni promesas de resultado. No menciones umbrales internos.\n"
-    "- Escribe como la agencia que administra los anuncios y dirigiéndote al hotel de tú o usted de forma "
-    "consistente: habla de \"su hotel\" y \"sus tarifas\", nunca de \"nuestro hotel\" ni de \"nuestras tarifas\"; "
-    "\"nosotros\" es solo la agencia.\n"
-    "- Puedes usar 2 o 3 viñetas cortas para los datos. El asunto: una línea concreta.\n\n"
-    "Responde SOLO con un JSON válido: {\"asunto\": \"...\", \"mensaje\": \"...\"}"
-)
-
-HOTEL_NOTE_SCHEMA = {
-    "type": "object",
-    "properties": {"asunto": {"type": "string"}, "mensaje": {"type": "string"}},
-    "required": ["asunto", "mensaje"], "additionalProperties": False,
-}
-
-
-def redactar_nota_hotel(user_content):
-    """user_content: el JSON armado por hoteles_ia.build_note_input. Devuelve {"asunto", "mensaje"} sin validar."""
-    return _hotel_json_call(HOTEL_NOTE_SYSTEM_PROMPT, HOTEL_NOTE_SCHEMA, user_content, max_tokens=1500)

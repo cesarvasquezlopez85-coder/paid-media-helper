@@ -6,9 +6,7 @@ tramos con pocos datos, valores fuera de rango, alzas cuando el problema es de p
 grandes. La IA solo propone; aplicar sigue siendo el editor de tramos (vista previa de Google y confirmar).
 """
 
-import datetime
 import json
-import re
 
 import google_ads_client
 
@@ -178,77 +176,3 @@ def build_result(ai, modifiers, price, by_id, locked):
         "sin_cambios": _clean_text(ai.get("sin_cambios"), 500),
         "bloqueada": bool(locked),
     }
-
-
-# ---------------------------------------------------------------------------
-# Nota para el revenue manager del hotel. El código arma los datos (todo en porcentajes, sin conteos con
-# separador de miles) y revisa que cada cifra del texto salga de ellos; Claude solo redacta.
-# ---------------------------------------------------------------------------
-NOTE_MIN_GAP = 0.02          # se ofrece la nota si el hotel sale más de 2 % más caro...
-NOTE_MIN_NOT_LOWEST = 30.0   # ...o en 30 %+ de las impresiones no es el más barato
-NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
-
-
-def _not_lowest_share(price):
-    buckets = price.get("buckets") or []
-    total = sum(b["impressions"] for b in buckets)
-    if not total:
-        return None
-    return sum(b["impressions"] for b in buckets if b["bucket"] == "NOT_LOWEST") / total * 100
-
-
-def build_note_input(price, campaign_name, date_from, date_to):
-    """Devuelve (user_content, numeros_permitidos). ValueError con un mensaje para el usuario si no hay nota que mandar."""
-    sm = price.get("summary") if price else None
-    if not sm or not sm.get("impressions") or sm.get("price_diff") is None:
-        raise ValueError("Google no entregó una diferencia de precio para este periodo: no hay nada que comunicar al hotel.")
-    gap = sm["price_diff"]
-    not_lowest = _not_lowest_share(price)
-    if gap <= NOTE_MIN_GAP and (not_lowest is None or not_lowest < NOTE_MIN_NOT_LOWEST):
-        raise ValueError("El precio del hotel está competitivo en este periodo: no hay nada que pedirle al revenue manager.")
-    d0, d1 = datetime.date.fromisoformat(date_from), datetime.date.fromisoformat(date_to)
-    block = _price_block(price)
-    data = {
-        "periodo": f"{date_from} a {date_to}", "dias": (d1 - d0).days + 1, "campana": str(campaign_name or "")[:120],
-        "diferencia_precio_pct": block["diferencia_precio_pct"],
-        "pct_impresiones_donde_no_es_el_mas_barato": _round(not_lowest, 1) if not_lowest is not None else None,
-        "se_mostro_pct": block.get("se_mostro_pct"),
-    }
-    for p in block.get("posiciones", []):
-        if p["posicion"] == google_ads_client.HOTEL_PRICE_BUCKET_LABELS_ES["NOT_LOWEST"] and p["diferencia_precio_pct"] is not None:
-            data["diferencia_en_esas_impresiones_pct"] = p["diferencia_precio_pct"]
-    cheap = [b for b in (price.get("buckets") or []) if b["bucket"] in ("LOWEST_UNIQUE", "LOWEST_TIED")]
-    total = sum(b["impressions"] for b in price.get("buckets") or [])
-    if total:
-        data["pct_impresiones_mas_barato_o_empatado"] = _round(sum(b["impressions"] for b in cheap) / total * 100, 1)
-    if block.get("tendencia"):
-        data["tendencia"] = block["tendencia"]
-    allowed = [d0.year, d0.month, d0.day, d1.year, d1.month, d1.day, data["dias"]]
-
-    def collect(v):
-        if isinstance(v, dict):
-            for x in v.values():
-                collect(x)
-        elif isinstance(v, (int, float)) and not isinstance(v, bool):
-            allowed.append(abs(v))
-    collect({k: v for k, v in data.items() if k not in ("periodo", "dias", "campana")})
-    return json.dumps({k: v for k, v in data.items() if v is not None}, ensure_ascii=False), allowed
-
-
-def check_note_numbers(text, allowed):
-    """Cifras del texto que no salen de los datos enviados (tolerancia de redondeo). Lista vacía = todo verificado."""
-    unknown = []
-    for raw in NUMBER_RE.findall(text or ""):
-        n = float(raw.replace(",", "."))
-        tol = 0.5 if raw.isdigit() else 0.06
-        if not any(abs(n - a) <= tol for a in allowed) and raw not in unknown:
-            unknown.append(raw)
-    return unknown
-
-
-def build_note_result(ai, allowed):
-    subject = _clean_text(ai.get("asunto"), 160)
-    message = "\n".join(line.rstrip() for line in str(ai.get("mensaje") or "").strip().splitlines())[:2500]
-    if not message:
-        raise ValueError("Claude no devolvió el texto de la nota.")
-    return {"asunto": subject, "mensaje": message, "cifras_no_verificadas": check_note_numbers(subject + " " + message, allowed)}

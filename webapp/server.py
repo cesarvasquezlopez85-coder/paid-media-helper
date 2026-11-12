@@ -1052,10 +1052,6 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_super_admin_json():
                 return
             self._handle_ai_analizar_hotel(payload)
-        elif path == "/api/ai/nota-hotel":
-            if not self._require_super_admin_json():
-                return
-            self._handle_ai_nota_hotel(payload)
         elif path == "/api/negativos/palabras":
             # Sin IA ni costo; en afinado (2026-11-05): solo super admin, como la pestaña "Con IA".
             if not self._require_super_admin_json():
@@ -3141,49 +3137,6 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             print(f"[claude-error] hotel-ia: {' '.join(str(e).split())[:300]}", flush=True)
             self._send_json(502, {"error": "No se pudo generar el análisis con IA. Intenta de nuevo en unos minutos."})
-
-    def _handle_ai_nota_hotel(self, payload):
-        """Borrador de nota para el revenue manager del hotel cuando el precio sale caro. Solo lee y redacta."""
-        user = self._get_current_user()
-        if not claude_client.is_configured():
-            self._send_json(503, {"error": "La integración con Claude no está configurada en el servidor (falta ANTHROPIC_API_KEY)."})
-            return
-        customer_id = str(payload.get("customer_id") or "").strip()
-        campaign_id = str(payload.get("campaign_id") or "").strip()
-        date_from, date_to = str(payload.get("date_from") or "").strip(), str(payload.get("date_to") or "").strip()
-        if not re.match(r"^\d{4}-\d{2}-\d{2}$", date_from) or not re.match(r"^\d{4}-\d{2}-\d{2}$", date_to):
-            self._send_json(400, {"error": "date_from y date_to deben tener formato AAAA-MM-DD."})
-            return
-        if not campaign_id.isdigit():
-            self._send_json(400, {"error": "Falta o es inválido campaign_id."})
-            return
-        simulated = not google_ads_client.is_configured()
-        try:
-            if simulated:
-                price = google_ads_client.simulated_hotel_price(campaign_id, date_from, date_to)
-            else:
-                if not self._hotel_account_access(customer_id):
-                    return
-                price = google_ads_client.fetch_hotel_price(customer_id, campaign_id, date_from, date_to)
-            user_content, allowed = hoteles_ia.build_note_input(price, payload.get("campaign_name"), date_from, date_to)
-        except ValueError as e:
-            self._send_json(400, {"error": str(e)})
-            return
-        except Exception as e:  # noqa: BLE001
-            self._send_google_ads_error(e)
-            return
-        if not _ai_limiter.allow(f"user:{user['id']}", *AI_RATE_LIMIT):
-            self._send_json(429, {"error": "Alcanzaste el límite de análisis con IA por esta hora. Intenta más tarde."})
-            return
-        try:
-            with track_ai_usage(user["id"], "hoteles"):
-                ai = claude_client.redactar_nota_hotel(user_content)
-            result = hoteles_ia.build_note_result(ai, allowed)
-            result["campaign_id"] = campaign_id
-            self._send_json(200, result)
-        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
-            print(f"[claude-error] hotel-nota: {' '.join(str(e).split())[:300]}", flush=True)
-            self._send_json(502, {"error": "No se pudo redactar la nota con IA. Intenta de nuevo en unos minutos."})
 
     def _handle_ai_generar_copys(self, payload):
         user = self._get_current_user()
