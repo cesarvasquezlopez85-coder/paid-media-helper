@@ -879,7 +879,7 @@ function render() {
     <div class="page-header">
       <div>
         <h1 class="page-title">${escapeHtml(meta.title)}</h1>
-        <p class="page-caption">${escapeHtml(meta.caption)}</p>
+        <p class="page-caption">${escapeHtml(state.page === 'auditoria' && !currentUser.isAdmin ? meta.caption.replace(' — o de hasta 20 a la vez —', '') : meta.caption)}</p>
       </div>
       ${toggleHtml}
     </div>
@@ -11718,7 +11718,9 @@ function renderAuditPage() {
       ? `<style>${AUDIT_REPORT_CSS}</style><div class="ar" style="margin-bottom:20px">${auditHistoryHtml(h.rows)}</div>`
       : `<div class="card state-panel idle"><p>Esta cuenta todavía no tiene auditorías guardadas. Corre la primera con "Auditar cuenta" y desde ahí quedará su historial.</p></div>`;
   }
-  const modeToggle = `<div class="seg-control" style="margin-bottom:16px;width:fit-content">
+  // Varias cuentas a la vez: solo administradores (el servidor también lo exige).
+  if (!currentUser.isAdmin && s.mode === 'batch') s.mode = 'single';
+  const modeToggle = !currentUser.isAdmin ? '' : `<div class="seg-control" style="margin-bottom:16px;width:fit-content">
     <button class="seg-btn ${s.mode === 'single' ? 'active' : ''}" data-audit-mode="single">Una cuenta</button>
     <button class="seg-btn ${s.mode === 'batch' ? 'active' : ''}" data-audit-mode="batch">Varias cuentas</button></div>`;
   if (s.mode === 'batch') return `${modeToggle}${renderAuditBatch()}`;

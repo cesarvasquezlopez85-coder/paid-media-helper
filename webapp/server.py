@@ -2851,6 +2851,10 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(401, {"error": "No autenticado."})
             return
         if payload.get("batch") is True:
+            # La auditoría de varias cuentas es solo para administradores (consume mucha cuota compartida de Google Ads).
+            if not user["is_admin"]:
+                self._send_json(403, {"error": "La auditoría de varias cuentas es solo para administradores."})
+                return
             if not _audit_batch_limiter.allow(f"user:{user['id']}", *AUDIT_BATCH_RATE_LIMIT):
                 self._send_json(429, {"error": f"Alcanzaste el límite de {AUDIT_BATCH_RATE_LIMIT[0]} auditorías por hora en lotes."})
                 return
