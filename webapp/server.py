@@ -685,6 +685,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_pacing_watchlist()
             return
 
+        if path == "/api/google-ads/pacing/mcc-groups":
+            if not self._require_auth_json():
+                return
+            self._handle_pacing_mcc_groups()
+            return
+
         if path == "/api/google-ads/pacing/account-campaigns":
             if not self._require_auth_json():
                 return
@@ -2033,6 +2039,37 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001
             self._send_google_ads_error(e)
 
+    def _handle_pacing_mcc_groups(self):
+        """MCCs que se pueden agregar de un jalón a Ritmo de consumo: un admin ve todos
+        los sub-MCCs; un usuario común solo los que tiene asignados en Administración."""
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not google_ads_client.is_configured():
+            self._send_json(200, {"groups": [], "simulated": True})
+            return
+        if user["is_admin"]:
+            try:
+                groups = google_ads_client.list_mcc_groups()
+            except Exception as e:  # noqa: BLE001
+                self._send_google_ads_error(e)
+                return
+            self._send_json(200, {"groups": groups, "simulated": False})
+            return
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                "SELECT mcc_customer_id, mcc_name FROM user_mcc_access WHERE user_id = ? ORDER BY mcc_name",
+                (user["id"],),
+            ).fetchall()
+        finally:
+            conn.close()
+        self._send_json(200, {
+            "groups": [{"id": r["mcc_customer_id"], "name": r["mcc_name"] or r["mcc_customer_id"]} for r in rows],
+            "simulated": False,
+        })
+
     def _handle_mcc_group_accounts(self, query):
         user = self._require_admin_json()
         if not user:
@@ -2051,12 +2088,17 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_google_ads_error(e)
 
     def _handle_pacing_watchlist_add_mcc_group(self, payload):
-        user = self._require_admin_json()
+        user = self._get_current_user()
         if not user:
+            self._send_json(401, {"error": "No autenticado."})
             return
         group_customer_id = str(payload.get("group_customer_id") or "").strip()
         if not group_customer_id.isdigit():
             self._send_json(400, {"error": "group_customer_id debe ser numérico."})
+            return
+        # Un usuario común solo puede agregar los MCCs que tiene asignados (fail-secure).
+        if not user["is_admin"] and group_customer_id not in self._get_user_mcc_ids(user["id"]):
+            self._send_json(403, {"error": "No tienes acceso a este MCC."})
             return
         if not google_ads_client.is_configured():
             self._send_json(400, {"error": "La API de Google Ads no está configurada."})

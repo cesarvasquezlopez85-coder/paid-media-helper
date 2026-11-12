@@ -11790,7 +11790,7 @@ function loadPacingMccGroups() {
   const m = state.pacing.mcc;
   m.status = 'loading'; m.error = null;
   render();
-  fetch('/api/google-ads/mcc-groups')
+  fetch('/api/google-ads/pacing/mcc-groups')
     .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
@@ -11870,7 +11870,6 @@ function renderPacingMccAddedList() {
 }
 
 function renderPacingMccPanel() {
-  if (!currentUser.isAdmin) return '';
   const m = state.pacing.mcc;
 
   let body = '';
@@ -11882,7 +11881,7 @@ function renderPacingMccPanel() {
     body = `<div class="error-panel">${escapeHtml(m.error)}</div>`;
   } else if (m.status === 'ready') {
     if (!m.groups.length) {
-      body = `<p class="footnote">No hay sub-MCCs disponibles en modo simulado.</p>`;
+      body = `<p class="footnote">${currentUser.isAdmin ? 'No hay sub-MCCs disponibles en modo simulado.' : 'No tienes ningún MCC asignado. Pídele a un administrador que te dé acceso a tu MCC en Administración.'}</p>`;
     } else {
       const filter = (m.filter || '').trim().toLowerCase();
       let matches = [];
@@ -11915,7 +11914,7 @@ function renderPacingMccPanel() {
   return `
     <div class="card control-panel" style="flex-direction:column;align-items:stretch;gap:10px;margin-bottom:20px">
       <label style="font-weight:600">Agregar un MCC completo</label>
-      <p class="footnote" style="margin:0">Para hoteles con muchas cuentas (40 o más) — agrega de un jalón todas las cuentas que cuelgan de un sub-MCC, en vez de elegirlas una por una.</p>
+      <p class="footnote" style="margin:0">Para hoteles con muchas cuentas (40 o más) — agrega de un jalón todas las cuentas que cuelgan de un sub-MCC, en vez de elegirlas una por una.${currentUser.isAdmin ? '' : ' Solo puedes elegir los MCCs que tienes asignados.'}</p>
       ${body}
       ${renderPacingMccAddedList()}
     </div>`;
