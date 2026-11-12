@@ -635,7 +635,7 @@ Cada usuario no-admin solo puede leer/escribir en las cuentas de Google Ads que 
 31. Decidir si Hoteles, Campañas y la pestaña "Con IA" de Negativización se abren al equipo (el Historial de cambios ya se abrió el 2026-11-12), y poner un tope diario de gasto de IA por usuario y un límite en la consola de Anthropic.
 32. Confirmar con una usuaria real (Tania, con acceso por MCC) que ve el Historial de cambios y que "Agregar un MCC completo" le lista y agrega sus MCCs.
 33. Avisar al equipo por correo de que el Historial de cambios ya está abierto (borrador redactado el 2026-11-10), y mencionar que ahora cada persona puede agregar sus MCCs completos en Ritmo de consumo.
-34. Documentar en la presentación al equipo (`Presentacion_al_equipo_Paid_Media_Helper.pptx`, sin versionar, 38 diapositivas) las funciones nuevas: Hoteles, Campañas, Historial de cambios y Proyección de ventas simplificada.
+34. ~~Documentar en la presentación al equipo las funciones nuevas~~ — hecho el 2026-11-12: `Presentacion_al_equipo_Paid_Media_Helper.pptx` (sin versionar) ahora tiene 39 diapositivas; se actualizaron el menú, Ritmo de consumo (MCC y filtro Hoteles/SEM), Proyección de ventas (pantalla y captura nuevas), Campañas, Historial de cambios (abierto a todos), Administración y Próximos pasos, y se agregó la diapositiva «Novedades · 10 al 12 de noviembre». Pendiente: recapturar la pantalla de Campañas (diapositiva 30) con el filtro por MCC.
 
 ## Archivos del proyecto
 
