@@ -5,7 +5,7 @@ import * as engine from './engine.js';
 // ---------------------------------------------------------------------------
 
 const state = {
-  page: 'rendimiento',
+  page: 'pacing', // página con la que abre la plataforma al entrar o recargar: Ritmo de consumo
   layoutVariant: 'A',
 
   rend: {
