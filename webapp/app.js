@@ -257,6 +257,13 @@ const state = {
     status: 'idle', error: null, rows: [], truncated: false, warnings: {}, simulated: false, currency: '',
     loaded: null, loadToken: 0, filters: emptyCambiosFilters(), limit: 100,
   },
+  // Audiencias: listas, dónde se usan y rendimiento por audiencia de una cuenta de la lista de Ritmo de consumo. Solo lectura; solo super admin.
+  audiencias: {
+    tab: 'resumen', watchlistStatus: 'idle', watchlist: [], accountId: '', days: 30,
+    status: 'idle', error: null, data: null, simulated: false, currency: '', loaded: null, loadToken: 0,
+    listFilter: 'all', listLimit: 50, usoKind: 'all', usoCampaign: 'all', usoSearch: '', usoLimit: 40,
+    perfKind: 'all', perfSort: 'cost', perfLimit: 50,
+  },
   // IA Max (AI Max for Search) — a diferencia de "Ask Advisor", sí tiene
   // API real (Campaign.ai_max_setting, desde v25). Tres sub-vistas sobre
   // las mismas campañas Search de la cuenta elegida: estado/toggle, qué
@@ -479,6 +486,10 @@ function themedFontsLink(legacyHref) {
 const PLUS_JAKARTA_HREF = 'https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;700;800&display=swap';
 
 const PAGE_META = {
+  audiencias: {
+    title: 'Audiencias',
+    caption: 'Qué listas y audiencias tiene una cuenta de Google Ads, en qué campañas se usan y cuánto rinde cada una (CPA %), solo lectura.',
+  },
   cambios: {
     title: 'Historial de cambios',
     caption: 'Quién cambió qué en una cuenta de Google Ads en los últimos 30 días: presupuestos, pujas, estados, negativas y anuncios, con filtros y descarga en CSV y HTML.',
@@ -851,6 +862,7 @@ function render() {
   else if (state.page === 'hoteles') pageHtml = renderHotelPage();
   else if (state.page === 'campanas') pageHtml = renderCampanasPage();
   else if (state.page === 'cambios') pageHtml = renderCambiosPage();
+  else if (state.page === 'audiencias') pageHtml = renderAudienciasPage();
   else if (state.page === 'exclusiones') pageHtml = renderContentExclusionsPage();
   else if (state.page === 'keywordplanner') pageHtml = renderKeywordPlannerPage();
   else if (state.page === 'pacing') pageHtml = renderPacingPage();
@@ -1422,6 +1434,7 @@ function mountCharts() {
   else if (state.page === 'roas') mountRoasCharts();
   else if (state.page === 'keywordplanner') mountKeywordPlannerCharts();
   else if (state.page === 'campanas') mountCampanaCharts();
+  else if (state.page === 'audiencias') mountAudienciasCharts();
 }
 
 function mountRendCharts() {
@@ -14200,6 +14213,614 @@ function renderCambiosPage() {
   return `${controls}${sim}${warn}${trunc}${filters}${cards}${table}`;
 }
 
+// ---------------------------------------------------------------------------
+// Audiencias (solo lectura; solo super admin mientras se afina). Tres pestañas
+// sobre una cuenta de la lista de Ritmo de consumo: Resumen (inventario de
+// listas), Dónde se usan (mapa audiencia × campaña) y Rendimiento (CPA % por
+// audiencia). Lo trae un solo endpoint (/api/google-ads/audiences).
+// ---------------------------------------------------------------------------
+
+const AUD_TABS = [['resumen', 'Resumen'], ['uso', 'Dónde se usan'], ['rendimiento', 'Rendimiento']];
+const AUD_KIND_LABEL = { list: 'Lista propia', in_market: 'En el mercado', affinity: 'Afinidad', custom: 'Personalizada', combined: 'Combinada', interest: 'Otro interés', signal: 'Señal de PMax' };
+// Grupo para el color y la forma de las gráficas: R remarketing, M en el mercado, F afinidad, P personalizada, O otro.
+const AUD_KIND_GROUP = { list: 'R', in_market: 'M', affinity: 'F', custom: 'P', combined: 'P', interest: 'O', signal: 'O' };
+const AUD_GROUP_LABEL = { R: 'Listas propias', M: 'En el mercado', F: 'Afinidad', P: 'Personalizada o combinada', O: 'Otro' };
+const AUD_GROUP_GLYPH = { R: '●', M: '▲', F: '■', P: '◆', O: '✚' };
+const AUD_SHAPE = { R: 'circle', M: 'triangle', F: 'rect', P: 'rectRot', O: 'crossRot' };
+const AUD_LIST_TYPE = {
+  RULE_BASED: 'Por reglas (web o app)', CRM_BASED: 'Lista de clientes', LOGICAL: 'Combinación de listas', LOOKALIKE: 'Similar',
+  BASIC: 'Básica', SIMILAR: 'Similar', EXTERNAL_REMARKETING: 'Remarketing externo', RULE_BASED_USER_LIST: 'Por reglas',
+};
+const AUD_MIN_SEARCH = 1000; // tamaño mínimo para que una lista sirva en Búsqueda (Google exige 1.000 usuarios)
+const AUD_PAGE_SIZE = 50;
+
+const audKindText = (k) => AUD_KIND_LABEL[k] || 'Otro';
+const audPct = (v) => (v == null || Number.isNaN(v) ? 'N/D' : (v * 100).toFixed(1) + '%');
+const audHexOr = (v, fb) => (/^#[0-9a-f]{6}$/i.test((v || '').trim()) ? v.trim() : fb);
+const audNum = (v) => (v == null ? '—' : fmtInt(v));
+
+function audRange(days) {
+  const pad = (n) => String(n).padStart(2, '0');
+  const f = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const to = new Date(); to.setDate(to.getDate() - 1);
+  const from = new Date(to); from.setDate(from.getDate() - (days - 1));
+  return { from: f(from), to: f(to) };
+}
+
+function ensureAudienciasLoaded() {
+  const s = state.audiencias;
+  if (s.watchlistStatus !== 'idle') return;
+  s.watchlistStatus = 'loading';
+  fetch('/api/google-ads/pacing/watchlist')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      s.watchlist = data.watchlist || [];
+      s.watchlistStatus = 'ready';
+      if (!s.accountId && s.watchlist.length) s.accountId = s.watchlist[0].customer_id;
+      if (s.accountId) loadAudiencias(); else render();
+    })
+    .catch((err) => { s.watchlistStatus = 'error'; s.error = err.message || String(err); render(); });
+}
+
+function loadAudiencias() {
+  const s = state.audiencias;
+  if (!s.accountId) { s.error = 'Elige una cuenta primero.'; render(); return; }
+  const token = ++s.loadToken;
+  const acc = s.watchlist.find((a) => a.customer_id === s.accountId);
+  const range = audRange(s.days);
+  s.status = 'loading'; s.error = null;
+  render();
+  const params = new URLSearchParams({ customer_id: s.accountId, date_from: range.from, date_to: range.to });
+  fetch(`/api/google-ads/audiences?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      if (token !== s.loadToken) return;
+      s.data = { lists: data.lists || [], campaigns: data.campaigns || [], usage: data.usage || [], pmax_signals: data.pmax_signals || [], errors: data.errors || {} };
+      s.simulated = !!data.simulated;
+      s.currency = data.currency || '';
+      s.loaded = { accountId: s.accountId, accountName: (acc && acc.account_name) || s.accountId, days: s.days, from: range.from, to: range.to };
+      s.listFilter = 'all'; s.listLimit = AUD_PAGE_SIZE; s.usoKind = 'all'; s.usoCampaign = 'all'; s.usoSearch = ''; s.usoLimit = 40;
+      s.perfKind = 'all'; s.perfSort = 'cost'; s.perfLimit = AUD_PAGE_SIZE;
+      s.status = 'ready';
+      render();
+    })
+    .catch((err) => {
+      if (token !== s.loadToken) return;
+      s.status = 'error'; s.error = err.message || String(err);
+      render();
+    });
+}
+
+// Listas propias con su estado: en uso (en alguna campaña, grupo o señal de PMax) y aviso de tamaño.
+function audListsInfo() {
+  const d = state.audiencias.data;
+  const used = new Set();
+  d.usage.forEach((u) => { if (u.kind === 'list') used.add(u.key); });
+  d.pmax_signals.forEach((p) => (p.lists || []).forEach((k) => used.add(k)));
+  return d.lists.map((l) => {
+    // Las listas «similares» las retiró Google (quedan en 0 y no sirven): se cuentan aparte para no llenar los avisos.
+    const legacy = l.type === 'SIMILAR';
+    let warn = null;
+    if (legacy) warn = null;
+    else if (l.status === 'CLOSED') warn = 'Cerrada';
+    else if (!l.size_search && !l.size_display) warn = 'Vacía';
+    else if (l.size_search != null && l.size_search < AUD_MIN_SEARCH) warn = 'Muy pequeña para Búsqueda';
+    const places = d.usage.filter((u) => u.key === l.key).length + d.pmax_signals.filter((p) => (p.lists || []).includes(l.key)).length;
+    return { ...l, used: used.has(l.key), warn, legacy, places };
+  });
+}
+
+// Rendimiento por audiencia: suma de todos los lugares donde se usa (sin las negativas, que no sirven anuncios).
+function audPerfRows() {
+  const by = new Map();
+  state.audiencias.data.usage.filter((u) => !u.negative).forEach((u) => {
+    let a = by.get(u.key);
+    if (!a) { a = { key: u.key, name: u.name, kind: u.kind, places: 0, campaigns: new Set(), impressions: 0, clicks: 0, cost: 0, conversions: 0, conv_value: 0 }; by.set(u.key, a); }
+    a.places += 1; a.campaigns.add(u.campaign_id);
+    a.impressions += u.impressions || 0; a.clicks += u.clicks || 0; a.cost += u.cost || 0;
+    a.conversions += u.conversions || 0; a.conv_value += u.conv_value || 0;
+  });
+  return [...by.values()].map((a) => ({ ...a, campaigns: a.campaigns.size, cpa_pct: a.conv_value > 0 ? a.cost / a.conv_value : null }));
+}
+
+function audPerfFiltered() {
+  const s = state.audiencias;
+  const rows = audPerfRows().filter((r) => r.cost > 0 && (s.perfKind === 'all' || r.kind === s.perfKind));
+  const sorters = {
+    cost: (a, b) => b.cost - a.cost,
+    cpa: (a, b) => (a.cpa_pct ?? Infinity) - (b.cpa_pct ?? Infinity),
+    conversions: (a, b) => b.conversions - a.conversions,
+  };
+  return rows.sort(sorters[s.perfSort] || sorters.cost);
+}
+
+// Tope del eje de CPA % en las gráficas: tres veces el promedio. Lo que lo supera se dibuja en el borde (el valor real va en el tooltip y la tabla).
+const audCapPct = (avg) => Math.max(avg * 100 * 3, 30);
+
+function audAvgCpa(rows) {
+  const cost = rows.reduce((t, r) => t + r.cost, 0);
+  const value = rows.reduce((t, r) => t + r.conv_value, 0);
+  return value > 0 ? cost / value : null;
+}
+
+function audTabs(s) {
+  return `<div class="seg-control" style="margin-bottom:20px">${AUD_TABS.map(([k, label]) => `<button class="seg-btn ${s.tab === k ? 'active' : ''}" data-aud-tab="${k}">${label}</button>`).join('')}</div>`;
+}
+
+const audStat = (label, value, sub) => `<div class="card stat-card"><div class="stat-label">${label}</div><div class="stat-value">${value}</div>${sub ? `<div class="stat-sub">${sub}</div>` : ''}</div>`;
+
+function renderAudienciasPage() {
+  const s = state.audiencias;
+  ensureAudienciasLoaded();
+  const opt = (value, label, current) => `<option value="${escapeHtml(value)}" ${current === value ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+  const controls = `
+    <div class="card control-panel align-end">
+      <div class="field"><label>Cuenta</label>
+        <select id="aud-account" style="width:300px">${s.watchlist.map((a) => opt(a.customer_id, `${a.account_name || a.customer_id} (${a.customer_id})`, s.accountId)).join('')}</select>
+      </div>
+      <div class="field"><label>Periodo (rendimiento)</label>
+        <select id="aud-days" style="width:160px">${[7, 14, 30, 90].map((d) => opt(String(d), `Últimos ${d} días`, String(s.days))).join('')}</select>
+      </div>
+      <button class="btn-accent" data-action="aud-load" ${s.status === 'loading' ? 'disabled' : ''}>Consultar</button>
+      <p class="field-hint" style="max-width:380px">Cuentas de tu lista de <strong>Ritmo de consumo</strong>. Solo lectura: esta sección no cambia nada en la cuenta.</p>
+    </div>`;
+
+  const errorHtml = s.error ? `<div class="error-panel" style="margin-bottom:16px">${escapeHtml(s.error)}</div>` : '';
+  if (s.watchlistStatus === 'idle' || s.watchlistStatus === 'loading') {
+    return `${controls}<div class="card state-panel loading"><div class="spinner"></div><p>Leyendo tus cuentas…</p></div>`;
+  }
+  if (s.watchlistStatus === 'error') return `${controls}${errorHtml}`;
+  if (!s.watchlist.length) {
+    return `${controls}
+      <div class="card state-panel idle">
+        ${icon('users', 30)}
+        <p>Tu lista de Ritmo de consumo está vacía. Agrega ahí las cuentas que quieras ver y vuelve a esta sección.</p>
+        <button class="btn-outline" data-action="camp-go-pacing">Ir a Ritmo de consumo</button>
+      </div>`;
+  }
+  if (s.status === 'loading') return `${controls}<div class="card state-panel loading"><div class="spinner"></div><p>Trayendo las audiencias de la cuenta…</p></div>`;
+  if (s.status === 'error') return `${controls}${errorHtml}`;
+  if (s.status !== 'ready') return `${controls}<div class="card state-panel idle">${icon('users', 30)}<p>Elige una cuenta y pulsa Consultar.</p></div>`;
+
+  const sim = s.simulated ? `<div class="ok-panel" style="margin:10px 0"><strong>Modo simulado.</strong> La API de Google Ads no está configurada en el servidor: son audiencias de ejemplo.</div>` : '';
+  const errs = Object.keys(s.data.errors || {});
+  const warn = errs.length ? `<div class="error-panel" style="margin-bottom:16px">Google no devolvió algunas partes (${escapeHtml(errs.join(', '))}); lo que falta puede verse vacío.</div>` : '';
+  let body = '';
+  if (s.tab === 'uso') body = renderAudUso();
+  else if (s.tab === 'rendimiento') body = renderAudRendimiento();
+  else body = renderAudResumen();
+  return `${controls}${sim}${warn}${audTabs(s)}${body}`;
+}
+
+// ---- Resumen -------------------------------------------------------------
+
+function renderAudResumen() {
+  const s = state.audiencias;
+  const lists = audListsInfo();
+  if (!lists.length) {
+    return `<div class="card state-panel idle">${icon('users', 30)}<p>Esta cuenta no tiene listas de audiencia propias. Las audiencias de Google (en el mercado, afinidad) se ven en las otras pestañas.</p></div>`;
+  }
+  const legacy = lists.filter((l) => l.legacy);
+  const active = lists.filter((l) => !l.legacy);
+  const withWarn = active.filter((l) => l.warn);
+  const unused = active.filter((l) => !l.warn && !l.used);
+  const ok = active.filter((l) => !l.warn && l.used);
+  const cards = `<div class="stat-grid">
+    ${audStat('Listas', fmtInt(active.length), legacy.length ? `y ${fmtInt(legacy.length)} similares retiradas` : 'propias y de Google')}
+    ${audStat('En uso', fmtInt(active.filter((l) => l.used).length), 'en campañas, grupos o PMax')}
+    ${audStat('Sin usar', fmtInt(active.filter((l) => !l.used).length), 'ninguna campaña las usa')}
+    ${audStat('Con aviso', fmtInt(withWarn.length), 'vacías, pequeñas o cerradas')}
+  </div>`;
+
+  const total = lists.length;
+  const seg = (n, cls, label) => (n ? `<span class="aud-seg ${cls}" style="width:${Math.max(2, (n / total) * 100)}%" title="${label}: ${fmtInt(n)}"></span>` : '');
+  const health = `
+    <div class="card" style="padding:18px 22px;margin-bottom:20px">
+      <h3 style="margin:0 0 4px;font-size:13px;font-weight:700">Salud del inventario</h3>
+      <p class="field-hint" style="margin:0 0 10px">Cada lista cuenta una sola vez: primero los avisos, luego las que nadie usa.</p>
+      <div class="aud-bar">${seg(ok.length, 'ok', 'En uso y con tamaño suficiente')}${seg(unused.length, 'unused', 'Sin usar')}${seg(withWarn.length, 'warn', 'Con aviso')}${seg(legacy.length, 'legacy', 'Similares retiradas')}</div>
+      <div class="aud-legend">
+        <span><i class="aud-sw ok"></i>En uso y con tamaño suficiente ${fmtInt(ok.length)}</span>
+        <span><i class="aud-sw unused"></i>Sin usar ${fmtInt(unused.length)}</span>
+        <span><i class="aud-sw warn"></i>Con aviso ${fmtInt(withWarn.length)}</span>
+        ${legacy.length ? `<span><i class="aud-sw legacy"></i>Similares retiradas ${fmtInt(legacy.length)}</span>` : ''}
+      </div>
+    </div>`;
+
+  const sized = lists.filter((l) => !l.legacy && (l.size_search || 0) > 0);
+  const chart = sized.length ? `
+    <div class="card" style="padding:18px 22px;margin-bottom:20px">
+      <h3 style="margin:0 0 4px;font-size:13px;font-weight:700">Tamaño de las listas más grandes</h3>
+      <p class="field-hint" style="margin:0 0 10px">Usuarios en Búsqueda, en escala logarítmica para que se vean juntas las enormes y las chicas. La línea marca el mínimo de ${fmtInt(AUD_MIN_SEARCH)}.</p>
+      <div style="position:relative;height:${Math.min(15, sized.length) * 30 + 70}px"><canvas id="aud-sizes" role="img" aria-label="Tamaño de las listas de audiencia más grandes"></canvas></div>
+    </div>` : '';
+
+  const f = s.listFilter;
+  const shownAll = lists.filter((l) => (f === 'all' ? true : f === 'legacy' ? l.legacy : l.legacy ? false : f === 'used' ? l.used : f === 'unused' ? !l.used : !!l.warn))
+    .sort((a, b) => (b.size_search || 0) - (a.size_search || 0));
+  const shown = shownAll.slice(0, s.listLimit);
+  const opt = (v, label) => `<option value="${v}" ${f === v ? 'selected' : ''}>${label}</option>`;
+  const rows = shown.map((l) => `
+    <tr>
+      <td style="min-width:220px">${escapeHtml(l.name || l.id)}</td>
+      <td>${escapeHtml(AUD_LIST_TYPE[l.type] || campanaEnumText(l.type || ''))}${l.read_only ? '<div class="field-hint">Solo lectura</div>' : ''}</td>
+      <td style="text-align:right">${audNum(l.size_search)}</td>
+      <td style="text-align:right">${audNum(l.size_display)}</td>
+      <td style="text-align:right">${l.life_span == null ? '—' : (l.life_span >= 10000 ? 'Sin límite' : l.life_span + ' d')}</td>
+      <td style="text-align:right">${l.places ? fmtInt(l.places) : '—'}</td>
+      <td>${l.legacy ? '<span class="aud-tag unused">Retirada por Google</span>' : l.warn ? `<span class="aud-tag warn">${escapeHtml(l.warn)}</span>` : (l.used ? '<span class="aud-tag ok">En uso</span>' : '<span class="aud-tag unused">Sin usar</span>')}</td>
+    </tr>`).join('');
+  const table = `
+    <div class="card table-panel">
+      <div class="table-panel-head">
+        <h3>Listas propias (${fmtInt(shownAll.length)})</h3>
+        <select id="aud-list-filter" style="width:190px">${opt('all', 'Todas')}${opt('used', 'En uso')}${opt('unused', 'Sin usar')}${opt('warn', 'Con aviso')}${opt('legacy', 'Similares retiradas')}</select>
+      </div>
+      <div class="table-scroll" style="max-height:520px">
+        <table>
+          <thead><tr><th>Lista</th><th>Tipo</th><th style="text-align:right">Búsqueda</th><th style="text-align:right">Display</th><th style="text-align:right">Vigencia</th><th style="text-align:right">Lugares</th><th>Estado</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="7" class="footnote">Ninguna lista coincide.</td></tr>'}</tbody>
+        </table>
+      </div>
+      ${shownAll.length > shown.length ? `<p class="footnote" style="margin-top:10px">Mostrando ${fmtInt(shown.length)} de ${fmtInt(shownAll.length)}. <button class="btn-outline xs" data-action="aud-more-lists">Mostrar ${fmtInt(Math.min(AUD_PAGE_SIZE, shownAll.length - shown.length))} más</button></p>` : ''}
+      <p class="footnote" style="margin-top:10px">Las listas «similares» las retiró Google y se cuentan aparte. «Sin usar» significa que ninguna campaña de Búsqueda, Display o Video, ni señal de Performance Max, la usa; Demand Gen todavía no se revisa. Una lista sirve en Búsqueda desde ${fmtInt(AUD_MIN_SEARCH)} usuarios. Los tamaños son aproximados: Google los redondea.</p>
+    </div>`;
+  return `${cards}${health}${chart}${table}`;
+}
+
+// ---- Dónde se usan -------------------------------------------------------
+
+// Una celda por audiencia y campaña: negativa > segmentación > observación; P si es solo señal de PMax.
+function audUsoMatrix() {
+  const s = state.audiencias;
+  const d = s.data;
+  const enabled = new Set(d.campaigns.filter((c) => c.status === 'ENABLED').map((c) => c.id));
+  const rows = new Map();
+  const cell = (key, name, kind, campId) => {
+    let r = rows.get(key);
+    if (!r) { r = { key, name, kind, cells: new Map(), n: 0 }; rows.set(key, r); }
+    let c = r.cells.get(campId);
+    if (!c) { c = { items: [], signals: [] }; r.cells.set(campId, c); }
+    return c;
+  };
+  d.usage.filter((u) => enabled.has(u.campaign_id)).forEach((u) => cell(u.key, u.name, u.kind, u.campaign_id).items.push(u));
+  d.pmax_signals.filter((p) => enabled.has(p.campaign_id)).forEach((p) => cell(p.key, p.name, 'signal', p.campaign_id).signals.push(p));
+  const code = (c) => {
+    if (c.items.some((u) => u.negative)) return 'N';
+    if (c.items.some((u) => u.mode === 'targeting')) return 'S';
+    if (c.items.some((u) => u.mode === 'observation')) return 'O';
+    if (c.items.length) return '?';
+    return 'P';
+  };
+  rows.forEach((r) => { r.n = r.cells.size; r.cells.forEach((c) => { c.code = code(c); }); });
+  return { rows: [...rows.values()], enabled };
+}
+
+function renderAudUso() {
+  const s = state.audiencias;
+  const d = s.data;
+  const { rows: allRows, enabled } = audUsoMatrix();
+  if (!allRows.length) {
+    return `<div class="card state-panel idle">${icon('users', 30)}<p>Las campañas activas de esta cuenta no tienen audiencias aplicadas.</p></div>`;
+  }
+  const campById = new Map(d.campaigns.map((c) => [c.id, c]));
+  const usedCamps = [...new Set(allRows.flatMap((r) => [...r.cells.keys()]))].filter((id) => enabled.has(id));
+  usedCamps.sort((a, b) => (campById.get(a)?.name || '').localeCompare(campById.get(b)?.name || ''));
+  const noAud = d.campaigns.filter((c) => c.status === 'ENABLED' && !usedCamps.includes(c.id));
+
+  const kinds = [...new Set(allRows.map((r) => r.kind))];
+  const q = s.usoSearch.trim().toLowerCase();
+  const cols = s.usoCampaign === 'all' ? usedCamps : usedCamps.filter((id) => id === s.usoCampaign);
+  let rows = allRows.filter((r) => (s.usoKind === 'all' || r.kind === s.usoKind)
+    && (!q || r.name.toLowerCase().includes(q))
+    && (s.usoCampaign === 'all' || r.cells.has(s.usoCampaign)));
+  rows = rows.sort((a, b) => b.n - a.n || a.name.localeCompare(b.name));
+  const shown = rows.slice(0, s.usoLimit);
+
+  const opt = (v, label, cur) => `<option value="${escapeHtml(v)}" ${cur === v ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+  const filters = `
+    <div class="card control-panel align-end">
+      <div class="field"><label>Tipo</label>
+        <select id="aud-uso-kind" style="width:200px">${opt('all', 'Todos', s.usoKind)}${kinds.map((k) => opt(k, audKindText(k), s.usoKind)).join('')}</select>
+      </div>
+      <div class="field"><label>Campaña</label>
+        <select id="aud-uso-campaign" style="width:300px">${opt('all', 'Todas', s.usoCampaign)}${usedCamps.map((id) => opt(id, (campById.get(id) || {}).name || id, s.usoCampaign)).join('')}</select>
+      </div>
+      <div class="field"><label>Buscar</label><input type="text" id="aud-uso-search" placeholder="Nombre de la audiencia…" value="${escapeHtml(s.usoSearch)}" style="width:220px" /></div>
+    </div>`;
+
+  const legend = `<div class="aud-legend" style="margin-bottom:12px">
+    <span><i class="aud-sw hm-o"></i>O · observación</span><span><i class="aud-sw hm-s"></i>S · segmentación</span>
+    <span><i class="aud-sw hm-n"></i>N · negativa</span><span><i class="aud-sw hm-p"></i>P · señal en Performance Max</span><span><i class="aud-sw hm-u"></i>? · modo sin definir</span>
+  </div>`;
+  // Se quita de los encabezados el prefijo que comparten todas las campañas (casi siempre el nombre del hotel).
+  const campNames = usedCamps.map((id) => (campById.get(id) || {}).name || id);
+  let prefix = '';
+  if (campNames.length > 1) {
+    const first = campNames[0];
+    let n = 0;
+    while (n < first.length && campNames.every((nm) => nm[n] === first[n])) n += 1;
+    const cut = first.slice(0, n).lastIndexOf(' - ');
+    if (cut > 0) prefix = first.slice(0, cut + 3);
+  }
+  const campShort = (id) => { const nm = (campById.get(id) || {}).name || id; return prefix && nm.startsWith(prefix) ? nm.slice(prefix.length) : nm; };
+  const head = `<tr><th class="aud-hm-name">Audiencia</th>${cols.map((id) => `<th title="${escapeHtml((campById.get(id) || {}).name || id)}"><div class="aud-hm-camp">${escapeHtml(campShort(id))}</div></th>`).join('')}</tr>`;
+  const body = shown.map((r) => `<tr><td class="aud-hm-name" title="${escapeHtml(r.name)}">${escapeHtml(r.name)}<span class="field-hint"> · ${escapeHtml(audKindText(r.kind))}</span></td>${cols.map((id) => {
+    const c = r.cells.get(id);
+    if (!c) return '<td class="aud-hm-empty"></td>';
+    const tip = [...c.items.map((u) => `${u.ad_group ? u.ad_group : 'Toda la campaña'}: ${u.negative ? 'negativa' : (u.mode === 'targeting' ? 'segmentación' : u.mode === 'observation' ? 'observación' : 'modo sin definir')}${u.bid_modifier != null && u.bid_modifier !== 1 && !u.negative ? ` · puja ×${u.bid_modifier}` : ''}`),
+      ...c.signals.map((p) => `Señal en ${p.asset_group}`)].join('\n');
+    const lowerN = c.items.length > 1 ? `<sup>${c.items.length}</sup>` : '';
+    return `<td class="aud-hm-cell hm-${c.code === '?' ? 'u' : c.code.toLowerCase()}" title="${escapeHtml(tip)}">${c.code}${lowerN}</td>`;
+  }).join('')}</tr>`).join('');
+
+  const noAudHtml = noAud.length ? `<div class="error-panel" style="margin-bottom:16px"><strong>${fmtInt(noAud.length)} campaña${noAud.length === 1 ? '' : 's'} activa${noAud.length === 1 ? '' : 's'} sin ninguna audiencia:</strong> ${escapeHtml(noAud.slice(0, 8).map((c) => c.name).join(' · '))}${noAud.length > 8 ? ` · y ${fmtInt(noAud.length - 8)} más` : ''}</div>` : '';
+  const table = `
+    <div class="card table-panel">
+      <div class="table-panel-head"><h3>Audiencias por campaña activa (${fmtInt(rows.length)})</h3></div>
+      ${legend}
+      <div class="aud-hm-wrap"><table class="aud-hm"><thead>${head}</thead><tbody>${body || `<tr><td colspan="${cols.length + 1}" class="footnote">Ninguna audiencia coincide con los filtros.</td></tr>`}</tbody></table></div>
+      ${rows.length > shown.length ? `<p class="footnote" style="margin-top:10px">Mostrando ${fmtInt(shown.length)} de ${fmtInt(rows.length)}. <button class="btn-outline xs" data-action="aud-more-uso">Mostrar ${fmtInt(Math.min(40, rows.length - shown.length))} más</button></p>` : ''}
+      <p class="footnote" style="margin-top:10px">Pasa el mouse por una celda para ver el grupo de anuncios y el modificador de puja. El número pequeño indica en cuántos grupos de esa campaña se usa. En <strong>observación</strong> la audiencia solo ajusta la puja; en <strong>segmentación</strong> limita a quién se muestran los anuncios. Si Google no devuelve el modo, se marca «?». En Performance Max las audiencias son solo señales, no restricciones.</p>
+    </div>`;
+  return `${filters}${noAudHtml}${table}`;
+}
+
+// ---- Rendimiento ---------------------------------------------------------
+
+function renderAudRendimiento() {
+  const s = state.audiencias;
+  const cur = s.currency;
+  const all = audPerfRows().filter((r) => r.cost > 0);
+  if (!all.length) {
+    return `<div class="card state-panel idle">${icon('users', 30)}<p>Ninguna audiencia tuvo gasto en los últimos ${s.loaded.days} días. Prueba con un periodo más largo.</p></div>`;
+  }
+  const rows = audPerfFiltered();
+  const avg = audAvgCpa(all);
+  const kinds = [...new Set(all.map((r) => r.kind))];
+  const opt = (v, label, cur2) => `<option value="${escapeHtml(v)}" ${cur2 === v ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+  const totalCost = all.reduce((t, r) => t + r.cost, 0);
+  const totalConv = all.reduce((t, r) => t + r.conversions, 0);
+  const withCpa = rows.filter((r) => r.cpa_pct != null);
+  const cards = `<div class="stat-grid">
+    ${audStat('Audiencias con gasto', fmtInt(all.length), `en los últimos ${s.loaded.days} días`)}
+    ${audStat('Gasto', campanasMoney(totalCost, cur), 'suma por audiencia, ver nota')}
+    ${audStat('Conversiones', fmtInt(totalConv), '')}
+    ${audStat('CPA % promedio', audPct(avg), 'gasto ÷ valor de conversión')}
+  </div>`;
+  const filters = `
+    <div class="card control-panel align-end">
+      <div class="field"><label>Tipo</label>
+        <select id="aud-perf-kind" style="width:200px">${opt('all', 'Todos', s.perfKind)}${kinds.map((k) => opt(k, audKindText(k), s.perfKind)).join('')}</select>
+      </div>
+      <div class="field"><label>Ordenar tabla por</label>
+        <select id="aud-perf-sort" style="width:200px">${opt('cost', 'Gasto', s.perfSort)}${opt('cpa', 'CPA % (menor primero)', s.perfSort)}${opt('conversions', 'Conversiones', s.perfSort)}</select>
+      </div>
+      <p class="field-hint" style="max-width:420px">Las gráficas muestran solo audiencias con gasto y con valor de conversión; las demás aparecen en la tabla con CPA % «N/D».</p>
+    </div>`;
+
+  const groups = ['R', 'M', 'F', 'P', 'O'].filter((g) => withCpa.some((r) => AUD_KIND_GROUP[r.kind] === g));
+  const col = audColors();
+  const legend = groups.map((g) => `<span><i class="aud-glyph" style="color:${col[g]}">${AUD_GROUP_GLYPH[g]}</i>${AUD_GROUP_LABEL[g]}</span>`).join('');
+  const charts = withCpa.length ? `
+    <div class="card" style="padding:18px 22px;margin-bottom:20px">
+      <h3 style="margin:0 0 4px;font-size:13px;font-weight:700">CPA % frente a conversiones</h3>
+      <p class="field-hint" style="margin:0 0 10px">Cada punto es una audiencia y su tamaño es el gasto. Abajo a la derecha: barata y con muchas conversiones. Arriba a la izquierda: cara y con pocas.</p>
+      <div class="aud-legend" style="margin-bottom:8px">${legend}</div>
+      ${withCpa.some((r) => r.cpa_pct * 100 > audCapPct(avg)) ? `<p class="field-hint" style="margin:0 0 8px">Las audiencias con CPA % por encima de ${Math.round(audCapPct(avg))}% se dibujan en el borde de arriba; su valor real está en el tooltip y en la tabla.</p>` : ''}
+      <div style="position:relative;height:360px"><canvas id="aud-scatter" role="img" aria-label="Dispersión de CPA porcentual contra conversiones por audiencia"></canvas></div>
+    </div>
+    <div class="card" style="padding:18px 22px;margin-bottom:20px">
+      <h3 style="margin:0 0 4px;font-size:13px;font-weight:700">CPA % de las audiencias con más gasto</h3>
+      <p class="field-hint" style="margin:0 0 10px">Hasta 15 audiencias, de menor a mayor CPA %. En azul las que están por debajo del promedio de ${audPct(avg)} y en rojo las que lo superan; una flecha ▸ indica que la barra se cortó en ${Math.round(audCapPct(avg))}%.</p>
+      <div style="position:relative;height:${Math.min(15, withCpa.length) * 30 + 70}px"><canvas id="aud-bars" role="img" aria-label="CPA porcentual de las audiencias con más gasto, comparado con el promedio"></canvas></div>
+    </div>` : `<div class="card state-panel idle" style="margin-bottom:20px">${icon('users', 30)}<p>Ninguna audiencia con gasto trae valor de conversión, así que no se puede calcular el CPA %.</p></div>`;
+
+  const shown = rows.slice(0, s.perfLimit);
+  const tr = shown.map((r) => {
+    const diff = r.cpa_pct != null && avg != null ? (r.cpa_pct - avg) * 100 : null;
+    const diffHtml = diff == null ? '—' : `<span style="color:${diff <= 0 ? 'var(--ok-text, #0f7b5f)' : 'var(--danger, #d5455f)'};font-weight:600">${diff > 0 ? '+' : '−'}${Math.abs(diff).toFixed(1)} pp</span>`;
+    return `<tr>
+      <td style="min-width:220px">${escapeHtml(r.name)}</td>
+      <td>${escapeHtml(audKindText(r.kind))}</td>
+      <td style="text-align:right">${fmtInt(r.campaigns)} / ${fmtInt(r.places)}</td>
+      <td style="text-align:right">${campanasMoney(r.cost, cur)}</td>
+      <td style="text-align:right">${fmtInt(r.clicks)}</td>
+      <td style="text-align:right">${r.conversions.toFixed(1)}</td>
+      <td style="text-align:right;font-weight:600">${audPct(r.cpa_pct)}</td>
+      <td style="text-align:right">${diffHtml}</td>
+    </tr>`;
+  }).join('');
+  const table = `
+    <div class="card table-panel">
+      <div class="table-panel-head">
+        <h3>Rendimiento por audiencia (${fmtInt(rows.length)})</h3>
+        <button class="btn-outline xs" data-action="aud-csv">Descargar CSV</button>
+      </div>
+      <div class="table-scroll" style="max-height:560px">
+        <table>
+          <thead><tr><th>Audiencia</th><th>Tipo</th><th style="text-align:right" title="Campañas / lugares (campaña o grupo de anuncios)">Campañas / lugares</th><th style="text-align:right">Gasto</th><th style="text-align:right">Clics</th><th style="text-align:right">Conv.</th><th style="text-align:right">CPA %</th><th style="text-align:right" title="Diferencia en puntos porcentuales frente al promedio">Vs. promedio</th></tr></thead>
+          <tbody>${tr || '<tr><td colspan="8" class="footnote">Ninguna audiencia coincide.</td></tr>'}</tbody>
+        </table>
+      </div>
+      ${rows.length > shown.length ? `<p class="footnote" style="margin-top:10px">Mostrando ${fmtInt(shown.length)} de ${fmtInt(rows.length)}. <button class="btn-outline xs" data-action="aud-more-perf">Mostrar ${fmtInt(Math.min(AUD_PAGE_SIZE, rows.length - shown.length))} más</button> La descarga incluye todas.</p>` : ''}
+      <p class="footnote" style="margin-top:10px">CPA % = gasto ÷ valor de conversión. Un mismo clic puede contar en varias audiencias (en observación una persona está en muchas listas), por eso estas sumas no coinciden con las totales de la cuenta, y el promedio es el de las audiencias, no el de la cuenta. Performance Max no entrega rendimiento por audiencia, así que no aparece aquí. Periodo: ${escapeHtml(s.loaded.from)} a ${escapeHtml(s.loaded.to)}.</p>
+    </div>`;
+  return `${cards}${filters}${charts}${table}`;
+}
+
+function audColors() {
+  return {
+    R: audHexOr(cssVar('--rb-teal-500'), '#03a694'), M: audHexOr(cssVar('--rb-navy-500'), '#2f4468'),
+    F: audHexOr(cssVar('--rb-orange-500'), '#ff9800'), P: '#7e57c2', O: '#8a8f98',
+    good: audHexOr(cssVar('--rb-navy-500'), '#2f4468'), bad: audHexOr(cssVar('--rb-danger-500'), '#d5455f'),
+    grid: cssVar('--color-border') || '#e5e7eb', muted: cssVar('--color-text-muted') || '#666', text: cssVar('--color-text-body') || '#333',
+  };
+}
+
+function downloadAudCsv() {
+  const s = state.audiencias;
+  if (!s.loaded) return;
+  const rows = [['Audiencia', 'Tipo', 'Campañas', 'Lugares', 'Impresiones', 'Clics', 'Gasto', 'Conversiones', 'Valor de conversión', 'CPA % (gasto ÷ valor)']];
+  audPerfFiltered().forEach((r) => rows.push([r.name, audKindText(r.kind), r.campaigns, r.places, r.impressions, r.clicks, r.cost.toFixed(2), r.conversions.toFixed(2), r.conv_value.toFixed(2), r.cpa_pct == null ? '' : (r.cpa_pct * 100).toFixed(2) + '%']));
+  engine.downloadCsv(`audiencias_${cambiosSlug(s.loaded.accountName)}_${new Date().toISOString().slice(0, 10)}.csv`, rows);
+}
+
+// ---- Gráficas ------------------------------------------------------------
+
+function mountAudienciasCharts() {
+  const s = state.audiencias;
+  if (s.status !== 'ready' || !s.data || !window.Chart) return;
+  const col = audColors();
+  if (s.tab === 'resumen') mountAudSizesChart(col);
+  else if (s.tab === 'rendimiento') {
+    const rows = audPerfFiltered().filter((r) => r.cpa_pct != null);
+    if (!rows.length) return;
+    const avg = audAvgCpa(audPerfRows().filter((r) => r.cost > 0));
+    mountAudScatter(rows, avg, col);
+    mountAudBars(rows, avg, col);
+  }
+}
+
+function mountAudSizesChart(col) {
+  const canvas = document.getElementById('aud-sizes');
+  if (!canvas) return;
+  const rows = audListsInfo().filter((l) => !l.legacy && (l.size_search || 0) > 0).sort((a, b) => b.size_search - a.size_search).slice(0, 15);
+  const minLine = {
+    id: 'minLine',
+    afterDatasetsDraw(chart) {
+      const { ctx, chartArea, scales } = chart;
+      const x = scales.x.getPixelForValue(AUD_MIN_SEARCH);
+      if (x < chartArea.left || x > chartArea.right) return;
+      ctx.save(); ctx.setLineDash([4, 4]); ctx.strokeStyle = col.bad; ctx.lineWidth = 1.2;
+      ctx.beginPath(); ctx.moveTo(x, chartArea.top); ctx.lineTo(x, chartArea.bottom); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = col.bad; ctx.font = '11px sans-serif'; ctx.textAlign = 'left';
+      ctx.fillText(`Mínimo ${fmtInt(AUD_MIN_SEARCH)}`, x + 4, chartArea.top + 11);
+      ctx.restore();
+    },
+  };
+  const valueLabels = {
+    id: 'valueLabels',
+    afterDatasetsDraw(chart) {
+      const { ctx } = chart; ctx.save(); ctx.font = '600 11px sans-serif'; ctx.fillStyle = col.text; ctx.textAlign = 'left';
+      chart.getDatasetMeta(0).data.forEach((bar, i) => ctx.fillText(fmtInt(rows[i].size_search), bar.x + 6, bar.y + 4));
+      ctx.restore();
+    },
+  };
+  chartRegistry['aud-sizes'] = new window.Chart(canvas.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: rows.map((l) => (l.name.length > 38 ? l.name.slice(0, 37) + '…' : l.name)),
+      datasets: [{ data: rows.map((l) => l.size_search), backgroundColor: rows.map((l) => (l.size_search < AUD_MIN_SEARCH ? col.bad : col.R)), borderRadius: 4, barThickness: 18 }],
+    },
+    plugins: [minLine, valueLabels],
+    options: {
+      indexAxis: 'y', responsive: true, maintainAspectRatio: false, animation: { duration: 250 }, layout: { padding: { right: 60 } },
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: (c) => `${fmtInt(c.parsed.x)} usuarios en Búsqueda` } } },
+      scales: {
+        x: { type: 'logarithmic', min: 1, grid: { color: col.grid }, ticks: { color: col.muted, maxRotation: 0, autoSkip: false, callback: (v) => ([1, 10, 100, 1000, 10000, 100000, 1000000, 10000000].includes(v) ? fmtInt(v) : '') } },
+        y: { grid: { display: false }, ticks: { color: col.text, font: { size: 11 } } },
+      },
+    },
+  });
+}
+
+function mountAudScatter(rows, avg, col) {
+  const canvas = document.getElementById('aud-scatter');
+  if (!canvas) return;
+  const top = rows.slice().sort((a, b) => b.cost - a.cost).slice(0, 60);
+  const maxCost = Math.max(...top.map((r) => r.cost), 1);
+  const cap = audCapPct(avg);
+  const radius = (r) => 5 + 11 * Math.sqrt(r.cost / maxCost);
+  const labeled = new Set(top.slice(0, 8).map((r) => r.key));
+  const groups = ['R', 'M', 'F', 'P', 'O'].filter((g) => top.some((r) => AUD_KIND_GROUP[r.kind] === g));
+  const datasets = groups.map((g) => ({
+    label: AUD_GROUP_LABEL[g],
+    data: top.filter((r) => AUD_KIND_GROUP[r.kind] === g).map((r) => ({ x: r.conversions, y: Math.min(r.cpa_pct * 100, cap), r })),
+    backgroundColor: col[g] + 'cc', borderColor: '#ffffff', borderWidth: 1.5, pointStyle: AUD_SHAPE[g], pointRadius: (c) => radius(c.raw.r),
+  }));
+  const extras = {
+    id: 'audExtras',
+    afterDatasetsDraw(chart) {
+      const { ctx, chartArea, scales } = chart;
+      ctx.save();
+      const y = scales.y.getPixelForValue(avg * 100);
+      ctx.setLineDash([4, 4]); ctx.strokeStyle = col.muted; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(chartArea.left, y); ctx.lineTo(chartArea.right, y); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = col.muted; ctx.font = '11px sans-serif'; ctx.textAlign = 'left';
+      ctx.fillText(`Promedio ${audPct(avg)}`, chartArea.left + 6, y - 5);
+      ctx.fillStyle = col.text; ctx.textAlign = 'left';
+      const drawn = [];
+      const pts = [];
+      chart.data.datasets.forEach((d, i) => chart.getDatasetMeta(i).data.forEach((p, j) => { if (labeled.has(d.data[j].r.key)) pts.push({ p, r: d.data[j].r }); }));
+      pts.sort((a, b) => b.r.cost - a.r.cost).forEach(({ p, r }) => {
+        const text = r.name.length > 26 ? r.name.slice(0, 25) + '…' : r.name;
+        const box = { x: p.x + radius(r) + 4, y: p.y - 6, w: ctx.measureText(text).width, h: 13 };
+        if (drawn.some((b) => box.x < b.x + b.w && box.x + box.w > b.x && box.y < b.y + b.h && box.y + box.h > b.y)) return;
+        drawn.push(box);
+        ctx.fillText(text, box.x, p.y + 4);
+      });
+      ctx.restore();
+    },
+  };
+  chartRegistry['aud-scatter'] = new window.Chart(canvas.getContext('2d'), {
+    type: 'scatter',
+    data: { datasets },
+    plugins: [extras],
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: { duration: 250 }, layout: { padding: { right: 130, top: 8 } },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: (c) => { const r = c.raw.r; return `${r.name}: CPA % ${audPct(r.cpa_pct)}, ${r.conversions.toFixed(1)} conv., gasto ${campanasMoney(r.cost, state.audiencias.currency)}`; } } },
+      },
+      scales: {
+        x: { min: 0, title: { display: true, text: 'Conversiones', color: col.muted, font: { size: 11 } }, grid: { display: false }, ticks: { color: col.muted } },
+        y: { min: 0, max: Math.ceil(cap), title: { display: true, text: 'CPA % (gasto ÷ valor de conversión)', color: col.muted, font: { size: 11 } }, grid: { color: col.grid }, ticks: { color: col.muted, callback: (v) => v + '%' } },
+      },
+    },
+  });
+}
+
+function mountAudBars(rows, avg, col) {
+  const canvas = document.getElementById('aud-bars');
+  if (!canvas) return;
+  const top = rows.slice().sort((a, b) => b.cost - a.cost).slice(0, 15).sort((a, b) => a.cpa_pct - b.cpa_pct);
+  const cap = audCapPct(avg);
+  const extras = {
+    id: 'audBarExtras',
+    afterDatasetsDraw(chart) {
+      const { ctx, chartArea, scales } = chart;
+      ctx.save();
+      const x = scales.x.getPixelForValue(avg * 100);
+      ctx.setLineDash([4, 4]); ctx.strokeStyle = col.muted; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x, chartArea.top); ctx.lineTo(x, chartArea.bottom); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = col.muted; ctx.font = '11px sans-serif'; ctx.textAlign = 'left';
+      ctx.fillText(`Promedio ${audPct(avg)}`, x + 4, chartArea.top - 4);
+      ctx.fillStyle = col.text; ctx.font = '600 11px sans-serif';
+      chart.getDatasetMeta(0).data.forEach((bar, i) => ctx.fillText(audPct(top[i].cpa_pct) + (top[i].cpa_pct * 100 > cap ? ' ▸' : ''), bar.x + 6, bar.y + 4));
+      ctx.restore();
+    },
+  };
+  chartRegistry['aud-bars'] = new window.Chart(canvas.getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: top.map((r) => (r.name.length > 36 ? r.name.slice(0, 35) + '…' : r.name)),
+      datasets: [{ data: top.map((r) => Math.min(r.cpa_pct * 100, cap)), backgroundColor: top.map((r) => (r.cpa_pct <= avg ? col.good : col.bad)), borderRadius: 4, barThickness: 18 }],
+    },
+    plugins: [extras],
+    options: {
+      indexAxis: 'y', responsive: true, maintainAspectRatio: false, animation: { duration: 250 }, layout: { padding: { right: 56, top: 16 } },
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: (c) => `CPA % ${audPct(top[c.dataIndex].cpa_pct)} · gasto ${campanasMoney(top[c.dataIndex].cost, state.audiencias.currency)}` } } },
+      scales: {
+        x: { min: 0, max: Math.ceil(cap * 1.12), grid: { color: col.grid }, ticks: { color: col.muted, callback: (v) => v + '%' } },
+        y: { grid: { display: false }, ticks: { color: col.text, font: { size: 11 } } },
+      },
+    },
+  });
+}
+
 function bindEvents() {
   // Campañas
   document.querySelectorAll('[data-camp-open]').forEach((el) => el.addEventListener('click', () => openCampanaDetail(el.dataset.campOpen)));
@@ -14240,6 +14861,17 @@ function bindEvents() {
     camOn(id, 'change', (e) => { state.cambios.filters[key] = e.target.value; state.cambios.limit = CAMBIOS_PAGE_SIZE; render(); });
   });
   camOn('cf-search', 'input', (e) => { state.cambios.filters.search = e.target.value; state.cambios.limit = CAMBIOS_PAGE_SIZE; render(); hotelRefocus('cf-search'); });
+
+  // Audiencias
+  document.querySelectorAll('[data-aud-tab]').forEach((el) => el.addEventListener('click', () => { state.audiencias.tab = el.dataset.audTab; render(); }));
+  camOn('aud-account', 'change', (e) => { state.audiencias.accountId = e.target.value; });
+  camOn('aud-days', 'change', (e) => { state.audiencias.days = Number(e.target.value); });
+  camOn('aud-list-filter', 'change', (e) => { state.audiencias.listFilter = e.target.value; state.audiencias.listLimit = AUD_PAGE_SIZE; render(); });
+  camOn('aud-uso-kind', 'change', (e) => { state.audiencias.usoKind = e.target.value; state.audiencias.usoLimit = 40; render(); });
+  camOn('aud-uso-campaign', 'change', (e) => { state.audiencias.usoCampaign = e.target.value; state.audiencias.usoLimit = 40; render(); });
+  camOn('aud-uso-search', 'input', (e) => { state.audiencias.usoSearch = e.target.value; state.audiencias.usoLimit = 40; render(); hotelRefocus('aud-uso-search'); });
+  camOn('aud-perf-kind', 'change', (e) => { state.audiencias.perfKind = e.target.value; state.audiencias.perfLimit = AUD_PAGE_SIZE; render(); });
+  camOn('aud-perf-sort', 'change', (e) => { state.audiencias.perfSort = e.target.value; state.audiencias.perfLimit = AUD_PAGE_SIZE; render(); });
 
   // Rendimiento
   const rendBrandInput = document.getElementById('rend-brand-keywords');
@@ -15206,6 +15838,11 @@ function handleAction(action) {
     case 'camp-detail-html': downloadCampanaDetailHtml(); break;
     case 'camp-go-pacing': state.page = 'pacing'; render(); break;
     case 'cambios-load': loadCambios(); break;
+    case 'aud-load': loadAudiencias(); break;
+    case 'aud-more-lists': state.audiencias.listLimit += AUD_PAGE_SIZE; render(); break;
+    case 'aud-more-uso': state.audiencias.usoLimit += 40; render(); break;
+    case 'aud-more-perf': state.audiencias.perfLimit += AUD_PAGE_SIZE; render(); break;
+    case 'aud-csv': downloadAudCsv(); break;
     case 'cambios-more': state.cambios.limit += CAMBIOS_PAGE_SIZE; render(); break;
     case 'cambios-csv': downloadCambiosCsv(); break;
     case 'cambios-html': downloadCambiosHtml(); break;
@@ -15729,6 +16366,8 @@ fetch('/api/me').then((r) => r.json()).then((data) => {
   // (el servidor también lo exige).
   const navCampanas = document.getElementById('nav-campanas');
   if (navCampanas && currentUser.isSuperAdmin) navCampanas.style.display = '';
+  const navAudiencias = document.getElementById('nav-audiencias');
+  if (navAudiencias && currentUser.isSuperAdmin) navAudiencias.style.display = '';
   const navCambios = document.getElementById('nav-cambios');
   if (navCambios) navCambios.style.display = '';
   const navHoteles = document.getElementById('nav-hoteles');

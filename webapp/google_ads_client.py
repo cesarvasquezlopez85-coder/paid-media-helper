@@ -39,6 +39,7 @@ import os
 import re
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1338,6 +1339,228 @@ ACCOUNT_CHANGES_LIMIT = 3000
 def _id_from_resource(name):
     """'customers/1/campaigns/22' -> '22' (vacío si no hay recurso)."""
     return (name or "").rsplit("/", 1)[-1] if name else ""
+
+
+_AUDIENCE_CRITERION_TYPES = ("USER_LIST", "USER_INTEREST", "CUSTOM_AUDIENCE", "COMBINED_AUDIENCE")
+
+
+def _audience_ref(crit):
+    """Recurso al que apunta un criterio de audiencia (lista, interés, personalizada o combinada)."""
+    t = crit.get("type")
+    if t == "USER_LIST":
+        return crit.get("userList", {}).get("userList")
+    if t == "USER_INTEREST":
+        return crit.get("userInterest", {}).get("userInterestCategory")
+    if t == "CUSTOM_AUDIENCE":
+        return crit.get("customAudience", {}).get("customAudience")
+    if t == "COMBINED_AUDIENCE":
+        return crit.get("combinedAudience", {}).get("combinedAudience")
+    return None
+
+
+def fetch_account_audiences(customer_id, date_from, date_to):
+    """Sección Audiencias (solo lectura): inventario de listas propias, dónde se usa cada audiencia (campaña o grupo
+    de anuncios, modo, negativa, modificador de puja) y su rendimiento en el rango. El uso sale de las tablas de
+    criterios (traen también las negativas) y las métricas de campaign_audience_view / ad_group_audience_view, cruzadas
+    por campaña o grupo + criterio. Cada bloque falla por separado y se informa en `errors`, sin tumbar el resto.
+    Performance Max no devuelve rendimiento por audiencia: de ahí solo salen las señales."""
+    errors = {}
+    pool = ThreadPoolExecutor(max_workers=3)  # las consultas independientes salen a la vez
+
+    def block(name, fn, default):
+        for attempt in (1, 2):
+            try:
+                return fn()
+            except Exception as e:  # noqa: BLE001
+                msg = " ".join(str(e).split())[:200]
+                if attempt == 1 and ("timed out" in msg or "RESOURCE_EXHAUSTED" in msg):
+                    time.sleep(2)  # tiempo límite en cuentas con cientos de listas, o cuota por ráfaga: un segundo intento
+                    continue
+                errors[name] = msg
+                print(f"[audiencias] bloque {name} falló ({customer_id}): {msg}", flush=True)
+                return default
+
+    types_in = ", ".join(f"'{t}'" for t in _AUDIENCE_CRITERION_TYPES)
+
+    def lists():
+        out = []
+        for r in _search(customer_id, """
+            SELECT user_list.id, user_list.name, user_list.type, user_list.membership_status, user_list.read_only,
+                   user_list.size_for_search, user_list.size_for_display, user_list.membership_life_span
+            FROM user_list LIMIT 2000
+        """):
+            u = r.get("userList", {})
+            out.append({"key": u.get("resourceName"), "id": str(u.get("id")), "name": u.get("name") or "", "type": u.get("type"),
+                        "status": u.get("membershipStatus"), "read_only": bool(u.get("readOnly")),
+                        "size_search": _int_or_none(u.get("sizeForSearch")), "size_display": _int_or_none(u.get("sizeForDisplay")),
+                        "life_span": _int_or_none(u.get("membershipLifeSpan"))})
+        return out
+    f_lists = pool.submit(block, "user_lists", lists, [])
+
+    def campaigns():
+        return [{"id": str(r.get("campaign", {}).get("id")), "name": r.get("campaign", {}).get("name") or "",
+                 "status": r.get("campaign", {}).get("status"), "channel": r.get("campaign", {}).get("advertisingChannelType")}
+                for r in _search(customer_id, "SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type FROM campaign WHERE campaign.status != 'REMOVED'")]
+    f_camps = pool.submit(block, "campaigns", campaigns, [])
+
+    def criteria_campaign():
+        return _search(customer_id, f"""
+            SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type,
+                   campaign_criterion.criterion_id, campaign_criterion.type, campaign_criterion.display_name,
+                   campaign_criterion.negative, campaign_criterion.bid_modifier,
+                   campaign_criterion.user_list.user_list, campaign_criterion.user_interest.user_interest_category,
+                   campaign_criterion.custom_audience.custom_audience, campaign_criterion.combined_audience.combined_audience
+            FROM campaign_criterion
+            WHERE campaign_criterion.type IN ({types_in}) AND campaign.status != 'REMOVED'
+        """)
+    f_camp_crit = pool.submit(block, "criterios_campana", criteria_campaign, [])
+
+    def criteria_ad_group():
+        return _search(customer_id, f"""
+            SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type, ad_group.id, ad_group.name,
+                   ad_group_criterion.criterion_id, ad_group_criterion.type, ad_group_criterion.display_name,
+                   ad_group_criterion.negative, ad_group_criterion.bid_modifier,
+                   ad_group_criterion.user_list.user_list, ad_group_criterion.user_interest.user_interest_category,
+                   ad_group_criterion.custom_audience.custom_audience, ad_group_criterion.combined_audience.combined_audience
+            FROM ad_group_criterion
+            WHERE ad_group_criterion.type IN ({types_in}) AND ad_group_criterion.status != 'REMOVED'
+              AND ad_group.status != 'REMOVED' AND campaign.status != 'REMOVED'
+        """)
+    f_ag_crit = pool.submit(block, "criterios_grupo", criteria_ad_group, [])
+
+    metric_fields = "metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions, metrics.conversions_value"
+
+    def read_metrics(m):
+        return {"impressions": _int_or_none(m.get("impressions")) or 0, "clicks": _int_or_none(m.get("clicks")) or 0,
+                "cost": _micros_to_units(_int_or_none(m.get("costMicros"))) or 0.0,
+                "conversions": _float_or_none(m.get("conversions")) or 0.0, "conv_value": _float_or_none(m.get("conversionsValue")) or 0.0}
+
+    def metrics_campaign():
+        out = {}
+        for r in _search(customer_id, f"""
+            SELECT campaign.id, campaign_criterion.criterion_id, {metric_fields}
+            FROM campaign_audience_view WHERE segments.date BETWEEN '{date_from}' AND '{date_to}'
+        """):
+            out[(str(r.get("campaign", {}).get("id")), str(r.get("campaignCriterion", {}).get("criterionId")))] = read_metrics(r.get("metrics", {}))
+        return out
+    f_camp_metrics = pool.submit(block, "rendimiento_campana", metrics_campaign, {})
+
+    def metrics_ad_group():
+        out = {}
+        for r in _search(customer_id, f"""
+            SELECT ad_group.id, ad_group_criterion.criterion_id, {metric_fields}
+            FROM ad_group_audience_view WHERE segments.date BETWEEN '{date_from}' AND '{date_to}'
+        """):
+            out[(str(r.get("adGroup", {}).get("id")), str(r.get("adGroupCriterion", {}).get("criterionId")))] = read_metrics(r.get("metrics", {}))
+        return out
+    f_ag_metrics = pool.submit(block, "rendimiento_grupo", metrics_ad_group, {})
+
+    # Modo: "observación" (bid_only) solo ajusta la puja; "segmentación" limita la campaña a esa audiencia.
+    def target_modes(resource, json_key):
+        out = {}
+        for r in _search(customer_id, f"SELECT {resource}.id, {resource}.targeting_setting.target_restrictions FROM {resource} WHERE {resource}.status != 'REMOVED'"):
+            row = r.get(json_key, {})
+            for t in row.get("targetingSetting", {}).get("targetRestrictions", []):
+                if t.get("targetingDimension") == "AUDIENCE":
+                    out[str(row.get("id"))] = "observation" if t.get("bidOnly") else "targeting"
+        return out
+    f_camp_modes = pool.submit(block, "modo_campana", lambda: target_modes("campaign", "campaign"), {})
+    f_ag_modes = pool.submit(block, "modo_grupo", lambda: target_modes("ad_group", "adGroup"), {})
+    user_lists, camp_list, camp_crit, ag_crit = f_lists.result(), f_camps.result(), f_camp_crit.result(), f_ag_crit.result()
+    camp_metrics, ag_metrics, camp_modes, ag_modes = f_camp_metrics.result(), f_ag_metrics.result(), f_camp_modes.result(), f_ag_modes.result()
+    pool.shutdown(wait=True)
+    list_by_key = {u["key"]: u for u in user_lists}
+
+    # Nombres: los intereses de Google, las audiencias personalizadas y las combinadas se resuelven aparte.
+    refs = {_audience_ref(r.get("campaignCriterion", {})) for r in camp_crit} | {_audience_ref(r.get("adGroupCriterion", {})) for r in ag_crit}
+    refs.discard(None)
+    interest_ids = sorted({k.rsplit("/", 1)[-1] for k in refs if "/userInterests/" in k and k.rsplit("/", 1)[-1].isdigit()})
+
+    def interests():
+        out = {}
+        for i in range(0, len(interest_ids), 150):
+            chunk = ",".join(interest_ids[i:i + 150])
+            for r in _search(customer_id, f"SELECT user_interest.user_interest_id, user_interest.name, user_interest.taxonomy_type FROM user_interest WHERE user_interest.user_interest_id IN ({chunk})"):
+                u = r.get("userInterest", {})
+                out[u.get("resourceName")] = (u.get("name") or "", u.get("taxonomyType"))
+        return out
+    interest_by_key = block("intereses", interests, {}) if interest_ids else {}
+
+    def named(resource, field):
+        out = {}
+        for r in _search(customer_id, f"SELECT {resource}.name FROM {resource}"):
+            x = r.get(field, {})
+            out[x.get("resourceName")] = x.get("name") or ""
+        return out
+    custom_by_key = block("personalizadas", lambda: named("custom_audience", "customAudience"), {}) if any("/customAudiences/" in k for k in refs) else {}
+    combined_by_key = block("combinadas", lambda: named("combined_audience", "combinedAudience"), {}) if any("/combinedAudiences/" in k for k in refs) else {}
+
+    def describe(crit):
+        key = _audience_ref(crit)
+        t = crit.get("type")
+        if t == "USER_LIST":
+            u = list_by_key.get(key) or {}
+            return key, u.get("name") or crit.get("displayName") or key, "list", u.get("type")
+        if t == "USER_INTEREST":
+            name, tax = interest_by_key.get(key, (None, None))
+            kind = {"IN_MARKET": "in_market", "AFFINITY": "affinity"}.get(tax, "interest")
+            return key, name or crit.get("displayName") or key, kind, tax
+        if t == "CUSTOM_AUDIENCE":
+            return key, custom_by_key.get(key) or crit.get("displayName") or key, "custom", None
+        return key, combined_by_key.get(key) or crit.get("displayName") or key, "combined", None
+
+    usage = []
+    for r in camp_crit:
+        c = r.get("campaignCriterion", {})
+        key, name, kind, sub = describe(c)
+        cid = str(r.get("campaign", {}).get("id"))
+        m = camp_metrics.get((cid, str(c.get("criterionId"))), {})
+        usage.append({"level": "campaign", "campaign_id": cid, "campaign": r.get("campaign", {}).get("name") or "",
+                      "campaign_status": r.get("campaign", {}).get("status"), "channel": r.get("campaign", {}).get("advertisingChannelType"),
+                      "ad_group_id": None, "ad_group": "", "key": key, "name": name, "kind": kind, "sub": sub,
+                      "negative": bool(c.get("negative")), "bid_modifier": _float_or_none(c.get("bidModifier")),
+                      "mode": camp_modes.get(cid), "has_metrics": bool(m), **{k: m.get(k, 0) for k in ("impressions", "clicks", "cost", "conversions", "conv_value")}})
+    for r in ag_crit:
+        c = r.get("adGroupCriterion", {})
+        key, name, kind, sub = describe(c)
+        cid, gid = str(r.get("campaign", {}).get("id")), str(r.get("adGroup", {}).get("id"))
+        m = ag_metrics.get((gid, str(c.get("criterionId"))), {})
+        usage.append({"level": "ad_group", "campaign_id": cid, "campaign": r.get("campaign", {}).get("name") or "",
+                      "campaign_status": r.get("campaign", {}).get("status"), "channel": r.get("campaign", {}).get("advertisingChannelType"),
+                      "ad_group_id": gid, "ad_group": r.get("adGroup", {}).get("name") or "", "key": key, "name": name, "kind": kind, "sub": sub,
+                      "negative": bool(c.get("negative")), "bid_modifier": _float_or_none(c.get("bidModifier")),
+                      "mode": ag_modes.get(gid), "has_metrics": bool(m), **{k: m.get(k, 0) for k in ("impressions", "clicks", "cost", "conversions", "conv_value")}})
+
+    # Señales de audiencia de Performance Max (solo si hay campañas PMax activas).
+    pmax = []
+    if any(c["channel"] == "PERFORMANCE_MAX" and c["status"] == "ENABLED" for c in camp_list):
+        def pmax_signals():
+            names, members = {}, {}
+            for r in _search(customer_id, "SELECT audience.resource_name, audience.name, audience.dimensions FROM audience"):
+                a_ = r.get("audience", {})
+                names[a_.get("resourceName")] = a_.get("name") or ""
+                members[a_.get("resourceName")] = [seg.get("userList", {}).get("userList")
+                                                   for dim in a_.get("dimensions", [])
+                                                   for seg in dim.get("audienceSegments", {}).get("segments", [])
+                                                   if seg.get("userList", {}).get("userList")]
+            out = []
+            for r in _search(customer_id, """
+                SELECT campaign.id, campaign.name, asset_group.id, asset_group.name, asset_group_signal.audience.audience
+                FROM asset_group_signal
+                WHERE asset_group.status = 'ENABLED' AND campaign.status = 'ENABLED'
+            """):
+                aud = r.get("assetGroupSignal", {}).get("audience", {}).get("audience")
+                if aud:
+                    out.append({"campaign_id": str(r.get("campaign", {}).get("id")), "campaign": r.get("campaign", {}).get("name") or "",
+                                "asset_group": r.get("assetGroup", {}).get("name") or "", "key": aud,
+                                "name": names.get(aud) or aud.rsplit("/", 1)[-1], "lists": members.get(aud, [])})
+            return out
+        pmax = block("senales_pmax", pmax_signals, [])
+
+    # Si fallaron a la vez las listas, las campañas y los dos criterios, no hay nada que mostrar: se devuelve el error real.
+    if {"user_lists", "campaigns", "criterios_campana", "criterios_grupo"} <= set(errors):
+        raise RuntimeError(next(iter(errors.values())))
+    return {"lists": user_lists, "campaigns": camp_list, "usage": usage, "pmax_signals": pmax, "errors": errors}
 
 
 def fetch_account_changes(customer_id, days=30):
@@ -3156,6 +3379,58 @@ def simulated_ai_max_status(only_active=False):
             "final_url_expansion": "OPTED_IN" if entry["enabled"] else "OPTED_OUT",
         })
     return out
+
+
+def simulated_account_audiences(date_from=None, date_to=None):
+    """Audiencias de ejemplo (la API de Google Ads no está configurada): 10 audiencias en 4 campañas activas."""
+    camps = {c["campaign_id"]: c for c in simulated_campaigns_overview()}
+    order = ["1111111102", "1111111101", "1111111103", "1111111104"]  # Search marca, Search genérica, PMax, Display remarketing
+    # nombre, tipo, subtipo, tamaño búsqueda, tamaño display, gasto, conversiones, CPA % (gasto ÷ valor), matriz por campaña
+    spec = [
+        ("Abandonaron reserva", "list", "RULE_BASED", 4200, 3100, 868000, 62, 0.08, "OOPS"),
+        ("Visitantes 30 días", "list", "RULE_BASED", 12800, 9400, 912000, 48, 0.11, "OOPS"),
+        ("Visitantes 180 días", "list", "RULE_BASED", 41000, 30500, 1705000, 55, 0.16, "OOPS"),
+        ("Clientes anteriores", "list", "CRM_BASED", 1900, 1500, 462000, 21, 0.13, "O.PN"),
+        ("In-market: Hoteles", "in_market", "IN_MARKET", None, None, 2664000, 74, 0.17, ".OPS"),
+        ("In-market: Vacaciones", "in_market", "IN_MARKET", None, None, 2378000, 41, 0.27, ".O.."),
+        ("Viajeros frecuentes", "affinity", "AFFINITY", None, None, 1332000, 18, 0.38, "..PS"),
+        ("Amantes de la playa", "affinity", "AFFINITY", None, None, 864000, 9, 0.52, "...O"),
+        ("Búsquedas «hotel medellín»", "custom", None, None, None, 957000, 33, 0.15, ".OP."),
+        ("Último minuto", "in_market", "IN_MARKET", None, None, 612000, 12, 0.24, ".O.."),
+    ]
+    lists, usage, pmax = [], [], []
+    for i, (name, kind, sub, ss, sd, cost, conv, cpa, mx) in enumerate(spec):
+        cost = cost / 1000  # los importes de la tabla están en miles para leerlos mejor arriba
+        key = {"list": f"customers/1111111111/userLists/{900 + i}", "custom": f"customers/1111111111/customAudiences/{700 + i}"}.get(kind, f"customers/1111111111/userInterests/{80000 + i}")
+        if kind == "list":
+            lists.append({"key": key, "id": str(900 + i), "name": name, "type": sub, "status": "OPEN", "size_search": ss, "size_display": sd, "life_span": 30 if "30" in name else 180})
+        cells = [(cid, code) for cid, code in zip(order, mx) if code != "."]
+        paid = [(cid, code) for cid, code in cells if code in ("O", "S")]
+        # El modo en grupo de anuncios: la última letra se reparte entre observación (O) y segmentación (S).
+        for cid, code in cells:
+            c = camps[cid]
+            base = {"level": "campaign", "campaign_id": cid, "campaign": c["campaign_name"], "campaign_status": c["status"], "channel": c["channel_type"],
+                    "ad_group_id": None, "ad_group": "", "key": key, "name": name, "kind": kind, "sub": sub}
+            if code == "P":
+                pmax.append({"campaign_id": cid, "campaign": c["campaign_name"], "asset_group": "Grupo principal", "key": key, "name": name, "lists": [key] if kind == "list" else []})
+                continue
+            share = 1 / max(1, len([1 for _, cc in paid]))
+            is_neg = code == "N"
+            usage.append({**base, "negative": is_neg, "bid_modifier": None if is_neg else (1.2 if (i == 0 and cid == "1111111101") else 1.0),
+                          "mode": "targeting" if code == "S" else "observation", "has_metrics": not is_neg,
+                          "impressions": 0 if is_neg else int(cost * 9 * share), "clicks": 0 if is_neg else int(cost / 1.8 * share),
+                          "cost": 0.0 if is_neg else round(cost * share, 2), "conversions": 0.0 if is_neg else round(conv * share, 2),
+                          "conv_value": 0.0 if is_neg else round(cost / cpa * share, 2)})
+    # Lista vacía y lista muy pequeña, para que el inventario muestre los avisos.
+    lists.append({"key": "customers/1111111111/userLists/950", "id": "950", "name": "Newsletter — suscriptores", "type": "CRM_BASED", "status": "OPEN", "size_search": 0, "size_display": 0, "life_span": 10000})
+    lists.append({"key": "customers/1111111111/userLists/951", "id": "951", "name": "Visitantes página de eventos", "type": "RULE_BASED", "status": "OPEN", "size_search": 340, "size_display": 280, "life_span": 30})
+    lists.append({"key": "customers/1111111111/userLists/952", "id": "952", "name": "Lista de prueba (cerrada)", "type": "RULE_BASED", "status": "CLOSED", "size_search": 8200, "size_display": 6100, "life_span": 90})
+    for i, nm in enumerate(["Similar a Visitantes 30 días", "Similar a Clientes anteriores"]):
+        lists.append({"key": f"customers/1111111111/userLists/{960 + i}", "id": str(960 + i), "name": nm, "type": "SIMILAR", "status": "OPEN", "size_search": 0, "size_display": 0, "life_span": 540})
+    for l in lists:
+        l.setdefault("read_only", l["type"] == "SIMILAR")
+    campaigns = [{"id": c["campaign_id"], "name": c["campaign_name"], "status": c["status"], "channel": c["channel_type"]} for c in camps.values()]
+    return {"lists": lists, "campaigns": campaigns, "usage": usage, "pmax_signals": pmax, "errors": {}}
 
 
 def simulated_campaigns_overview():

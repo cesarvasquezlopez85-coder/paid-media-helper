@@ -776,6 +776,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_account_changes(parse_qs(parsed.query))
             return
 
+        if path == "/api/google-ads/audiences":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_audiences(parse_qs(parsed.query))
+            return
+
         if path == "/api/google-ads/hotel-campaigns":
             if not self._require_super_admin_json():
                 return
@@ -2477,6 +2483,33 @@ class Handler(SimpleHTTPRequestHandler):
             return
         try:
             data = google_ads_client.fetch_account_changes(customer_id, days)
+            self._send_json(200, {**data, "simulated": False, "currency": google_ads_client.fetch_customer_currency(customer_id)})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
+    def _handle_google_ads_audiences(self, query):
+        # Sección Audiencias (solo lectura): listas, dónde se usa cada audiencia y su rendimiento en el rango.
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        date_from = (query.get("date_from") or [""])[0].strip()
+        date_to = (query.get("date_to") or [""])[0].strip()
+        date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+        if not google_ads_client.is_configured():
+            self._send_json(200, {**google_ads_client.simulated_account_audiences(date_from, date_to), "simulated": True, "currency": "USD"})
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not date_pattern.match(date_from) or not date_pattern.match(date_to):
+            self._send_json(400, {"error": "date_from y date_to deben tener formato AAAA-MM-DD."})
+            return
+        user = self._get_current_user()
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+        try:
+            data = google_ads_client.fetch_account_audiences(customer_id, date_from, date_to)
             self._send_json(200, {**data, "simulated": False, "currency": google_ads_client.fetch_customer_currency(customer_id)})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)

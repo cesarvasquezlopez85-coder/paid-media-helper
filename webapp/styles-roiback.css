@@ -645,3 +645,31 @@ main.content { flex: 1; overflow-y: auto; height: 100%; }
 .forecast-notice ul { margin: 6px 0 0; padding-left: 18px; }
 .forecast-notice li { margin: 8px 0; }
 .forecast-notice .btn-outline { margin-left: 6px; vertical-align: middle; }
+
+/* Audiencias */
+.aud-bar { display: flex; height: 14px; border-radius: 7px; overflow: hidden; gap: 2px; background: var(--gray-100, #f3f4f6); }
+.aud-seg.ok, .aud-sw.ok, .aud-tag.ok { background: var(--rb-teal-500, #03a694); }
+.aud-seg.unused, .aud-sw.unused, .aud-tag.unused { background: var(--gray-300, #cbd5e1); }
+.aud-seg.warn, .aud-sw.warn, .aud-tag.warn { background: var(--rb-danger-500, #d5455f); }
+.aud-seg.legacy, .aud-sw.legacy { background: repeating-linear-gradient(45deg, #e5e7eb, #e5e7eb 3px, #f3f4f6 3px, #f3f4f6 6px); }
+.aud-legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 10px; font-size: 12px; color: var(--color-text-muted); }
+.aud-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.aud-sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+.aud-glyph { font-style: normal; font-size: 13px; line-height: 1; }
+.aud-tag { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; color: #fff; white-space: nowrap; }
+.aud-tag.unused { color: var(--color-text-body); }
+.aud-hm-wrap { overflow-x: auto; max-height: 640px; overflow-y: auto; }
+.aud-hm { border-collapse: separate; border-spacing: 2px; font-size: 12px; }
+.aud-hm th { font-weight: 500; color: var(--color-text-muted); vertical-align: bottom; padding: 2px; position: sticky; top: 0; background: var(--color-surface, #fff); z-index: 1; }
+.aud-hm-camp { width: 90px; max-height: 76px; overflow: hidden; line-height: 1.2; font-size: 11px; text-align: center; }
+.aud-hm-name { min-width: 240px; max-width: 300px; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; position: sticky; left: 0; background: var(--color-surface, #fff); z-index: 2; padding-right: 8px; }
+.aud-hm th.aud-hm-name { z-index: 3; }
+.aud-hm td { text-align: center; height: 26px; min-width: 90px; border-radius: 4px; font-weight: 600; }
+.aud-hm td.aud-hm-name { font-weight: 400; text-align: left; }
+.aud-hm-empty { background: var(--gray-50, #f8fafc); }
+.hm-o, .aud-sw.hm-o { background: rgba(47, 68, 104, .22); }
+.hm-s, .aud-sw.hm-s { background: var(--rb-navy-500, #2f4468); color: #fff; }
+.hm-n, .aud-sw.hm-n { background: rgba(213, 69, 95, .3); }
+.hm-p, .aud-sw.hm-p { background: rgba(3, 166, 148, .3); }
+.hm-u, .aud-sw.hm-u { background: rgba(255, 152, 0, .28); }
+.aud-hm sup { font-size: 9px; margin-left: 1px; }
