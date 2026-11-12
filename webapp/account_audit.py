@@ -668,6 +668,8 @@ def run_audit(data, ctx, days):
                 + ("" if high else " Aquí solo hay de riesgo medio, por eso es Advertencia."),
                 "Desactivarlas en Google Ads > Recomendaciones > Aplicar automáticamente.",
                 [f"{AUTO_APPLY_LABELS.get(t, t)} · riesgo {AUTO_APPLY_RISK.get(t, 'alto')}" for t in risky]))
+            # Los tipos con su nombre y riesgo, para que el informe ofrezca pausarlos desde la plataforma.
+            findings[-1]["auto_apply"] = [{"type": t, "label": AUTO_APPLY_LABELS.get(t, t), "risk": AUTO_APPLY_RISK.get(t, "alto")} for t in risky]
 
     # ---- P. Performance Max ----------------------------------------------
     # Solo si hay campañas PMax activas. Ver auditoria_pmax_reglas_propuesta.md.

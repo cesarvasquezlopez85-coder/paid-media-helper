@@ -425,6 +425,19 @@ def init_db():
             """
         )
         # Pausas y activaciones de campañas hechas desde la sección Campañas: quién, cuándo y de qué estado a cuál.
+        # Recomendaciones automáticas pausadas o reactivadas desde la Auditoría: quién, cuándo, cuenta y tipo.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS recommendation_subscription_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at REAL NOT NULL,
+                user_id INTEGER,
+                customer_id TEXT NOT NULL,
+                rec_type TEXT NOT NULL,
+                new_status TEXT NOT NULL
+            )
+            """
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS campaign_status_log (
@@ -597,6 +610,19 @@ def store_campaign_status_change(user_id, customer_id, campaign_id, campaign_nam
             "INSERT INTO campaign_status_log (created_at, user_id, customer_id, campaign_id, campaign_name, old_status, new_status) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (time.time(), user_id, str(customer_id), str(campaign_id), (campaign_name or "")[:200], old_status, new_status),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def store_recommendation_subscription_change(user_id, customer_id, types, new_status):
+    conn = get_db()
+    try:
+        now = time.time()
+        conn.executemany(
+            "INSERT INTO recommendation_subscription_log (created_at, user_id, customer_id, rec_type, new_status) VALUES (?, ?, ?, ?, ?)",
+            [(now, user_id, str(customer_id), t, new_status) for t in types],
         )
         conn.commit()
     finally:
@@ -949,6 +975,10 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_super_admin_json():
                 return
             self._handle_google_ads_campaign_status(payload)
+        elif path == "/api/google-ads/recommendation-subscriptions":
+            # Pausar o reactivar recomendaciones automáticas desde la Auditoría: para todos los usuarios con sesión
+            # (cada cuenta valida el acceso del usuario).
+            self._handle_recommendation_subscriptions(payload)
         elif path == "/api/google-ads/hotel-modifiers-apply":
             if not self._require_super_admin_json():
                 return
@@ -2562,6 +2592,52 @@ class Handler(SimpleHTTPRequestHandler):
                 store_campaign_status_change(user["id"], customer_id, campaign_id, campaign_name, old_status, status)
             except Exception as e:  # noqa: BLE001 — el cambio ya quedó en Google Ads; un fallo del registro no debe ocultarlo
                 print(f"[campaign-status-log] {e}", flush=True)
+        self._send_json(200, result)
+
+    def _handle_recommendation_subscriptions(self, payload):
+        # Pausa o reactiva recomendaciones automáticas de una cuenta. Escribe de verdad en Google Ads cuando validate_only es false.
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not _write_limiter.allow(f"user:{user['id']}", *WRITE_RATE_LIMIT):
+            self._send_json(429, {"error": "Demasiadas escrituras seguidas. Espera un minuto y vuelve a intentar."})
+            return
+        customer_id = str(payload.get("customer_id") or "").strip()
+        status = str(payload.get("status") or "").strip()
+        raw_types = payload.get("types") if isinstance(payload.get("types"), list) else []
+        types = [t for t in dict.fromkeys(str(x).strip() for x in raw_types) if t]
+        validate_only = payload.get("validate_only", True) is not False
+        if status not in google_ads_client.RECOMMENDATION_SUBSCRIPTION_STATUS_VALUES:
+            self._send_json(400, {"error": "El estado debe ser ENABLED o PAUSED."})
+            return
+        if not types or len(types) > 20:
+            self._send_json(400, {"error": "Elige entre 1 y 20 tipos de recomendación."})
+            return
+        # Solo los tipos que la auditoría conoce (los que puede aplicar Google solo); nada arbitrario llega a la API.
+        unknown = [t for t in types if t not in account_audit.AUTO_APPLY_LABELS]
+        if unknown:
+            self._send_json(400, {"error": "Tipo de recomendación no reconocido: " + ", ".join(unknown[:3])})
+            return
+        if not google_ads_client.is_configured():
+            self._send_json(200, google_ads_client.simulated_update_recommendation_subscriptions(types, status, validate_only))
+            return
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+        try:
+            result = google_ads_client.update_recommendation_subscriptions(customer_id, types, status, validate_only)
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+            return
+        if not validate_only:
+            try:
+                store_recommendation_subscription_change(user["id"], customer_id, types, status)
+            except Exception as e:  # noqa: BLE001 — el cambio ya quedó en Google Ads; un fallo del registro no debe ocultarlo
+                print(f"[recommendation-subscription-log] {e}", flush=True)
         self._send_json(200, result)
 
     def _handle_google_ads_campaign_list(self, query):

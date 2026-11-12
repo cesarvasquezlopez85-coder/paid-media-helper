@@ -1764,6 +1764,34 @@ def update_campaign_status(customer_id, campaign_id, status, validate_only=True)
     return {"validate_only": validate_only, "applied": not validate_only, "status": status}
 
 
+RECOMMENDATION_SUBSCRIPTION_STATUS_VALUES = ("ENABLED", "PAUSED")
+
+
+def update_recommendation_subscriptions(customer_id, types, status, validate_only=True):
+    """Pausa o reactiva recomendaciones automáticas de la cuenta (las «Aplicar automáticamente» de Google Ads).
+    Cada tipo es una suscripción (`recommendation_subscription`) y su estado es ENABLED o PAUSED; el tipo no cambia.
+    Solo se cambia el estado: no se crean ni se eliminan suscripciones. validate_only=True: Google valida sin aplicar."""
+    if status not in RECOMMENDATION_SUBSCRIPTION_STATUS_VALUES:
+        raise ValueError("El estado debe ser ENABLED o PAUSED.")
+    types = list(dict.fromkeys(types or []))
+    if not types:
+        raise ValueError("Elige al menos un tipo de recomendación.")
+    url = f"{BASE_URL}/customers/{customer_id}/recommendationSubscriptions:mutateRecommendationSubscription"
+    body = {
+        "operations": [{
+            "update": {"resourceName": f"customers/{customer_id}/recommendationSubscriptions/{t}", "status": status},
+            "updateMask": "status",
+        } for t in types],
+        "validateOnly": validate_only,
+    }
+    _post_json(url, body)
+    return {"validate_only": validate_only, "applied": not validate_only, "status": status, "types": types}
+
+
+def simulated_update_recommendation_subscriptions(types, status, validate_only=True):
+    return {"validate_only": validate_only, "applied": not validate_only, "status": status, "types": list(dict.fromkeys(types or [])), "simulated": True}
+
+
 def fetch_impression_share_daily(customer_id, date_from, date_to):
     """Evolución día a día de Impression Share, una fila por campaña y día
     (sin agregar) — para el gráfico de tendencia de Oportunidad de ingresos
@@ -4600,7 +4628,7 @@ def simulated_audit_data():
         camp("8", "Hotel Demo - Search Semana Santa (nueva)", "SEARCH", "TARGET_CPA", 0, 0, 0, 0, geo_target_type="PRESENCE", start_date=datetime.date.today().isoformat()),
     ]
     return {
-        "unavailable": {"recommendation_subscriptions": "Dato de ejemplo: recurso no consultado en modo simulado.", "customer": "Dato de ejemplo: campo no consultado en modo simulado."},
+        "unavailable": {"customer": "Dato de ejemplo: campo no consultado en modo simulado."},
         "currency": "USD", "account_name": "Hotel Demo (simulada)", "enhanced_conversions": False,
         "campaigns": campaigns,
         "conversion_actions": [
@@ -4654,7 +4682,9 @@ def simulated_audit_data():
         "previous_period": {"cost": 14100.0, "conversions": 138.0, "value": 88000.0, "date_from": "2026-08-14", "date_to": "2026-09-12"},
         "campaign_languages": [{"campaign_id": "1"}, {"campaign_id": "2"}],
         "assets": [{"field_type": "SITELINK"}, {"field_type": "SITELINK"}, {"field_type": "CALLOUT"}],
-        "recommendation_subscriptions": None,
+        # Dos recomendaciones de riesgo alto y una de riesgo medio, para ver la regla F1 y poder probar el botón de pausarlas.
+        "recommendation_subscriptions": [{"type": "MAXIMIZE_CLICKS_OPT_IN", "status": "ENABLED"}, {"type": "KEYWORD", "status": "ENABLED"},
+                                         {"type": "SITELINK_ASSET", "status": "ENABLED"}, {"type": "CALLOUT_ASSET", "status": "PAUSED"}],
         "pmax_asset_groups": [
             {"id": "g1", "name": "Habitaciones y vistas", "campaign_id": "3", "ad_strength": "POOR", "impressions": 310000, "cost": 5200.0, "conversions": 4.0, "conv_value": 2800.0},
             {"id": "g2", "name": "Marca", "campaign_id": "3", "ad_strength": "EXCELLENT", "impressions": 190000, "cost": 2400.0, "conversions": 48.0, "conv_value": 36100.0},

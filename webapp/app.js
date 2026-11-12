@@ -11435,6 +11435,74 @@ function loadAuditHistoryOnly() {
     .catch((err) => { s.history = { status: 'error', rows: null, error: err.message || String(err), customerId: customerId || '' }; render(); });
 }
 
+// ---- F1: pausar desde la plataforma las recomendaciones automáticas de la cuenta ----
+let auditStaticMode = false; // true mientras se arma una descarga: sin botones
+
+function auditF1State() {
+  const s = state.audit;
+  const m = s.report.meta;
+  const key = `${m.customer_id}|${m.generated_at}`;
+  if (!s.f1 || s.f1.key !== key) {
+    const f = s.report.findings.find((x) => x.id === 'F1');
+    const items = ((f && f.auto_apply) || []).map((x) => ({ ...x, status: 'ENABLED' }));
+    s.f1 = { key, items, selected: new Set(items.map((i) => i.type)), step: 'idle', busy: false, error: null };
+  }
+  return s.f1;
+}
+
+function auditF1Panel() {
+  const s = state.audit;
+  const f1 = auditF1State();
+  const e = escapeHtml;
+  const active = f1.items.filter((i) => i.status === 'ENABLED');
+  const paused = f1.items.filter((i) => i.status === 'PAUSED');
+  const acct = s.report.meta.account_name || s.reportAccountName || s.report.meta.customer_id || 'la cuenta';
+  const nSel = active.filter((i) => f1.selected.has(i.type)).length;
+  const dis = f1.busy ? 'disabled' : '';
+  const list = active.length ? `
+    <div style="margin-top:12px"><strong>Pausarlas desde la plataforma</strong>
+      <div class="field-hint" style="margin:2px 0 8px">Marca las que quieras pausar; las demás se quedan como están. Se pueden reactivar aquí mismo.</div>
+      ${active.map((i) => `<label style="display:flex;gap:8px;align-items:center;margin:4px 0;cursor:pointer"><input type="checkbox" data-f1-toggle="${e(i.type)}" ${f1.selected.has(i.type) ? 'checked' : ''} ${dis} /><span>${e(i.label)} <span class="field-hint">· riesgo ${e(i.risk)}</span></span></label>`).join('')}
+      ${f1.step === 'confirm' ? `
+        <div class="ar-note" style="margin:10px 0 0">Vas a pausar <strong>${nSel}</strong> recomendaci${nSel === 1 ? 'ón automática' : 'ones automáticas'} en <strong>${e(acct)}</strong>. Google dejará de aplicarlas solo; no cambia campañas, presupuestos ni pujas existentes. Primero se valida con Google y luego se aplica.</div>
+        <div style="display:flex;gap:8px;margin-top:10px"><button class="btn-accent sm" data-action="audit-f1-apply" ${dis}>${f1.busy ? 'Aplicando…' : 'Sí, pausar'}</button><button class="btn-outline sm" data-action="audit-f1-cancel" ${dis}>Cancelar</button></div>`
+        : `<div style="margin-top:10px"><button class="btn-outline sm" data-action="audit-f1-ask" ${nSel && !f1.busy ? '' : 'disabled'}>Pausar las marcadas (${nSel})</button></div>`}
+    </div>` : '';
+  const done = paused.length ? `
+    <div style="margin-top:14px"><strong>Pausadas desde aquí</strong>
+      ${paused.map((i) => `<div style="display:flex;gap:10px;align-items:center;margin:4px 0"><span>${e(i.label)}</span><button class="btn-outline xs" data-f1-resume="${e(i.type)}" ${dis}>Reactivar</button></div>`).join('')}
+      <div class="field-hint" style="margin-top:6px">El puntaje se actualiza al volver a auditar la cuenta.</div>
+      ${active.length ? '' : '<div style="margin-top:8px"><button class="btn-accent sm" data-action="audit-run">Auditar de nuevo</button></div>'}
+    </div>` : '';
+  return `<div class="ar-rec" style="margin-top:12px">${list}${done}${f1.error ? `<div class="error-panel" style="margin-top:10px">${e(f1.error)}</div>` : ''}</div>`;
+}
+
+// Valida con Google (validate_only) y, si pasa, aplica. Solo cambia el estado de las recomendaciones automáticas.
+async function auditF1Write(types, status) {
+  const s = state.audit;
+  const f1 = auditF1State();
+  const customerId = s.report.meta.customer_id || '';
+  f1.busy = true; f1.error = null; render();
+  try {
+    for (const validateOnly of [true, false]) {
+      const res = await fetch('/api/google-ads/recommendation-subscriptions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ customer_id: customerId, types, status, validate_only: validateOnly }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Error desconocido.');
+    }
+    f1.items.forEach((i) => { if (types.includes(i.type)) i.status = status; });
+    if (status === 'ENABLED') types.forEach((t) => f1.selected.add(t));
+    else types.forEach((t) => f1.selected.delete(t));
+  } catch (err) {
+    f1.error = `No se pudo ${status === 'PAUSED' ? 'pausar' : 'reactivar'}: ${err.message || err}`;
+  }
+  f1.step = 'idle'; f1.busy = false;
+  render();
+}
+
 function auditReportBodyHtml() {
   const s = state.audit;
   const r = s.report;
@@ -11499,6 +11567,7 @@ function auditReportBodyHtml() {
         <div class="ar-rec"><strong>Recomendación:</strong> ${e(f.action)}</div>
         ${f.table ? `<div class="ar-tw"><table class="ar-tbl"><thead><tr>${f.table.columns.map((c) => `<th>${e(c)}</th>`).join('')}</tr></thead><tbody>${f.table.rows.map((r) => `<tr>${r.map((c) => `<td>${e(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`
           : f.evidence.length ? `<ul class="ar-ev">${f.evidence.map((x) => `<li>${e(x)}</li>`).join('')}</ul>` : ''}
+        ${f.id === 'F1' && f.auto_apply && f.auto_apply.length && !auditStaticMode ? auditF1Panel() : ''}
       </div>`;
   };
   const opps = r.findings.length
@@ -11539,6 +11608,11 @@ function auditReportBodyHtml() {
 }
 
 function buildAuditHtml() {
+  auditStaticMode = true;
+  try { return buildAuditHtmlInner(); } finally { auditStaticMode = false; }
+}
+
+function buildAuditHtmlInner() {
   return `<!doctype html>
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Auditoría de cuenta — ${escapeHtml(auditReportTitle())}</title>
@@ -11893,9 +11967,11 @@ function auditBodyForBatchItem(it) {
   const s = state.audit;
   const saved = { report: s.report, name: s.reportAccountName, ai: s.ai, sim: s.api.simulated };
   try {
+    auditStaticMode = true;
     s.report = it.report; s.reportAccountName = it.name; s.ai = { status: 'idle', narrativa: null, error: null }; s.api.simulated = it.simulated;
     return auditReportBodyHtml();
   } finally {
+    auditStaticMode = false;
     s.report = saved.report; s.reportAccountName = saved.name; s.ai = saved.ai; s.api.simulated = saved.sim;
   }
 }
@@ -16199,6 +16275,14 @@ function bindEvents() {
       if (field === 'goal') render(); // cambia la etiqueta y si hay campo de meta
     });
   });
+  // Auditoría: pausar recomendaciones automáticas (F1)
+  document.querySelectorAll('[data-f1-toggle]').forEach((el) => el.addEventListener('change', () => {
+    const f1 = auditF1State();
+    if (el.checked) f1.selected.add(el.dataset.f1Toggle); else f1.selected.delete(el.dataset.f1Toggle);
+    f1.step = 'idle';
+    render();
+  }));
+  document.querySelectorAll('[data-f1-resume]').forEach((el) => el.addEventListener('click', () => auditF1Write([el.dataset.f1Resume], 'ENABLED')));
   // Auditoría de varias cuentas
   document.querySelectorAll('[data-audit-mode]').forEach((btn) => btn.addEventListener('click', () => { state.audit.mode = btn.dataset.auditMode; render(); }));
   const auditBatchSearch = document.getElementById('audit-batch-search');
@@ -16783,6 +16867,9 @@ function handleAction(action) {
     case 'admin-grant-submit': grantAdminAccess(); break;
     case 'audit-load-accounts': loadAuditAccounts(); break;
     case 'audit-run': runAudit(); break;
+    case 'audit-f1-ask': { const f1 = auditF1State(); if (f1.items.some((i) => i.status === 'ENABLED' && f1.selected.has(i.type))) { f1.step = 'confirm'; render(); } break; }
+    case 'audit-f1-cancel': auditF1State().step = 'idle'; render(); break;
+    case 'audit-f1-apply': { const f1 = auditF1State(); auditF1Write(f1.items.filter((i) => i.status === 'ENABLED' && f1.selected.has(i.type)).map((i) => i.type), 'PAUSED'); break; }
     case 'audit-batch-run': runAuditBatch(false); break;
     case 'audit-batch-retry': runAuditBatch(true); break;
     case 'audit-batch-cancel': state.audit.batch.cancel = true; render(); break;
