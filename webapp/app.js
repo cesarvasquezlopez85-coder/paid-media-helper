@@ -401,6 +401,7 @@ const state = {
     rowsStatus: 'idle', rows: null, error: null, simulated: false,
     sortBy: 'account_name', sortDir: 'asc',
     hotelFilter: [], // customer_id de los hoteles marcados en el selector de la tabla; [] = todos
+    accountKind: 'all', // 'all' | 'hotel' (cuentas cuyo nombre empieza por GHA-CPC) | 'other' (las demás, que se muestran como SEM)
     hotelMenuOpen: false,
     // Periodo consultado (AAAA-MM, desde/hasta); '' = mes en curso. Un periodo ya
     // cerrado se compara contra el objetivo completo en vez de contra un ritmo
@@ -12034,9 +12035,17 @@ const PACING_SORT_KEYS = {
   deviation_pct: (r) => { const c = pacingComputed(r); return c.hasTarget ? c.deviationPct : -Infinity; },
   recommended_daily: (r) => { const c = pacingComputed(r); return c.hasTarget && c.recommendedDaily != null ? c.recommendedDaily : -Infinity; },
 };
+// Las cuentas de hoteles se distinguen de las demás porque su nombre empieza por "GHA-CPC".
+function pacingIsHotelAccount(name) { return /^\s*GHA-CPC/i.test(String(name || '')); }
+function pacingMatchesKind(name) {
+  const k = state.pacing.accountKind;
+  return k === 'all' || (k === 'hotel') === pacingIsHotelAccount(name);
+}
+
 function getPacingRowsSorted() {
   const p = state.pacing;
-  const rows = (p.rows || []).filter((r) => !p.hotelFilter.length || p.hotelFilter.includes(r.customer_id));
+  const rows = (p.rows || []).filter((r) => pacingMatchesKind(r.account_name)
+    && (!p.hotelFilter.length || p.hotelFilter.includes(r.customer_id)));
   const keyFn = PACING_SORT_KEYS[p.sortBy] || PACING_SORT_KEYS.account_name;
   const dir = p.sortDir === 'desc' ? -1 : 1;
   if (p.sortBy === 'account_name') {
@@ -12107,14 +12116,16 @@ function renderPacingTable() {
   // Los hoteles marcados que ya no están en la lista (se quitaron) salen del filtro.
   p.hotelFilter = p.hotelFilter.filter((id) => p.watchlist.some((w) => w.customer_id === id));
   const rowsHtml = getPacingRowsSorted().map((r) => pacingRowHtml(r)).join('');
-  const hotelItems = [...p.watchlist]
+  const kindWatchlist = p.watchlist.filter((w) => pacingMatchesKind(w.account_name));
+  const nHotelAccounts = p.watchlist.filter((w) => pacingIsHotelAccount(w.account_name)).length;
+  const hotelItems = [...kindWatchlist]
     .sort((a, b) => String(a.account_name || a.customer_id).localeCompare(String(b.account_name || b.customer_id)))
     .map((w) => `<label style="display:flex;align-items:center;gap:8px;padding:6px 12px;font-size:13px;cursor:pointer;white-space:nowrap"><input type="checkbox" data-pacing-hotel="${escapeHtml(w.customer_id)}" ${p.hotelFilter.includes(w.customer_id) ? 'checked' : ''} /> ${escapeHtml(w.account_name || w.customer_id)}</label>`)
     .join('');
   const hotelLabel = !p.hotelFilter.length ? 'Todos los hoteles'
     : p.hotelFilter.length === 1 ? ((p.watchlist.find((w) => w.customer_id === p.hotelFilter[0]) || {}).account_name || p.hotelFilter[0])
     : `${p.hotelFilter.length} hoteles`;
-  const hotelSelect = p.watchlist.length > 1 ? `
+  const hotelSelect = kindWatchlist.length > 1 ? `
           <div class="pacing-hotel-menu" style="position:relative;display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-muted)">
             Hotel
             <button type="button" id="pacing-hotel-toggle" class="btn-outline sm" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" aria-haspopup="true" aria-expanded="${p.hotelMenuOpen}">${escapeHtml(hotelLabel)} ▾</button>
@@ -12127,8 +12138,16 @@ function renderPacingTable() {
   return `
     <div class="card table-panel">
       <div class="table-panel-head">
-        <h3>Cuentas vigiladas (${p.hotelFilter.length ? `${p.hotelFilter.length} de ${p.watchlist.length}` : p.watchlist.length})</h3>
+        <h3>Cuentas vigiladas (${p.hotelFilter.length ? `${p.hotelFilter.length} de ${kindWatchlist.length}` : kindWatchlist.length}${p.accountKind !== 'all' ? ` de ${p.watchlist.length}` : ''})</h3>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-muted)">
+            Tipo de cuenta
+            <select id="pacing-kind-filter">
+              <option value="all" ${p.accountKind === 'all' ? 'selected' : ''}>Todas (${p.watchlist.length})</option>
+              <option value="hotel" ${p.accountKind === 'hotel' ? 'selected' : ''}>Hoteles — GHA-CPC (${nHotelAccounts})</option>
+              <option value="other" ${p.accountKind === 'other' ? 'selected' : ''}>SEM (${p.watchlist.length - nHotelAccounts})</option>
+            </select>
+          </label>
           ${hotelSelect}
           <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-muted)">
             Desde
@@ -12157,7 +12176,7 @@ function renderPacingTable() {
             <th>Estado</th>
             <th></th>
           </tr></thead>
-          <tbody>${rowsHtml}</tbody>
+          <tbody>${rowsHtml || '<tr><td colspan="10" class="footnote">Ninguna cuenta de la lista coincide con el filtro.</td></tr>'}</tbody>
         </table>
       </div>
       <p class="footnote" style="margin-top:14px">El objetivo mensual sale del presupuesto de cuenta activo en Billing (Google Ads); cuentas sin uno configurado (pago automático sin límite) se muestran solo con el gasto del mes. "Esperado" y "% esperado" se calculan hasta AYER (no hoy) porque el gasto del día en curso en Google Ads normalmente todavía no está completo. "En ritmo" = dentro de ±${(PACING_TOLERANCE * 100).toFixed(0)}% de lo esperado. La barra bajo "% consumido" muestra cuánto del objetivo se ha gastado; la línea vertical marca dónde debería ir según el ritmo esperado. "Inversión diaria recomendada" = lo que queda del objetivo mensual ÷ los días que quedan del mes (incluido hoy), para terminar el mes justo en el objetivo.</p>
@@ -15020,6 +15039,12 @@ function bindEvents() {
   const pacingAccountSelect = document.getElementById('pacing-account-select');
   if (pacingAccountSelect) pacingAccountSelect.addEventListener('change', (e) => {
     state.pacing.accountToAdd = e.target.value;
+    render();
+  });
+  const pacingKindFilter = document.getElementById('pacing-kind-filter');
+  if (pacingKindFilter) pacingKindFilter.addEventListener('change', (e) => {
+    state.pacing.accountKind = e.target.value;
+    state.pacing.hotelFilter = [];
     render();
   });
   const pacingHotelToggle = document.getElementById('pacing-hotel-toggle');
