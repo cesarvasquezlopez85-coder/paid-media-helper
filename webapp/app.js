@@ -414,6 +414,7 @@ const state = {
     rowsStatus: 'idle', rows: null, error: null, simulated: false,
     sortBy: 'account_name', sortDir: 'asc',
     hotelFilter: [], // customer_id de los hoteles marcados en el selector de la tabla; [] = todos
+    mccFilter: 'all', // MCC elegido en el filtro de la tabla (group_customer_id); 'all' = todos, incluidas las cuentas sueltas
     accountKind: 'all', // 'all' | 'hotel' (cuentas cuyo nombre empieza por GHA-CPC) | 'other' (las demás, que se muestran como SEM)
     hotelMenuOpen: false,
     // Periodo consultado (AAAA-MM, desde/hasta); '' = mes en curso. Un periodo ya
@@ -12449,9 +12450,19 @@ function pacingMatchesKind(name) {
   return k === 'all' || (k === 'hotel') === pacingIsHotelAccount(name);
 }
 
+// MCCs agregados que todavía tienen cuentas vigiladas (los que sirven para filtrar la tabla).
+function pacingMccOptions() { return (state.pacing.mccGroups || []).filter((g) => (g.account_ids || []).length); }
+// ¿La cuenta pertenece al MCC elegido en el filtro? (siempre sí con "Todos los MCC").
+function pacingInMcc(customerId) {
+  const p = state.pacing;
+  if (p.mccFilter === 'all') return true;
+  const g = pacingMccOptions().find((x) => x.group_customer_id === p.mccFilter);
+  return !g || g.account_ids.includes(customerId);
+}
+
 function getPacingRowsSorted() {
   const p = state.pacing;
-  const rows = (p.rows || []).filter((r) => pacingMatchesKind(r.account_name)
+  const rows = (p.rows || []).filter((r) => pacingMatchesKind(r.account_name) && pacingInMcc(r.customer_id)
     && (!p.hotelFilter.length || p.hotelFilter.includes(r.customer_id)));
   const keyFn = PACING_SORT_KEYS[p.sortBy] || PACING_SORT_KEYS.account_name;
   const dir = p.sortDir === 'desc' ? -1 : 1;
@@ -12573,8 +12584,20 @@ function renderPacingTable() {
   const sortedRows = getPacingRowsSorted();
   const rowsHtml = sortedRows.map((r) => pacingRowHtml(r)).join('');
   const totals = pacingTotalRowsHtml(sortedRows);
-  const kindWatchlist = p.watchlist.filter((w) => pacingMatchesKind(w.account_name));
-  const nHotelAccounts = p.watchlist.filter((w) => pacingIsHotelAccount(w.account_name)).length;
+  // Un MCC que ya no tiene cuentas vigiladas sale del filtro.
+  const mccOptions = pacingMccOptions();
+  if (p.mccFilter !== 'all' && !mccOptions.some((g) => g.group_customer_id === p.mccFilter)) p.mccFilter = 'all';
+  const mccWatchlist = p.watchlist.filter((w) => pacingInMcc(w.customer_id));
+  const kindWatchlist = mccWatchlist.filter((w) => pacingMatchesKind(w.account_name));
+  const nHotelAccounts = mccWatchlist.filter((w) => pacingIsHotelAccount(w.account_name)).length;
+  const mccSelect = mccOptions.length ? `
+          <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-muted)">
+            MCC
+            <select id="pacing-table-mcc" style="max-width:260px">
+              <option value="all" ${p.mccFilter === 'all' ? 'selected' : ''}>Todos los MCC (${p.watchlist.length})</option>
+              ${mccOptions.map((g) => `<option value="${escapeHtml(g.group_customer_id)}" ${p.mccFilter === g.group_customer_id ? 'selected' : ''}>${escapeHtml(g.group_name || g.group_customer_id)} (${g.account_ids.length})</option>`).join('')}
+            </select>
+          </label>` : '';
   const hotelItems = [...kindWatchlist]
     .sort((a, b) => String(a.account_name || a.customer_id).localeCompare(String(b.account_name || b.customer_id)))
     .map((w) => `<label style="display:flex;align-items:center;gap:8px;padding:6px 12px;font-size:13px;cursor:pointer;white-space:nowrap"><input type="checkbox" data-pacing-hotel="${escapeHtml(w.customer_id)}" ${p.hotelFilter.includes(w.customer_id) ? 'checked' : ''} /> ${escapeHtml(w.account_name || w.customer_id)}</label>`)
@@ -12595,14 +12618,15 @@ function renderPacingTable() {
   return `
     <div class="card table-panel">
       <div class="table-panel-head">
-        <h3>Cuentas vigiladas (${p.hotelFilter.length ? `${p.hotelFilter.length} de ${kindWatchlist.length}` : kindWatchlist.length}${p.accountKind !== 'all' ? ` de ${p.watchlist.length}` : ''})</h3>
+        <h3>Cuentas vigiladas (${p.hotelFilter.length ? `${p.hotelFilter.length} de ${kindWatchlist.length}` : kindWatchlist.length}${p.accountKind !== 'all' || p.mccFilter !== 'all' ? ` de ${p.watchlist.length}` : ''})</h3>
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          ${mccSelect}
           <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-muted)">
             Tipo de cuenta
             <select id="pacing-kind-filter">
-              <option value="all" ${p.accountKind === 'all' ? 'selected' : ''}>Todas (${p.watchlist.length})</option>
+              <option value="all" ${p.accountKind === 'all' ? 'selected' : ''}>Todas (${mccWatchlist.length})</option>
               <option value="hotel" ${p.accountKind === 'hotel' ? 'selected' : ''}>Hoteles — GHA-CPC (${nHotelAccounts})</option>
-              <option value="other" ${p.accountKind === 'other' ? 'selected' : ''}>SEM (${p.watchlist.length - nHotelAccounts})</option>
+              <option value="other" ${p.accountKind === 'other' ? 'selected' : ''}>SEM (${mccWatchlist.length - nHotelAccounts})</option>
             </select>
           </label>
           ${hotelSelect}
@@ -16227,6 +16251,12 @@ function bindEvents() {
   const pacingAccountSelect = document.getElementById('pacing-account-select');
   if (pacingAccountSelect) pacingAccountSelect.addEventListener('change', (e) => {
     state.pacing.accountToAdd = e.target.value;
+    render();
+  });
+  const pacingTableMcc = document.getElementById('pacing-table-mcc');
+  if (pacingTableMcc) pacingTableMcc.addEventListener('change', (e) => {
+    state.pacing.mccFilter = e.target.value;
+    state.pacing.hotelFilter = [];
     render();
   });
   const pacingKindFilter = document.getElementById('pacing-kind-filter');
