@@ -5233,6 +5233,99 @@ def fetch_hotel_price(customer_id, campaign_id, date_from, date_to):
     return {"campaign_id": campaign_id, "summary": summary, "buckets": buckets, "daily": daily}
 
 
+def fetch_hotel_price_account(customer_id, date_from, date_to):
+    """Precio frente a la competencia de TODAS las campañas de hotel activas de una cuenta, en una sola pasada
+    (para el ranking en varias cuentas). Solo lectura. Por campaña: impresiones, clics, gasto, conversiones,
+    diferencia de precio promedio (ponderada por impresiones) y reparto por posición de precio."""
+    customer_id = _hotel_valid_id(customer_id)
+    camp_rows = _search(customer_id, """
+        SELECT campaign.id, campaign.name, campaign.status, campaign.bidding_strategy_type
+        FROM campaign
+        WHERE campaign.advertising_channel_type = 'HOTEL' AND campaign.status = 'ENABLED'
+    """)
+    out = {"customer_id": customer_id, "currency": "", "campaigns": [], "summary": None}
+    if not camp_rows:
+        return out
+    try:
+        cur = _search(customer_id, "SELECT customer.currency_code FROM customer LIMIT 1")
+        if cur:
+            out["currency"] = cur[0].get("customer", {}).get("currencyCode", "")
+    except RuntimeError:
+        pass
+    where = f"segments.date BETWEEN '{date_from}' AND '{date_to}'"
+    per = {}
+    for r in _search(customer_id, f"""
+        SELECT campaign.id, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions,
+               metrics.hotel_eligible_impressions, metrics.hotel_price_difference_percentage
+        FROM hotel_performance_view WHERE {where}
+    """):
+        m = r["metrics"]
+        a = per.setdefault(r["campaign"]["id"], {"rows": [], "impressions": 0, "clicks": 0, "cost": 0.0, "conversions": 0.0, "eligible": 0})
+        imp = int(m.get("impressions", 0))
+        a["rows"].append((imp, _float_or_none(m.get("hotelPriceDifferencePercentage"))))
+        a["impressions"] += imp
+        a["clicks"] += int(m.get("clicks", 0))
+        a["cost"] += int(m.get("costMicros", 0)) / MICROS
+        a["conversions"] += float(m.get("conversions", 0))
+        a["eligible"] += int(float(m.get("hotelEligibleImpressions", 0) or 0))
+    buckets = {}
+    try:
+        for r in _search(customer_id, f"""
+            SELECT campaign.id, segments.hotel_price_bucket, metrics.impressions, metrics.hotel_price_difference_percentage
+            FROM hotel_performance_view WHERE {where}
+        """):
+            m = r["metrics"]
+            key = r.get("segments", {}).get("hotelPriceBucket", "UNKNOWN")
+            buckets.setdefault(r["campaign"]["id"], {}).setdefault(key, []).append(
+                (int(m.get("impressions", 0)), _float_or_none(m.get("hotelPriceDifferencePercentage"))))
+    except RuntimeError:
+        buckets = None
+    campaigns, all_rows, all_buckets = [], [], {}
+    for r in camp_rows:
+        c = r["campaign"]
+        a = per.get(c["id"])
+        if not a or not a["impressions"]:
+            continue
+        item = {
+            "campaign_id": c["id"], "campaign_name": c.get("name", ""), "bidding_strategy_type": c.get("biddingStrategyType", ""),
+            "impressions": a["impressions"], "clicks": a["clicks"], "cost": a["cost"], "conversions": a["conversions"],
+            "eligible": a["eligible"], "price_diff": _hotel_price_weighted(a["rows"], lambda i: i[0], lambda i: i[1]),
+        }
+        item.update(_hotel_bucket_shares(buckets.get(c["id"]) if buckets is not None else None))
+        campaigns.append(item)
+        all_rows.extend(a["rows"])
+        for k, v in ((buckets or {}).get(c["id"]) or {}).items():
+            all_buckets.setdefault(k, []).extend(v)
+    campaigns.sort(key=lambda x: -(x["price_diff"] if x["price_diff"] is not None else -9))
+    if campaigns:
+        out["summary"] = {
+            "impressions": sum(x["impressions"] for x in campaigns), "clicks": sum(x["clicks"] for x in campaigns),
+            "cost": sum(x["cost"] for x in campaigns), "conversions": sum(x["conversions"] for x in campaigns),
+            "eligible": sum(x["eligible"] for x in campaigns),
+            "price_diff": _hotel_price_weighted(all_rows, lambda i: i[0], lambda i: i[1]),
+            **_hotel_bucket_shares(all_buckets if buckets is not None else None),
+        }
+    out["campaigns"] = campaigns
+    return out
+
+
+def _hotel_bucket_shares(by_bucket):
+    """De {posición: [(impresiones, diferencia)]} saca el % de impresiones donde no es el más barato, el % donde es
+    el más barato o empata y cuánto más caro sale en las primeras. None si Google no entregó el reparto."""
+    if not by_bucket:
+        return {"not_lowest_share": None, "lowest_share": None, "not_lowest_diff": None}
+    total = sum(i[0] for items in by_bucket.values() for i in items)
+    if not total:
+        return {"not_lowest_share": None, "lowest_share": None, "not_lowest_diff": None}
+    imp = lambda keys: sum(i[0] for k in keys for i in by_bucket.get(k, []))  # noqa: E731
+    nl = by_bucket.get("NOT_LOWEST", [])
+    return {
+        "not_lowest_share": imp(["NOT_LOWEST"]) / total * 100,
+        "lowest_share": imp(["LOWEST_UNIQUE", "LOWEST_TIED"]) / total * 100,
+        "not_lowest_diff": _hotel_price_weighted(nl, lambda i: i[0], lambda i: i[1]) if nl else None,
+    }
+
+
 def _hotel_validate_changes(changes):
     if not isinstance(changes, list) or not changes:
         raise ValueError("No hay cambios que aplicar.")
@@ -5437,6 +5530,47 @@ def simulated_hotel_price(campaign_id, date_from=None, date_to=None):
         "campaign_id": campaign_id,
         "summary": {"impressions": imp, "clicks": camp["clicks"], "eligible": round(imp * 1.38), "price_diff": diff},
         "buckets": buckets, "daily": daily,
+    }
+
+
+def simulated_hotel_price_account(customer_id, date_from=None, date_to=None):
+    """Ranking de ejemplo: cada cuenta simulada reparte las dos campañas de ejemplo con un desvío distinto de precio."""
+    seed = sum(int(ch) for ch in str(customer_id) if ch.isdigit()) % 7
+    shift = (seed - 3) * 0.012
+    campaigns, all_rows, all_buckets = [], [], {}
+    for camp in _SIM_HOTEL_CAMPAIGNS:
+        if camp["status"] != "ENABLED":
+            continue
+        price = simulated_hotel_price(camp["campaign_id"], date_from, date_to)
+        by_bucket = {}
+        for b in price["buckets"]:
+            d = None if b["price_diff"] is None else b["price_diff"] + shift
+            by_bucket[b["bucket"]] = [(b["impressions"], d)]
+        rows = [(i[0], i[1]) for items in by_bucket.values() for i in items]
+        item = {
+            "campaign_id": camp["campaign_id"], "campaign_name": camp["campaign_name"],
+            "bidding_strategy_type": camp["bidding_strategy_type"], "impressions": camp["impressions"], "clicks": camp["clicks"],
+            "cost": camp["cost"], "conversions": camp["conversions"], "eligible": price["summary"]["eligible"],
+            "price_diff": _hotel_price_weighted(rows, lambda i: i[0], lambda i: i[1]),
+            **_hotel_bucket_shares(by_bucket),
+        }
+        campaigns.append(item)
+        all_rows.extend(rows)
+        for k, v in by_bucket.items():
+            all_buckets.setdefault(k, []).extend(v)
+    # Una cuenta de cada ocho queda sin campañas de hotel activas, para ver ese caso en el ranking.
+    if int(str(customer_id)[-1] if str(customer_id)[-1:].isdigit() else 0) % 8 == 7:
+        return {"customer_id": str(customer_id), "currency": "USD", "campaigns": [], "summary": None}
+    campaigns.sort(key=lambda x: -(x["price_diff"] if x["price_diff"] is not None else -9))
+    return {
+        "customer_id": str(customer_id), "currency": "USD", "campaigns": campaigns,
+        "summary": {
+            "impressions": sum(x["impressions"] for x in campaigns), "clicks": sum(x["clicks"] for x in campaigns),
+            "cost": sum(x["cost"] for x in campaigns), "conversions": sum(x["conversions"] for x in campaigns),
+            "eligible": sum(x["eligible"] for x in campaigns),
+            "price_diff": _hotel_price_weighted(all_rows, lambda i: i[0], lambda i: i[1]),
+            **_hotel_bucket_shares(all_buckets),
+        },
     }
 
 

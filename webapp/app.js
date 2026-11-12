@@ -229,6 +229,8 @@ const state = {
   // Se elige cuenta + rango, se listan las campañas de hotel y se edita una
   // campaña a la vez. Misma regla que ROAS/IA Max: vista previa antes de escribir.
   hotel: {
+    mode: 'single', // 'single' (una cuenta: modificadores) | 'ranking' (precio frente a la competencia en varias cuentas)
+    rank: { items: [], search: '', sortBy: 'price_diff', expanded: [], running: false, cancel: false, token: 0, stopMsg: '', notice: '', loadedFrom: '', loadedTo: '' },
     api: {
       statusChecked: false, configured: false,
       accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
@@ -547,7 +549,7 @@ const PAGE_META = {
   },
   hoteles: {
     title: 'Hoteles',
-    caption: 'Modificadores de oferta de las campañas de hotel: ventana de reserva, duración de la estancia, día de entrada y fechas elegidas. Ve cómo rinde cada tramo y ajústalos campaña por campaña.',
+    caption: 'Modificadores de oferta de las campañas de hotel: ventana de reserva, duración de la estancia, día de entrada y fechas elegidas. Ve cómo rinde cada tramo y ajústalos campaña por campaña, o compara el precio de varias cuentas frente a la competencia.',
   },
   iamax: {
     title: 'IA Max',
@@ -8902,6 +8904,10 @@ function renderHotelPage() {
     return `<div class="card state-panel idle"><p>Esta sección todavía no está disponible para tu usuario.</p></div>`;
   }
   ensureHotelGoogleAdsStatusLoaded();
+  const modeToggle = `<div class="seg-control" style="margin-bottom:16px;width:fit-content">
+    <button class="seg-btn ${s.mode === 'single' ? 'active' : ''}" data-hotel-mode="single">Una cuenta</button>
+    <button class="seg-btn ${s.mode === 'ranking' ? 'active' : ''}" data-hotel-mode="ranking">Ranking de precio (varias cuentas)</button></div>`;
+  if (s.mode === 'ranking') return `${modeToggle}${renderHotelRanking()}`;
   const controlPanel = renderHotelApiPanel();
 
   let body = '';
@@ -8920,7 +8926,260 @@ function renderHotelPage() {
   } else {
     body = renderHotelCampaignList();
   }
-  return `${controlPanel}${body}`;
+  return `${modeToggle}${controlPanel}${body}`;
+}
+
+// ---- Ranking de precio en varias cuentas -----------------------------------
+// Para saber a qué hoteles escribirles esta semana: la diferencia de precio frente al anunciante más barato de cada cuenta,
+// de la más cara a la más barata. Solo lectura; el navegador pide una cuenta por vez (de a tres) a /api/google-ads/hotel-price-account.
+const HOTEL_RANK_MAX = 40;
+const HOTEL_RANK_CONCURRENCY = 3;
+
+function hotelRankAdd(acc) {
+  const r = state.hotel.rank;
+  if (r.items.length >= HOTEL_RANK_MAX || r.items.some((i) => i.id === acc.id)) return false;
+  r.items.push({ id: acc.id, name: acc.name || acc.id, status: 'idle', data: null, error: null });
+  return true;
+}
+
+function hotelRankVisibleAccounts() {
+  const a = state.hotel.api;
+  const r = state.hotel.rank;
+  const base = a.mcc.selectedId && a.mcc.accountIds ? a.accounts.filter((acc) => a.mcc.accountIds.has(acc.id)) : a.accounts;
+  const q = (r.search || '').trim().toLowerCase();
+  return q ? base.filter((acc) => (acc.name || '').toLowerCase().includes(q) || acc.id.includes(q)) : base;
+}
+
+// Qué decir según la diferencia de precio (mismos cortes que el veredicto del panel de una campaña: 2 % y 5 %).
+function hotelRankVerdict(diff) {
+  if (diff === null || diff === undefined) return { text: 'Sin dato de precio', cls: 'neutral', order: 0 };
+  if (diff > 0.05) return { text: 'Más caro', cls: 'bad', order: 3 };
+  if (diff > 0.02) return { text: 'Algo más caro', cls: 'warn', order: 2 };
+  if (diff > -0.005) return { text: 'Al mismo precio', cls: 'neutral', order: 1 };
+  return { text: 'Más barato', cls: 'good', order: 0 };
+}
+
+async function runHotelRank(onlyPending) {
+  const s = state.hotel;
+  const r = s.rank;
+  const a = s.api;
+  if (r.running) return;
+  if (!a.dateFrom || !a.dateTo) { r.stopMsg = 'Elige el rango de fechas.'; render(); return; }
+  const todo = r.items.filter((it) => (onlyPending ? it.status === 'error' || it.status === 'idle' : true));
+  if (!todo.length) return;
+  r.running = true; r.cancel = false; r.stopMsg = '';
+  r.loadedFrom = a.dateFrom; r.loadedTo = a.dateTo;
+  const token = ++r.token;
+  todo.forEach((it) => { it.status = 'pending'; it.error = null; it.data = null; });
+  render();
+  let next = 0;
+  const worker = async () => {
+    while (!r.cancel && r.token === token) {
+      const it = todo[next]; next += 1;
+      if (!it) return;
+      it.status = 'running'; render();
+      try {
+        const params = new URLSearchParams({ customer_id: it.id, date_from: r.loadedFrom, date_to: r.loadedTo });
+        const res = await fetch(`/api/google-ads/hotel-price-account?${params.toString()}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { const err = new Error(data.error || 'Error desconocido.'); err.status = res.status; throw err; }
+        it.data = data; it.status = 'ready';
+      } catch (err) {
+        it.status = 'error'; it.error = err.message || String(err);
+        if (err.status === 429) { r.cancel = true; r.stopMsg = it.error; }
+      }
+      render();
+    }
+  };
+  await Promise.all(Array.from({ length: HOTEL_RANK_CONCURRENCY }, worker));
+  if (r.token !== token) return;
+  r.running = false;
+  todo.forEach((it) => { if (it.status === 'pending') it.status = 'idle'; });
+  render();
+}
+
+// Las cuentas con datos primero, ordenadas por el criterio elegido (de mayor a menor); después las que no tienen campañas de hotel con impresiones y las que fallaron.
+function hotelRankSortedItems() {
+  const r = state.hotel.rank;
+  const key = {
+    price_diff: (sm) => (sm.price_diff === null || sm.price_diff === undefined ? -Infinity : sm.price_diff),
+    not_lowest_share: (sm) => (sm.not_lowest_share === null || sm.not_lowest_share === undefined ? -Infinity : sm.not_lowest_share),
+    cost: (sm) => sm.cost || 0,
+    impressions: (sm) => sm.impressions || 0,
+  }[r.sortBy] || ((sm) => sm.price_diff);
+  const withData = (it) => it.status === 'ready' && it.data && it.data.summary;
+  const first = r.items.filter(withData).sort((x, y) => key(y.data.summary) - key(x.data.summary));
+  const rest = r.items.filter((it) => !withData(it));
+  return [...first, ...rest];
+}
+
+function hotelRankOpen(id) {
+  const s = state.hotel;
+  s.api.accountId = id; s.api.accountIdManual = '';
+  s.mode = 'single';
+  resetHotelAccountData();
+  fetchHotelCampaigns();
+  window.scrollTo(0, 0);
+}
+
+function hotelRankAddWatched() {
+  const r = state.hotel.rank;
+  r.notice = 'Buscando tus cuentas vigiladas…'; render();
+  fetch('/api/google-ads/pacing/watchlist')
+    .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      const hotels = (data.watchlist || []).filter((w) => pacingIsHotelAccount(w.account_name));
+      let added = 0;
+      hotels.forEach((w) => { if (hotelRankAdd({ id: w.customer_id, name: w.account_name })) added += 1; });
+      r.notice = hotels.length
+        ? `Se marcaron ${added} de tus ${hotels.length} cuentas de hoteles vigiladas en Ritmo de consumo${added < hotels.length ? ` (tope de ${HOTEL_RANK_MAX}, o ya estaban marcadas)` : ''}.`
+        : 'No tienes cuentas de hoteles (nombre que empieza por GHA-CPC) en la lista de Ritmo de consumo.';
+      render();
+    })
+    .catch((err) => { r.notice = `No se pudo leer tu lista de Ritmo de consumo: ${err.message || err}`; render(); });
+}
+
+function downloadHotelRankCsv() {
+  const r = state.hotel.rank;
+  const pct = (v) => (v === null || v === undefined ? '' : (v * 100).toFixed(2));
+  const sh = (v) => (v === null || v === undefined ? '' : v.toFixed(1));
+  const rows = [['Cuenta', 'ID', 'Campaña', 'Moneda', 'Impresiones', 'Clics', 'Gasto', 'Conversiones', 'Diferencia de precio %', '% impresiones no es el más barato', '% impresiones más barato o empatado', 'Veredicto', 'Periodo', 'Nota']];
+  const period = r.loadedFrom ? `${r.loadedFrom} a ${r.loadedTo}` : '';
+  hotelRankSortedItems().forEach((it) => {
+    const d = it.data;
+    if (it.status !== 'ready' || !d) { rows.push([it.name, it.id, '', '', '', '', '', '', '', '', '', '', period, it.error || 'Sin consultar']); return; }
+    if (!d.summary) { rows.push([it.name, it.id, '', d.currency || '', '', '', '', '', '', '', '', '', period, 'Sin campañas de hotel activas con impresiones']); return; }
+    const row = (campName, x) => [it.name, it.id, campName, d.currency || '', x.impressions, x.clicks, Math.round(x.cost * 100) / 100, Math.round(x.conversions * 10) / 10,
+      pct(x.price_diff), sh(x.not_lowest_share), sh(x.lowest_share), hotelRankVerdict(x.price_diff).text, period, ''];
+    rows.push(row('', d.summary));
+    d.campaigns.forEach((c) => rows.push(row(c.campaign_name, c)));
+  });
+  engine.downloadCsv(`ranking-precio-hoteles_${new Date().toISOString().slice(0, 10)}.csv`, rows);
+}
+
+function renderHotelRanking() {
+  const s = state.hotel;
+  const a = s.api;
+  const r = s.rank;
+  const e = escapeHtml;
+  if (!a.statusChecked) return `<div class="card control-panel"><p class="footnote">Consultando la conexión con Google Ads…</p></div>`;
+  const simulatedNotice = a.simulated ? `<div class="ok-panel" style="margin:10px 0;width:100%"><strong>Modo simulado.</strong> La API de Google Ads todavía no está configurada en el servidor: estos son datos de ejemplo.</div>` : '';
+
+  let picker;
+  if (a.accountsStatus === 'idle') {
+    picker = `<div class="field"><p class="footnote">${a.configured ? 'Conectado a la API de Google Ads.' : 'La API de Google Ads aún no está configurada: se usarán datos simulados.'}</p>
+      <button class="btn-outline" data-action="hotel-api-load-accounts">Ver cuentas disponibles</button></div>`;
+  } else if (a.accountsStatus === 'loading') {
+    picker = `<div class="field"><p class="footnote">Cargando cuentas…</p></div>`;
+  } else if (a.accountsStatus === 'error') {
+    picker = `<div class="error-panel"><strong>No se pudieron cargar las cuentas.</strong> ${e(a.error)}</div>`;
+  } else {
+    const filtered = hotelRankVisibleAccounts();
+    const chosen = new Set(r.items.map((i) => i.id));
+    const full = r.items.length >= HOTEL_RANK_MAX;
+    const shown = filtered.slice(0, 40);
+    const rows = shown.map((acc) => `<tr>
+      <td style="width:34px"><input type="checkbox" data-hotel-rank-toggle="${e(acc.id)}" ${chosen.has(acc.id) ? 'checked' : ''} ${r.running || (!chosen.has(acc.id) && full) ? 'disabled' : ''} /></td>
+      <td>${e(acc.name)}</td><td style="font-family:ui-monospace,monospace;font-size:12px">${e(acc.id)}</td></tr>`).join('');
+    const addable = filtered.filter((acc) => !chosen.has(acc.id)).length;
+    picker = `
+      ${simulatedNotice}
+      ${renderHotelMccFilterPanel()}
+      <div class="field"><label>Buscar cuenta</label>
+        <input type="text" id="hotel-rank-search" placeholder="Nombre o ID…" value="${e(r.search)}" style="width:280px" /></div>
+      <div class="field" style="align-self:flex-end"><div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn-outline sm" data-action="hotel-rank-addvisible" ${r.running || full || !addable ? 'disabled' : ''} title="Marca las cuentas de la lista hasta llegar al tope de ${HOTEL_RANK_MAX}">Marcar las ${fmtInt(Math.min(addable, HOTEL_RANK_MAX - r.items.length))} de la lista</button>
+        <button class="btn-outline sm" data-action="hotel-rank-addwatched" ${r.running || full ? 'disabled' : ''} title="Agrega tus cuentas de hoteles (GHA-CPC) de la lista de Ritmo de consumo">Marcar mis cuentas de Ritmo de consumo</button>
+        <button class="btn-outline sm" data-action="hotel-rank-clear" ${r.running || !r.items.length ? 'disabled' : ''}>Vaciar selección</button></div></div>
+      <div style="width:100%">
+        <p class="footnote" style="margin:0 0 6px"><strong>${fmtInt(r.items.length)} de ${HOTEL_RANK_MAX}</strong> cuentas marcadas${filtered.length > shown.length ? ` · se ven ${shown.length} de ${fmtInt(filtered.length)}: afina la búsqueda o el MCC` : ` · ${fmtInt(filtered.length)} en la lista`}.${full ? ' Llegaste al tope; calcula este ranking y luego arma otro.' : ''}</p>
+        ${r.notice ? `<p class="footnote" style="margin:0 0 6px;color:var(--color-text-heading)">${e(r.notice)}</p>` : ''}
+        <div class="table-scroll" style="max-height:240px"><table><tbody>${rows || '<tr><td class="footnote">Ninguna cuenta coincide.</td></tr>'}</tbody></table></div>
+      </div>`;
+  }
+
+  const nPending = r.items.filter((i) => i.status === 'idle' || i.status === 'error').length;
+  const anyDone = r.items.some((i) => i.status === 'ready');
+  const sortOpts = [['price_diff', 'Diferencia de precio (más caro primero)'], ['not_lowest_share', '% de impresiones donde no es el más barato'], ['cost', 'Gasto'], ['impressions', 'Impresiones']]
+    .map(([k, l]) => `<option value="${k}" ${r.sortBy === k ? 'selected' : ''}>${e(l)}</option>`).join('');
+  const settings = `
+    <div class="card control-panel align-end" style="flex-wrap:wrap;gap:16px 24px">
+      <h3 class="section-title" style="margin:0;width:100%">Periodo y orden</h3>
+      <div style="display:flex;gap:24px;flex-wrap:nowrap">
+        <div class="field"><label>Desde</label><input type="date" id="hotel-api-date-from" value="${e(a.dateFrom)}" ${r.running ? 'disabled' : ''} /></div>
+        <div class="field"><label>Hasta</label><input type="date" id="hotel-api-date-to" value="${e(a.dateTo)}" ${r.running ? 'disabled' : ''} /></div>
+      </div>
+      <div class="field"><label>Ordenar por</label><select id="hotel-rank-sort">${sortOpts}</select></div>
+      ${r.running
+        ? `<button class="btn-outline" data-action="hotel-rank-cancel" ${r.cancel ? 'disabled' : ''}>${r.cancel ? 'Cancelando…' : 'Cancelar'}</button>`
+        : `<button class="btn-accent" data-action="hotel-rank-run" ${r.items.length ? '' : 'disabled'}>${anyDone ? 'Calcular de nuevo las' : 'Calcular el ranking de las'} ${fmtInt(r.items.length)} cuentas</button>
+           ${anyDone && nPending ? `<button class="btn-outline" data-action="hotel-rank-retry">Completar las ${fmtInt(nPending)} que faltan</button>` : ''}`}
+      <p class="field-hint" style="width:100%;margin:0">Solo lectura: se consulta una cuenta por vez (de a ${HOTEL_RANK_CONCURRENCY}, tres consultas por cuenta) y se miran las campañas de hotel activas con impresiones en el periodo. Deja esta pestaña abierta mientras corre.</p>
+    </div>`;
+
+  const done = r.items.filter((i) => i.status === 'ready' || i.status === 'error').length;
+  const inRun = r.items.filter((i) => i.status !== 'idle').length;
+  const progress = r.running ? `
+    <div style="margin:0 0 14px"><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>Consultando… ${fmtInt(done)} de ${fmtInt(inRun)}</span><span class="footnote">${r.cancel ? 'Terminando las que están en curso…' : ''}</span></div>
+    <div style="height:8px;border-radius:6px;background:var(--color-border,#e5e7eb);overflow:hidden"><div style="height:100%;width:${Math.round((done / Math.max(1, inRun)) * 100)}%;background:var(--color-accent,#03a694);transition:width .3s"></div></div></div>` : '';
+  const stop = r.stopMsg ? `<div class="error-panel" style="margin-bottom:14px"><strong>Se detuvo el ranking.</strong> ${e(r.stopMsg)} Las cuentas que faltan quedan sin consultar; puedes completarlas más tarde.</div>` : '';
+
+  const withData = r.items.filter((i) => i.status === 'ready' && i.data && i.data.summary);
+  const count = (f) => withData.filter((i) => f(i.data.summary.price_diff)).length;
+  const stat = (label, value, sub) => `<div class="card stat-card"><div class="stat-label">${label}</div><div class="stat-value">${value}</div>${sub ? `<div class="stat-sub">${sub}</div>` : ''}</div>`;
+  const cards = r.items.some((i) => i.status === 'ready') ? `<div class="stat-grid">
+    ${stat('Cuentas con datos', fmtInt(withData.length), `de ${fmtInt(r.items.length)} marcadas`)}
+    ${stat('Más de 5 % más caras', fmtInt(count((d) => d !== null && d !== undefined && d > 0.05)), 'subir la puja no recupera esas reservas')}
+    ${stat('Entre 2 y 5 % más caras', fmtInt(count((d) => d !== null && d !== undefined && d > 0.02 && d <= 0.05)), 'diferencia pequeña pero pesa')}
+    ${stat('Competitivas', fmtInt(count((d) => d !== null && d !== undefined && d <= 0.02)), 'hasta 2 % más caras o más baratas')}
+  </div>` : '';
+
+  const money = (n, cur) => hotelMoney(n, cur);
+  const shareCell = (x) => (x.not_lowest_share === null || x.not_lowest_share === undefined ? '<span class="footnote">—</span>'
+    : `${x.not_lowest_share.toFixed(1)} %${x.not_lowest_diff !== null && x.not_lowest_diff !== undefined ? `<div style="font-size:11.5px;color:var(--color-text-muted);white-space:nowrap">${hotelPct(x.not_lowest_diff)} en ellas</div>` : ''}`);
+  const cheapCell = (x) => (x.lowest_share === null || x.lowest_share === undefined ? '<span class="footnote">—</span>' : `${x.lowest_share.toFixed(1)} %`);
+  const numCells = (x, cur) => {
+    const v = hotelRankVerdict(x.price_diff);
+    return `<td style="text-align:right">${fmtInt(x.impressions)}</td>
+      <td style="text-align:right">${x.price_diff === null || x.price_diff === undefined ? '<span class="footnote">—</span>' : `<span class="delta-badge ${v.cls}">${hotelPct(x.price_diff)}</span>`}</td>
+      <td style="text-align:right">${shareCell(x)}</td><td style="text-align:right">${cheapCell(x)}</td>
+      <td style="text-align:right">${money(x.cost, cur)}</td><td style="text-align:right">${x.conversions ? x.conversions.toFixed(x.conversions % 1 ? 1 : 0) : '0'}</td>
+      <td>${x.price_diff === null || x.price_diff === undefined ? '' : `<span class="delta-badge ${v.cls}">${v.text}</span>`}</td>`;
+  };
+  const body = hotelRankSortedItems().map((it) => {
+    const d = it.data;
+    const nameCell = (open) => `<td style="min-width:200px"><button class="btn-link" data-hotel-rank-expand="${e(it.id)}" ${d && d.campaigns && d.campaigns.length ? '' : 'disabled'} style="text-align:left">${open === null ? '' : (open ? '▾ ' : '▸ ')}${e(it.name)}</button><div class="field-hint" style="font-family:ui-monospace,monospace">${e(it.id)}</div></td>`;
+    const removeBtn = `<td style="white-space:nowrap">${it.status === 'ready' && d && d.summary ? `<button class="btn-outline xs" data-hotel-rank-open="${e(it.id)}">Abrir</button> ` : ''}${r.running ? '' : `<button class="btn-link" data-hotel-rank-remove="${e(it.id)}" title="Quitar de la lista">×</button>`}</td>`;
+    if (it.status === 'ready' && d && d.summary) {
+      const open = r.expanded.includes(it.id);
+      const sub = open ? d.campaigns.map((c) => `<tr style="background:var(--gray-50)">
+        <td style="padding-left:28px;font-size:12px">${e(c.campaign_name)}<div class="field-hint">${e(BID_STRATEGY_LABELS_ES[c.bidding_strategy_type] || c.bidding_strategy_type || '')}</div></td>${numCells(c, d.currency)}<td></td></tr>`).join('') : '';
+      return `<tr>${nameCell(open)}${numCells(d.summary, d.currency)}${removeBtn}</tr>${sub}`;
+    }
+    const msg = it.status === 'running' ? '<span class="spinner" style="display:inline-block;width:14px;height:14px;vertical-align:middle"></span> Consultando…'
+      : it.status === 'pending' ? '<span class="footnote">En cola</span>'
+        : it.status === 'error' ? `<span style="color:var(--danger,#d5455f)">${e(it.error || 'No se pudo consultar.')}</span>`
+          : it.status === 'ready' ? '<span class="footnote">Sin campañas de hotel activas con impresiones en el periodo</span>' : '<span class="footnote">Sin consultar</span>';
+    return `<tr>${nameCell(null)}<td colspan="7" style="font-size:12px">${msg}</td>${removeBtn}</tr>`;
+  }).join('');
+  const table = r.items.length ? `
+    ${stop}${progress}${cards}
+    <div class="card table-panel">
+      <div class="table-panel-head">
+        <h3>Cuentas (${fmtInt(r.items.length)})${r.loadedFrom ? ` · ${e(r.loadedFrom)} a ${e(r.loadedTo)}` : ''}</h3>
+        <button class="btn-outline xs" data-action="hotel-rank-csv" ${anyDone ? '' : 'disabled'}>Descargar CSV</button>
+      </div>
+      <div class="table-scroll"><table class="hotel-rank-table">
+        <thead><tr><th>Cuenta</th><th style="text-align:right">Impresiones</th><th style="text-align:right" title="Promedio ponderado por impresiones frente al anunciante más barato; negativo = más barato">Diferencia de precio</th><th style="text-align:right" title="Impresiones donde otro anunciante tenía un precio más bajo, y cuánto más caro sale el hotel en ellas">No es el más barato</th><th style="text-align:right">Más barato o empatado</th><th style="text-align:right">Gasto</th><th style="text-align:right">Conv.</th><th>Veredicto</th><th></th></tr></thead>
+        <tbody>${body}</tbody></table></div>
+      <p class="footnote" style="margin-top:10px">La diferencia de precio es la que Google compara entre las tarifas que el hotel envía a Hotel Ads y las del anunciante más barato: con más de 5 % más caro, subir la puja no recupera esas reservas y conviene revisar las tarifas enviadas. Pulsa el nombre de una cuenta para ver sus campañas, y «Abrir» para ir a sus modificadores. El gasto está en la moneda de cada cuenta, por eso no se suma entre cuentas.</p>
+    </div>` : '';
+
+  return `
+    <div class="card control-panel align-end" style="flex-wrap:wrap;gap:16px 24px">${picker}</div>
+    ${settings}
+    ${table}`;
 }
 
 function ensureHotelGoogleAdsStatusLoaded() {
@@ -15617,6 +15876,32 @@ function bindEvents() {
     state.hotel.api.accountIdManual = e.target.value;
     resetHotelAccountData();
   });
+  document.querySelectorAll('[data-hotel-mode]').forEach((btn) => btn.addEventListener('click', () => { state.hotel.mode = btn.dataset.hotelMode; render(); }));
+  const hotelRankSearch = document.getElementById('hotel-rank-search');
+  if (hotelRankSearch) hotelRankSearch.addEventListener('input', (e) => { state.hotel.rank.search = e.target.value; render(); hotelRefocus('hotel-rank-search'); });
+  const hotelRankSort = document.getElementById('hotel-rank-sort');
+  if (hotelRankSort) hotelRankSort.addEventListener('change', (e) => { state.hotel.rank.sortBy = e.target.value; render(); });
+  document.querySelectorAll('[data-hotel-rank-toggle]').forEach((el) => el.addEventListener('change', () => {
+    const r = state.hotel.rank;
+    const id = el.dataset.hotelRankToggle;
+    if (el.checked) {
+      const acc = state.hotel.api.accounts.find((x) => x.id === id);
+      if (acc) hotelRankAdd(acc);
+    } else r.items = r.items.filter((i) => i.id !== id);
+    render();
+  }));
+  document.querySelectorAll('[data-hotel-rank-remove]').forEach((el) => el.addEventListener('click', () => {
+    const r = state.hotel.rank;
+    r.items = r.items.filter((i) => i.id !== el.dataset.hotelRankRemove);
+    render();
+  }));
+  document.querySelectorAll('[data-hotel-rank-expand]').forEach((el) => el.addEventListener('click', () => {
+    const r = state.hotel.rank;
+    const id = el.dataset.hotelRankExpand;
+    r.expanded = r.expanded.includes(id) ? r.expanded.filter((x) => x !== id) : [...r.expanded, id];
+    render();
+  }));
+  document.querySelectorAll('[data-hotel-rank-open]').forEach((el) => el.addEventListener('click', () => hotelRankOpen(el.dataset.hotelRankOpen)));
   const hotelApiDateFrom = document.getElementById('hotel-api-date-from');
   if (hotelApiDateFrom) hotelApiDateFrom.addEventListener('change', (e) => { state.hotel.api.dateFrom = e.target.value; });
   const hotelApiDateTo = document.getElementById('hotel-api-date-to');
@@ -16506,6 +16791,13 @@ function handleAction(action) {
     case 'iamax-created-csv': downloadIaMaxCreatedCsv(); break;
     case 'iamax-tab-cruce': state.iamax.tab = 'cruce'; render(); break;
     case 'hotel-api-load-accounts': loadHotelGoogleAdsAccounts(); break;
+    case 'hotel-rank-run': runHotelRank(false); break;
+    case 'hotel-rank-retry': runHotelRank(true); break;
+    case 'hotel-rank-cancel': state.hotel.rank.cancel = true; render(); break;
+    case 'hotel-rank-clear': state.hotel.rank.items = []; state.hotel.rank.notice = ''; render(); break;
+    case 'hotel-rank-addvisible': { hotelRankVisibleAccounts().forEach((acc) => hotelRankAdd(acc)); state.hotel.rank.notice = ''; render(); break; }
+    case 'hotel-rank-addwatched': hotelRankAddWatched(); break;
+    case 'hotel-rank-csv': downloadHotelRankCsv(); break;
     case 'hotel-mcc-load': loadHotelMccGroups(); break;
     case 'hotel-mcc-clear': clearHotelMccFilter(); break;
     case 'hotel-api-fetch': fetchHotelCampaigns(); break;
