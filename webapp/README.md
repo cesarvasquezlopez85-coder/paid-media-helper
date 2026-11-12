@@ -42,7 +42,7 @@ No hay todavía historial entre cargas (Fase 2 del roadmap sigue pendiente) — 
 
 ## Secciones solo para el super admin
 
-Hoteles (con su panel de precio, el análisis con IA y la nota para el revenue manager), Campañas, Historial de cambios y la pestaña "Con IA" de Negativización las ve y usa solo quien esté en `PMH_SUPER_ADMIN_USERNAMES` (el menú las oculta y el servidor responde 403 a los demás, aunque sean administradores). El interruptor de Hoteles es `HOTEL_SECTION_VISIBLE` en `app.js`. Cualquier cambio en `webapp/` se despliega solo en Railway al subirlo a `main`; los cambios que solo tocan documentos no.
+Hoteles (con su panel de precio, el análisis con IA y la nota para el revenue manager), Campañas y la pestaña "Con IA" de Negativización las ve y usa solo quien esté en `PMH_SUPER_ADMIN_USERNAMES` (el menú las oculta y el servidor responde 403 a los demás, aunque sean administradores). El Historial de cambios se abrió a todos los usuarios el 2026-11-12: es de solo lectura y cada usuario ve únicamente las cuentas que tiene permitidas. En Ritmo de consumo, "Agregar un MCC completo" lo usa cualquiera con MCC asignado (solo ve y agrega los suyos) y muestra la lista de MCCs agregados con una "×" para quitarlos. El interruptor de Hoteles es `HOTEL_SECTION_VISIBLE` en `app.js`. Cualquier cambio en `webapp/` se despliega solo en Railway al subirlo a `main`; los cambios que solo tocan documentos no.
 
 ## Conexión de solo lectura a GA4, Tag Manager, Search Console y BigQuery
 
