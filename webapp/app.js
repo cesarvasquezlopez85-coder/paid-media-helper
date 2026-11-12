@@ -12512,6 +12512,54 @@ function pacingRowHtmlBody(r) {
     </tr>`;
 }
 
+// Fila(s) de Total de la tabla: suma lo que se ve (respeta los filtros) y se recalcula con pacingComputed, así el
+// % consumido, la desviación y la inversión diaria son los del conjunto, no un promedio de promedios. Solo entran
+// las cuentas con objetivo (una sin objetivo distorsionaría el %), y hay un total por moneda: sumar monedas distintas
+// no tiene sentido.
+function pacingTotalRowsHtml(rows) {
+  const groups = new Map();
+  rows.forEach((r) => {
+    if (r.error) return;
+    const key = r.currency || '';
+    if (!groups.has(key)) groups.set(key, { all: 0, withTarget: [] });
+    const g = groups.get(key);
+    g.all += 1;
+    if (r.monthly_target > 0) g.withTarget.push(r);
+  });
+  const list = [...groups.entries()].filter(([, g]) => g.withTarget.length)
+    .sort((a, b) => b[1].withTarget.length - a[1].withTarget.length);
+  if (!list.length) return { html: '', count: 0 };
+  const html = list.map(([currency, g]) => {
+    const rs = g.withTarget;
+    const sum = (f) => rs.reduce((acc, r) => acc + (Number(f(r)) || 0), 0);
+    const agg = {
+      monthly_target: sum((r) => r.monthly_target),
+      spend_mtd: sum((r) => r.spend_mtd),
+      days_in_month: rs[0].days_in_month,
+      days_elapsed: rs[0].days_elapsed,
+      expected_total: rs.every((r) => r.expected_total != null) ? sum((r) => r.expected_total) : null,
+      is_complete: rs.every((r) => r.is_complete),
+    };
+    const c = pacingComputed(agg);
+    const label = list.length > 1 ? `Total ${escapeHtml(currency || 'sin moneda')}` : 'Total';
+    const note = rs.length === g.all ? `${rs.length} cuenta${rs.length === 1 ? '' : 's'}` : `${rs.length} de ${g.all} cuentas con objetivo`;
+    return withMoneyCurrency(currency, () => `
+      <tr class="pacing-total-row" style="font-weight:700;border-top:2px solid var(--color-text-heading);background:var(--gray-50)">
+        <td>${label}<div class="footnote" style="font-weight:400">${note}</div></td>
+        <td>${fmtMoney(agg.monthly_target)}</td>
+        <td>${fmtMoney(agg.spend_mtd)}</td>
+        <td><strong style="color:${pacingSemaforoColor(c.deviationPct)}">${fmtPct0(c.consumedPct)}</strong>${pacingProgressBar(c)}</td>
+        <td>${fmtMoney(c.expected)}</td>
+        <td><span class="pacing-expected-pill">${fmtPct0(c.expectedPct)}</span></td>
+        <td>${pacingDeviationLabel(c.deviationPct)}</td>
+        <td>${c.recommendedDaily == null ? '—' : c.budgetExceeded ? `${fmtMoney(0)} <span class="delta-badge bad">objetivo superado</span>` : fmtMoney(c.recommendedDaily)}</td>
+        <td>${pacingStatusBadge(c.deviationPct, c.isComplete)}</td>
+        <td></td>
+      </tr>`);
+  }).join('');
+  return { html, count: list.length };
+}
+
 function renderPacingTable() {
   const p = state.pacing;
   if (p.watchlistStatus === 'loading' || p.rowsStatus === 'loading') {
@@ -12522,7 +12570,9 @@ function renderPacingTable() {
   }
   // Los hoteles marcados que ya no están en la lista (se quitaron) salen del filtro.
   p.hotelFilter = p.hotelFilter.filter((id) => p.watchlist.some((w) => w.customer_id === id));
-  const rowsHtml = getPacingRowsSorted().map((r) => pacingRowHtml(r)).join('');
+  const sortedRows = getPacingRowsSorted();
+  const rowsHtml = sortedRows.map((r) => pacingRowHtml(r)).join('');
+  const totals = pacingTotalRowsHtml(sortedRows);
   const kindWatchlist = p.watchlist.filter((w) => pacingMatchesKind(w.account_name));
   const nHotelAccounts = p.watchlist.filter((w) => pacingIsHotelAccount(w.account_name)).length;
   const hotelItems = [...kindWatchlist]
@@ -12584,9 +12634,10 @@ function renderPacingTable() {
             <th></th>
           </tr></thead>
           <tbody>${rowsHtml || '<tr><td colspan="10" class="footnote">Ninguna cuenta de la lista coincide con el filtro.</td></tr>'}</tbody>
+          ${totals.html ? `<tfoot class="${totals.count === 1 ? 'pacing-tfoot-sticky' : ''}">${totals.html}</tfoot>` : ''}
         </table>
       </div>
-      <p class="footnote" style="margin-top:14px">El objetivo mensual sale del presupuesto de cuenta activo en Billing (Google Ads); cuentas sin uno configurado (pago automático sin límite) se muestran solo con el gasto del mes. "Esperado" y "% esperado" se calculan hasta AYER (no hoy) porque el gasto del día en curso en Google Ads normalmente todavía no está completo. "En ritmo" = dentro de ±${(PACING_TOLERANCE * 100).toFixed(0)}% de lo esperado. La barra bajo "% consumido" muestra cuánto del objetivo se ha gastado; la línea vertical marca dónde debería ir según el ritmo esperado. "Inversión diaria recomendada" = lo que queda del objetivo mensual ÷ los días que quedan del mes (incluido hoy), para terminar el mes justo en el objetivo.</p>
+      <p class="footnote" style="margin-top:14px">El objetivo mensual sale del presupuesto de cuenta activo en Billing (Google Ads); cuentas sin uno configurado (pago automático sin límite) se muestran solo con el gasto del mes. "Esperado" y "% esperado" se calculan hasta AYER (no hoy) porque el gasto del día en curso en Google Ads normalmente todavía no está completo. "En ritmo" = dentro de ±${(PACING_TOLERANCE * 100).toFixed(0)}% de lo esperado. La barra bajo "% consumido" muestra cuánto del objetivo se ha gastado; la línea vertical marca dónde debería ir según el ritmo esperado. "Inversión diaria recomendada" = lo que queda del objetivo mensual ÷ los días que quedan del mes (incluido hoy), para terminar el mes justo en el objetivo. La fila Total suma las cuentas que se ven (respeta los filtros) que tienen objetivo, y calcula el % consumido, la desviación y la inversión diaria sobre esa suma; si la lista mezcla monedas hay un Total por moneda.</p>
     </div>`;
 }
 

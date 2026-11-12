@@ -503,6 +503,8 @@ main.content { flex: 1; overflow-y: auto; height: 100%; }
 /* Tabla con encabezado fijo: más alta, y los títulos se quedan arriba al bajar (Campañas). */
 .table-scroll.sticky-head { max-height: calc(100vh - 200px); min-height: 320px; }
 .table-scroll.sticky-head th { position: sticky; top: 0; z-index: 2; background: #fff; box-shadow: 0 1px 0 var(--color-border); }
+/* Ritmo de consumo: con un solo Total, se queda abajo mientras se recorre la lista. */
+.table-scroll.sticky-head tfoot.pacing-tfoot-sticky td { position: sticky; bottom: 0; z-index: 2; background: var(--gray-50, #f6f7f9); box-shadow: 0 -1px 0 var(--color-border); }
 
 .heatmap-wrap { overflow-x: auto; }
 .heatmap-table { border-collapse: separate; border-spacing: 3px; width: 100%; }
