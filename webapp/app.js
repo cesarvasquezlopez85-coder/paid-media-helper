@@ -488,7 +488,7 @@ const PLUS_JAKARTA_HREF = 'https://fonts.googleapis.com/css2?family=Plus+Jakarta
 const PAGE_META = {
   audiencias: {
     title: 'Audiencias',
-    caption: 'Qué listas y audiencias tiene una cuenta de Google Ads, en qué campañas se usan y cuánto rinde cada una (CPA %), solo lectura.',
+    caption: 'Qué listas y audiencias tiene una cuenta de Google Ads, en qué campañas se usan y cuánto rinde cada una (CPA %), solo lectura, con descarga en CSV y HTML.',
   },
   cambios: {
     title: 'Historial de cambios',
@@ -14364,6 +14364,7 @@ function renderAudienciasPage() {
         <select id="aud-days" style="width:160px">${[7, 14, 30, 90].map((d) => opt(String(d), `Últimos ${d} días`, String(s.days))).join('')}</select>
       </div>
       <button class="btn-accent" data-action="aud-load" ${s.status === 'loading' ? 'disabled' : ''}>Consultar</button>
+      ${s.status === 'ready' ? '<button class="btn-outline" data-action="aud-html" title="Resumen, dónde se usan y rendimiento en un solo archivo, sin filtros ni topes de filas">Descargar informe HTML</button>' : ''}
       <p class="field-hint" style="max-width:380px">Cuentas de tu lista de <strong>Ritmo de consumo</strong>. Solo lectura: esta sección no cambia nada en la cuenta.</p>
     </div>`;
 
@@ -14384,6 +14385,7 @@ function renderAudienciasPage() {
   if (s.status === 'error') return `${controls}${errorHtml}`;
   if (s.status !== 'ready') return `${controls}<div class="card state-panel idle">${icon('users', 30)}<p>Elige una cuenta y pulsa Consultar.</p></div>`;
 
+  const exportErr = s.exportError ? `<div class="error-panel" style="margin-bottom:16px">No se pudo armar el HTML: ${escapeHtml(s.exportError)}</div>` : '';
   const sim = s.simulated ? `<div class="ok-panel" style="margin:10px 0"><strong>Modo simulado.</strong> La API de Google Ads no está configurada en el servidor: son audiencias de ejemplo.</div>` : '';
   const errs = Object.keys(s.data.errors || {});
   const warn = errs.length ? `<div class="error-panel" style="margin-bottom:16px">Google no devolvió algunas partes (${escapeHtml(errs.join(', '))}); lo que falta puede verse vacío.</div>` : '';
@@ -14391,7 +14393,7 @@ function renderAudienciasPage() {
   if (s.tab === 'uso') body = renderAudUso();
   else if (s.tab === 'rendimiento') body = renderAudRendimiento();
   else body = renderAudResumen();
-  return `${controls}${sim}${warn}${audTabs(s)}${body}`;
+  return `${controls}${exportErr}${sim}${warn}${audTabs(s)}${body}`;
 }
 
 // ---- Resumen -------------------------------------------------------------
@@ -14668,6 +14670,108 @@ function downloadAudCsv() {
   engine.downloadCsv(`audiencias_${cambiosSlug(s.loaded.accountName)}_${new Date().toISOString().slice(0, 10)}.csv`, rows);
 }
 
+// ---- Descarga en HTML ----------------------------------------------------
+
+const AUD_EXPORT_CSS = `
+  body { margin: 0; background: #fff; }
+  .aud-export { max-width: 1280px; margin: 0 auto; padding: 28px 20px 40px; }
+  .aud-export h1 { font-size: 22px; margin: 0 0 6px; }
+  .aud-export h2 { font-size: 16px; margin: 34px 0 12px; padding-bottom: 6px; border-bottom: 2px solid var(--color-border, #e5e7eb); }
+  .aud-export p.meta { color: #6b7280; font-size: 13px; margin: 0 0 4px; }
+  .aud-export .table-scroll { max-height: none !important; overflow-x: auto !important; overflow-y: visible !important; }
+  .aud-export .aud-hm-wrap { max-height: none; overflow-x: auto; overflow-y: visible; }
+  .aud-export .aud-hm th, .aud-export thead th { position: static; }
+  .aud-export img.aud-chart { width: 100%; height: auto; display: block; }
+  @page { size: landscape; margin: 10mm; }
+  @media print { .aud-export { padding: 0; } .aud-export h2 { break-after: avoid; } .aud-export tr { break-inside: avoid; } .aud-export .card { break-inside: avoid; } }
+`;
+
+// Las gráficas son canvas: se dibujan fuera de pantalla, con el mismo código de la pantalla, y se guardan como imágenes.
+function audExportCharts() {
+  const col = audColors();
+  const out = {};
+  const stage = document.createElement('div');
+  stage.style.cssText = 'position:fixed;left:-10000px;top:0;pointer-events:none';
+  document.body.appendChild(stage);
+  const snap = (id, w, h, mount) => {
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h; stage.appendChild(cv);
+    const chart = mount(cv);
+    if (!chart) return;
+    const flat = document.createElement('canvas');
+    flat.width = cv.width; flat.height = cv.height;
+    const g = flat.getContext('2d');
+    g.fillStyle = '#fff'; g.fillRect(0, 0, flat.width, flat.height); g.drawImage(cv, 0, 0);
+    out[id] = flat.toDataURL('image/png');
+    chart.destroy();
+  };
+  try {
+    const sized = audListsInfo().filter((l) => !l.legacy && (l.size_search || 0) > 0);
+    if (sized.length) snap('aud-sizes', 1000, Math.min(15, sized.length) * 30 + 70, (cv) => mountAudSizesChart(col, cv, true));
+    const all = audPerfRows().filter((r) => r.cost > 0);
+    const withCpa = all.filter((r) => r.cpa_pct != null);
+    const avg = audAvgCpa(all);
+    if (withCpa.length && avg != null) {
+      snap('aud-scatter', 1000, 360, (cv) => mountAudScatter(withCpa, avg, col, cv, true));
+      snap('aud-bars', 1000, Math.min(15, withCpa.length) * 30 + 70, (cv) => mountAudBars(withCpa, avg, col, cv, true));
+    }
+  } finally { stage.remove(); }
+  return out;
+}
+
+// HTML de la pantalla → HTML estático: sin botones ni filtros y con las gráficas como imágenes.
+function audStaticHtml(inner, charts) {
+  const box = document.createElement('div');
+  box.innerHTML = inner;
+  box.querySelectorAll('button, select, input, .control-panel').forEach((el) => el.remove());
+  box.querySelectorAll('canvas').forEach((cv) => {
+    const src = charts[cv.id];
+    if (!src) { cv.remove(); return; }
+    const img = document.createElement('img');
+    img.className = 'aud-chart'; img.alt = cv.getAttribute('aria-label') || ''; img.src = src;
+    cv.parentElement.style.height = 'auto';
+    cv.replaceWith(img);
+  });
+  return box.innerHTML;
+}
+
+// El informe completo de la cuenta (las tres pestañas), sin los filtros ni los topes de filas de la pantalla.
+async function downloadAudHtml() {
+  const s = state.audiencias;
+  if (s.status !== 'ready' || !s.data || !s.loaded) return;
+  s.exportError = null;
+  const keys = ['listFilter', 'listLimit', 'usoKind', 'usoCampaign', 'usoSearch', 'usoLimit', 'perfKind', 'perfSort', 'perfLimit'];
+  const saved = Object.fromEntries(keys.map((k) => [k, s[k]]));
+  let parts;
+  try {
+    Object.assign(s, { listFilter: 'all', listLimit: Infinity, usoKind: 'all', usoCampaign: 'all', usoSearch: '', usoLimit: Infinity, perfKind: 'all', perfSort: 'cost', perfLimit: Infinity });
+    parts = { resumen: renderAudResumen(), uso: renderAudUso(), rendimiento: renderAudRendimiento(), charts: audExportCharts() };
+  } catch (err) {
+    s.exportError = err.message || String(err);
+  } finally {
+    Object.assign(s, saved);
+  }
+  if (!parts) { render(); return; }
+  const today = new Date().toISOString().slice(0, 10);
+  const errs = Object.keys(s.data.errors || {});
+  const body = `
+    <h1>Audiencias · ${escapeHtml(s.loaded.accountName)}</h1>
+    <p class="meta">Cuenta ${escapeHtml(s.loaded.accountId)} · rendimiento de los últimos ${fmtInt(s.loaded.days)} días (del ${escapeHtml(s.loaded.from)} al ${escapeHtml(s.loaded.to)}) · generado el ${today}</p>
+    ${s.simulated ? '<p class="meta"><strong>Datos de ejemplo (modo simulado).</strong></p>' : ''}
+    ${errs.length ? `<p class="meta"><strong>Google no devolvió algunas partes (${escapeHtml(errs.join(', '))}); lo que falta puede verse vacío.</strong></p>` : ''}
+    <section><h2>Resumen</h2>${parts.resumen}</section>
+    <section><h2>Dónde se usan</h2>${parts.uso}</section>
+    <section><h2>Rendimiento</h2>${parts.rendimiento}</section>`;
+  const css = await appCssText();
+  const html = `<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml('Audiencias · ' + s.loaded.accountName)}</title>
+<style>${css}</style>
+<style>${AUD_EXPORT_CSS}</style></head><body><main class="aud-export">${audStaticHtml(body, parts.charts)}</main></body></html>`;
+  downloadTextFile(html, `audiencias_${cambiosSlug(s.loaded.accountName)}_${today}.html`, 'text/html');
+  render();
+}
+
 // ---- Gráficas ------------------------------------------------------------
 
 function mountAudienciasCharts() {
@@ -14684,8 +14788,17 @@ function mountAudienciasCharts() {
   }
 }
 
-function mountAudSizesChart(col) {
-  const canvas = document.getElementById('aud-sizes');
+// Crea la gráfica. Con `exp` (descarga en HTML) dibuja al instante, sin animación y sin registrarla, para guardarla como imagen.
+function audMakeChart(canvas, key, cfg, exp) {
+  if (exp) {
+    cfg.options.responsive = false; cfg.options.animation = false; cfg.options.devicePixelRatio = 2;
+    return new window.Chart(canvas.getContext('2d'), cfg);
+  }
+  chartRegistry[key] = new window.Chart(canvas.getContext('2d'), cfg);
+  return chartRegistry[key];
+}
+
+function mountAudSizesChart(col, canvas = document.getElementById('aud-sizes'), exp = false) {
   if (!canvas) return;
   const rows = audListsInfo().filter((l) => !l.legacy && (l.size_search || 0) > 0).sort((a, b) => b.size_search - a.size_search).slice(0, 15);
   const minLine = {
@@ -14709,7 +14822,7 @@ function mountAudSizesChart(col) {
       ctx.restore();
     },
   };
-  chartRegistry['aud-sizes'] = new window.Chart(canvas.getContext('2d'), {
+  return audMakeChart(canvas, 'aud-sizes', {
     type: 'bar',
     data: {
       labels: rows.map((l) => (l.name.length > 38 ? l.name.slice(0, 37) + '…' : l.name)),
@@ -14724,11 +14837,10 @@ function mountAudSizesChart(col) {
         y: { grid: { display: false }, ticks: { color: col.text, font: { size: 11 } } },
       },
     },
-  });
+  }, exp);
 }
 
-function mountAudScatter(rows, avg, col) {
-  const canvas = document.getElementById('aud-scatter');
+function mountAudScatter(rows, avg, col, canvas = document.getElementById('aud-scatter'), exp = false) {
   if (!canvas) return;
   const top = rows.slice().sort((a, b) => b.cost - a.cost).slice(0, 60);
   const maxCost = Math.max(...top.map((r) => r.cost), 1);
@@ -14765,7 +14877,7 @@ function mountAudScatter(rows, avg, col) {
       ctx.restore();
     },
   };
-  chartRegistry['aud-scatter'] = new window.Chart(canvas.getContext('2d'), {
+  return audMakeChart(canvas, 'aud-scatter', {
     type: 'scatter',
     data: { datasets },
     plugins: [extras],
@@ -14780,11 +14892,10 @@ function mountAudScatter(rows, avg, col) {
         y: { min: 0, max: Math.ceil(cap), title: { display: true, text: 'CPA % (gasto ÷ valor de conversión)', color: col.muted, font: { size: 11 } }, grid: { color: col.grid }, ticks: { color: col.muted, callback: (v) => v + '%' } },
       },
     },
-  });
+  }, exp);
 }
 
-function mountAudBars(rows, avg, col) {
-  const canvas = document.getElementById('aud-bars');
+function mountAudBars(rows, avg, col, canvas = document.getElementById('aud-bars'), exp = false) {
   if (!canvas) return;
   const top = rows.slice().sort((a, b) => b.cost - a.cost).slice(0, 15).sort((a, b) => a.cpa_pct - b.cpa_pct);
   const cap = audCapPct(avg);
@@ -14803,7 +14914,7 @@ function mountAudBars(rows, avg, col) {
       ctx.restore();
     },
   };
-  chartRegistry['aud-bars'] = new window.Chart(canvas.getContext('2d'), {
+  return audMakeChart(canvas, 'aud-bars', {
     type: 'bar',
     data: {
       labels: top.map((r) => (r.name.length > 36 ? r.name.slice(0, 35) + '…' : r.name)),
@@ -14818,7 +14929,7 @@ function mountAudBars(rows, avg, col) {
         y: { grid: { display: false }, ticks: { color: col.text, font: { size: 11 } } },
       },
     },
-  });
+  }, exp);
 }
 
 function bindEvents() {
@@ -15843,6 +15954,7 @@ function handleAction(action) {
     case 'aud-more-uso': state.audiencias.usoLimit += 40; render(); break;
     case 'aud-more-perf': state.audiencias.perfLimit += AUD_PAGE_SIZE; render(); break;
     case 'aud-csv': downloadAudCsv(); break;
+    case 'aud-html': downloadAudHtml(); break;
     case 'cambios-more': state.cambios.limit += CAMBIOS_PAGE_SIZE; render(); break;
     case 'cambios-csv': downloadCambiosCsv(); break;
     case 'cambios-html': downloadCambiosHtml(); break;
