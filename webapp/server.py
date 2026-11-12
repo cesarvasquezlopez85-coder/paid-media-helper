@@ -195,6 +195,10 @@ COPY_RATE_LIMIT = (10, 3600)
 # developer token de todo el equipo — por eso su propio tope por usuario.
 _audit_limiter = RateLimiter()
 AUDIT_RATE_LIMIT = (10, 3600)
+# Auditoría de varias cuentas: cada cuenta del lote es una auditoría; el lote es de hasta 20 y el
+# navegador las pide una por una, así que el tope por hora es mayor, pero sigue siendo por usuario.
+_audit_batch_limiter = RateLimiter()
+AUDIT_BATCH_RATE_LIMIT = (40, 3600)
 
 # /api/change-password verifica una contraseña actual, igual que el login —
 # por usuario ya autenticado (no por IP), para frenar fuerza bruta contra la
@@ -2770,7 +2774,11 @@ class Handler(SimpleHTTPRequestHandler):
         if not user:
             self._send_json(401, {"error": "No autenticado."})
             return
-        if not _audit_limiter.allow(f"user:{user['id']}", *AUDIT_RATE_LIMIT):
+        if payload.get("batch") is True:
+            if not _audit_batch_limiter.allow(f"user:{user['id']}", *AUDIT_BATCH_RATE_LIMIT):
+                self._send_json(429, {"error": f"Alcanzaste el límite de {AUDIT_BATCH_RATE_LIMIT[0]} auditorías por hora en lotes."})
+                return
+        elif not _audit_limiter.allow(f"user:{user['id']}", *AUDIT_RATE_LIMIT):
             self._send_json(429, {"error": "Alcanzaste el límite de auditorías por esta hora. Intenta más tarde."})
             return
         customer_id = str(payload.get("customer_id") or "").strip()

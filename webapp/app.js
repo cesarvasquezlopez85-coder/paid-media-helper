@@ -158,6 +158,12 @@ const state = {
       goal: 'roas', target: '', hotel_feed: 'nose',
     },
     ai: { status: 'idle', narrativa: null, error: null },
+    // Auditoría de varias cuentas a la vez (lote): la misma meta para todas; marca deducida del nombre de cada cuenta.
+    mode: 'single', fromBatch: false,
+    batch: {
+      items: [], search: '', goal: 'volumen', target: '', days: 30, brandWords: 'marca, brand, branded, brnd',
+      running: false, cancel: false, token: 0, stopMsg: '',
+    },
   },
   roas: {
     status: 'idle', error: null, rows: null,
@@ -528,7 +534,7 @@ const PAGE_META = {
   },
   auditoria: {
     title: 'Auditoría de cuenta',
-    caption: 'Revisa la configuración de una cuenta de hotel — conversiones, redes, estructura, palabras clave y activos — y descarga un informe con los hallazgos priorizados.',
+    caption: 'Revisa la configuración de una cuenta de hotel — o de hasta 20 a la vez — en conversiones, redes, estructura, palabras clave y activos, y descarga un informe con los hallazgos priorizados.',
   },
   roas: {
     title: 'ROAS',
@@ -11636,7 +11642,315 @@ function renderAuditPage() {
       ? `<style>${AUDIT_REPORT_CSS}</style><div class="ar" style="margin-bottom:20px">${auditHistoryHtml(h.rows)}</div>`
       : `<div class="card state-panel idle"><p>Esta cuenta todavía no tiene auditorías guardadas. Corre la primera con "Auditar cuenta" y desde ahí quedará su historial.</p></div>`;
   }
-  return `${renderAuditForm()}${historyBlock}${body}`;
+  const modeToggle = `<div class="seg-control" style="margin-bottom:16px;width:fit-content">
+    <button class="seg-btn ${s.mode === 'single' ? 'active' : ''}" data-audit-mode="single">Una cuenta</button>
+    <button class="seg-btn ${s.mode === 'batch' ? 'active' : ''}" data-audit-mode="batch">Varias cuentas</button></div>`;
+  if (s.mode === 'batch') return `${modeToggle}${renderAuditBatch()}`;
+  const back = s.fromBatch ? `<div style="margin-bottom:14px"><button class="btn-outline sm" data-action="audit-batch-back">← Volver al lote</button></div>` : '';
+  return `${modeToggle}${back}${renderAuditForm()}${historyBlock}${body}`;
+}
+
+// ---- Auditoría de varias cuentas (lote) ----------------------------------
+// Audita hasta AUDIT_BATCH_MAX cuentas seguidas con la misma meta. Reutiliza el endpoint de una cuenta
+// (cada auditoría queda también en el historial de su cuenta), de dos en dos para no saturar la cuota de
+// Google Ads. El nombre del hotel y los términos de marca se deducen del nombre de la cuenta y se pueden corregir.
+const AUDIT_BATCH_MAX = 20;
+const AUDIT_BATCH_CONCURRENCY = 2;
+const AUDIT_NAME_LEAD = new Set(['gha', 'cpc', 'sem', 'ppc', 'ads']);
+const AUDIT_NAME_TAIL = new Set(['cpc', 'cops', 'cop', 'sem', 'ppc', 'usd', 'eur', 'gbp', 'mxn', 'clp', 'pen', 'ars', 'brl', 'ads']);
+const AUDIT_NAME_GENERIC = new Set(['hotel', 'hoteles', 'hotels', 'hostal', 'resort']);
+
+// Los nombres de cuenta suelen ser «Hotel - código» («Estelar Playa Manzanillo - playamanzanillo»), con monedas al final
+// («GHL Hotel Montería COPS - ghlmonteria») o solo «GHA-CPC-código» («GHA-CPC-armony»). Se toma el nombre del hotel (lo que va
+// antes del primer « - ») o, si solo hay código, el código. La marca es ese nombre en minúsculas, sin tildes y sin espacios,
+// sin el «Hotel» del principio; no se agrega la primera palabra suelta porque en nombres como «Playa Grande Resort» sería genérica.
+function auditDeduceBrand(name) {
+  const raw = String(name || '').replace(/\s+/g, ' ').trim().replace(/:[A-Za-z]{1,3}$/, '');
+  const spaced = raw.split(/\s+[-–—]\s+/);
+  let segs = spaced.length > 1 ? spaced : (/^(gha|cpc)\b/i.test(raw) ? raw.split(/\s*-\s*/) : [raw]);
+  segs = segs.map((x) => x.trim()).filter(Boolean);
+  while (segs.length > 1 && AUDIT_NAME_LEAD.has(segs[0].toLowerCase())) segs.shift();
+  const toks = (segs[0] || raw).split(' ').filter(Boolean);
+  while (toks.length > 1 && AUDIT_NAME_TAIL.has(toks[toks.length - 1].toLowerCase())) toks.pop();
+  const core = toks.slice();
+  while (core.length > 1 && AUDIT_NAME_GENERIC.has(core[0].toLowerCase())) core.shift();
+  const phrase = core.join(' ').toLowerCase();
+  const plain = phrase.normalize('NFD').replace(/[̀-ͯ]/g, '');
+  // Si el nombre es solo una palabra genérica («Hotel»), no hay marca que deducir.
+  const terms = AUDIT_NAME_GENERIC.has(phrase) ? [] : [...new Set([phrase, plain, core.length > 1 ? plain.replace(/\s+/g, '') : ''])].filter(Boolean);
+  return { hotel_name: toks.join(' ') || raw, brand_terms: terms.join(', ') };
+}
+
+function auditBatchAdd(acc) {
+  const b = state.audit.batch;
+  if (b.items.length >= AUDIT_BATCH_MAX || b.items.some((i) => i.id === acc.id)) return false;
+  b.items.push({ id: acc.id, name: acc.name || acc.id, ...auditDeduceBrand(acc.name || acc.id), status: 'idle', report: null, error: null, simulated: false });
+  return true;
+}
+
+function auditBatchVisibleAccounts() {
+  const a = state.audit.api;
+  const b = state.audit.batch;
+  const base = a.mcc.selectedId && a.mcc.accountIds ? a.accounts.filter((acc) => a.mcc.accountIds.has(acc.id)) : a.accounts;
+  const q = (b.search || '').trim().toLowerCase();
+  return q ? base.filter((acc) => (acc.name || '').toLowerCase().includes(q) || acc.id.includes(q)) : base;
+}
+
+async function runAuditBatch(onlyPending) {
+  const s = state.audit;
+  const b = s.batch;
+  if (b.running) return;
+  const todo = b.items.filter((it) => (onlyPending ? it.status === 'error' || it.status === 'idle' : true));
+  if (!todo.length) return;
+  b.running = true; b.cancel = false; b.stopMsg = '';
+  const token = ++b.token;
+  todo.forEach((it) => { it.status = 'pending'; it.error = null; it.report = null; });
+  render();
+  let next = 0;
+  const worker = async () => {
+    while (!b.cancel && b.token === token) {
+      const it = todo[next]; next += 1;
+      if (!it) return;
+      it.status = 'running'; render();
+      try {
+        const ctx = { hotel_name: it.hotel_name, brand_terms: it.brand_terms, brand_campaign_words: b.brandWords, hotel_feed: 'nose', goal: b.goal, target: b.goal === 'volumen' ? '' : b.target };
+        const res = await fetch('/api/google-ads/audit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ customer_id: it.id, days: Number(b.days), context: ctx, batch: true }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { const err = new Error(data.error || 'Error desconocido.'); err.status = res.status; throw err; }
+        it.report = data.report; it.simulated = !!data.simulated; it.status = 'ready';
+      } catch (err) {
+        it.status = 'error'; it.error = err.message || String(err);
+        if (err.status === 429) { b.cancel = true; b.stopMsg = it.error; }
+      }
+      render();
+    }
+  };
+  await Promise.all(Array.from({ length: AUDIT_BATCH_CONCURRENCY }, worker));
+  if (b.token !== token) return;
+  b.running = false;
+  todo.forEach((it) => { if (it.status === 'pending') it.status = 'idle'; });
+  render();
+}
+
+function auditBatchOpen(id) {
+  const s = state.audit;
+  const it = s.batch.items.find((x) => x.id === id);
+  if (!it || !it.report) return;
+  s.report = it.report; s.reportAccountName = it.name;
+  s.ctx = { ...s.ctx, ...it.report.meta.context, target: it.report.meta.context.target ? String(it.report.meta.context.target) : '' };
+  s.api.accountId = id; s.api.accountIdManual = ''; s.api.simulated = it.simulated;
+  s.ai = { status: 'idle', narrativa: null, error: null };
+  s.history = { status: 'idle', rows: null, error: null, customerId: '' };
+  s.status = 'ready'; s.mode = 'single'; s.fromBatch = true;
+  render();
+  window.scrollTo(0, 0);
+}
+
+const AUDIT_LABEL_STYLE = () => ({
+  Sana: AUDIT_PRIORITY.oportunidad, Mejorable: AUDIT_PRIORITY.advertencia, 'Requiere atención': AUDIT_PRIORITY.critico,
+});
+
+function auditBatchTopFindings(r, n = 3) {
+  const crit = r.findings.filter((f) => f.severity === 'critico');
+  const warn = r.findings.filter((f) => f.severity === 'advertencia');
+  const list = [...crit, ...warn];
+  const shown = list.slice(0, n).map((f) => `${f.id} · ${f.title}`);
+  return { shown, more: Math.max(0, list.length - shown.length) };
+}
+
+function renderAuditBatch() {
+  const s = state.audit;
+  const a = s.api;
+  const b = s.batch;
+  const e = escapeHtml;
+  if (!a.statusChecked) return `<div class="card control-panel"><p class="footnote">Consultando la conexión con Google Ads…</p></div>`;
+  const simulatedNotice = a.simulated ? `<div class="ok-panel" style="margin:10px 0;width:100%"><strong>Modo simulado.</strong> La API de Google Ads todavía no está configurada en el servidor: cada cuenta usa la misma cuenta de hotel de ejemplo.</div>` : '';
+
+  // 1. Cuentas
+  let picker;
+  if (a.accountsStatus === 'idle') {
+    picker = `<div class="field"><p class="footnote">${a.configured ? 'Conectado a la API de Google Ads.' : 'La API de Google Ads aún no está configurada: se usarán datos simulados.'}</p>
+      <button class="btn-outline" data-action="audit-load-accounts">Ver cuentas disponibles</button></div>`;
+  } else if (a.accountsStatus === 'loading') {
+    picker = `<div class="field"><p class="footnote">Cargando cuentas…</p></div>`;
+  } else if (a.accountsStatus === 'error') {
+    picker = `<div class="error-panel"><strong>No se pudieron cargar las cuentas.</strong> ${e(a.error)}</div>`;
+  } else {
+    const filtered = auditBatchVisibleAccounts();
+    const chosen = new Set(b.items.map((i) => i.id));
+    const full = b.items.length >= AUDIT_BATCH_MAX;
+    const shown = filtered.slice(0, 40);
+    const rows = shown.map((acc) => `<tr>
+      <td style="width:34px"><input type="checkbox" data-audit-batch-toggle="${e(acc.id)}" ${chosen.has(acc.id) ? 'checked' : ''} ${b.running || (!chosen.has(acc.id) && full) ? 'disabled' : ''} /></td>
+      <td>${e(acc.name)}</td><td style="font-family:ui-monospace,monospace;font-size:12px">${e(acc.id)}</td></tr>`).join('');
+    const addable = filtered.filter((acc) => !chosen.has(acc.id)).length;
+    picker = `
+      ${simulatedNotice}
+      ${renderAuditMccFilterPanel()}
+      <div class="field"><label>Buscar cuenta</label>
+        <input type="text" id="audit-batch-search" placeholder="Nombre o ID…" value="${e(b.search)}" style="width:280px" /></div>
+      <div class="field" style="align-self:flex-end"><div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn-outline sm" data-action="audit-batch-addvisible" ${b.running || full || !addable ? 'disabled' : ''} title="Marca las cuentas de la lista hasta llegar al tope de ${AUDIT_BATCH_MAX}">Marcar las ${fmtInt(Math.min(addable, AUDIT_BATCH_MAX - b.items.length))} de la lista</button>
+        <button class="btn-outline sm" data-action="audit-batch-clear" ${b.running || !b.items.length ? 'disabled' : ''}>Vaciar selección</button></div></div>
+      <div style="width:100%">
+        <p class="footnote" style="margin:0 0 6px"><strong>${fmtInt(b.items.length)} de ${AUDIT_BATCH_MAX}</strong> cuentas marcadas${filtered.length > shown.length ? ` · se ven ${shown.length} de ${fmtInt(filtered.length)}: afina la búsqueda o el MCC` : ` · ${fmtInt(filtered.length)} en la lista`}.${full ? ' Llegaste al tope por lote; audita estas y luego haz otro lote.' : ''}</p>
+        <div class="table-scroll" style="max-height:240px"><table><tbody>${rows || '<tr><td class="footnote">Ninguna cuenta coincide.</td></tr>'}</tbody></table></div>
+      </div>`;
+  }
+
+  // 2. Meta única
+  const goalSel = Object.entries(AUDIT_GOALS).map(([k, v]) => `<option value="${k}" ${b.goal === k ? 'selected' : ''}>${e(v)}</option>`).join('');
+  const nPending = b.items.filter((i) => i.status === 'idle' || i.status === 'error').length;
+  const anyDone = b.items.some((i) => i.status === 'ready');
+  const settings = `
+    <div class="card control-panel align-end" style="flex-wrap:wrap;gap:16px 24px">
+      <h3 class="section-title" style="margin:0;width:100%">Meta y periodo (iguales para todas las cuentas)</h3>
+      <div class="field"><label>Meta principal</label><select id="audit-batch-goal" ${b.running ? 'disabled' : ''}>${goalSel}</select></div>
+      ${b.goal !== 'volumen' ? `<div class="field"><label>${b.goal === 'roas' ? 'ROAS objetivo (ej. 450 = 450%)' : 'CPA objetivo'}</label><input type="text" id="audit-batch-target" value="${e(b.target)}" placeholder="${b.goal === 'roas' ? '450' : '25'}" style="width:110px" ${b.running ? 'disabled' : ''} /></div>` : ''}
+      <div class="field"><label>Periodo</label><select id="audit-batch-days" ${b.running ? 'disabled' : ''}>${[30, 60, 90].map((d) => `<option value="${d}" ${Number(b.days) === d ? 'selected' : ''}>Últimos ${d} días</option>`).join('')}</select></div>
+      <div class="field"><label>Palabras que marcan una campaña de marca</label><input type="text" id="audit-batch-words" value="${e(b.brandWords)}" style="width:220px" ${b.running ? 'disabled' : ''} /></div>
+      ${b.running
+        ? `<button class="btn-outline" data-action="audit-batch-cancel" ${b.cancel ? 'disabled' : ''}>${b.cancel ? 'Cancelando…' : 'Cancelar'}</button>`
+        : `<button class="btn-accent" data-action="audit-batch-run" ${b.items.length ? '' : 'disabled'}>${anyDone ? 'Auditar de nuevo las' : 'Auditar las'} ${fmtInt(b.items.length)} cuentas</button>
+           ${anyDone && nPending ? `<button class="btn-outline" data-action="audit-batch-retry">Completar las ${fmtInt(nPending)} que faltan</button>` : ''}`}
+      <p class="field-hint" style="width:100%;margin:0">Se auditan de a ${AUDIT_BATCH_CONCURRENCY} a la vez (unas 22 consultas de solo lectura por cuenta) y cada una queda también en el historial de su cuenta. Deja esta pestaña abierta mientras corre. El nombre del hotel y los términos de marca se <strong>deducen del nombre de la cuenta</strong>: corrígelos en la tabla si no son los correctos, porque de ellos dependen las revisiones de marca (el resto de las reglas no los usa).</p>
+    </div>`;
+
+  // 3. Tabla de cuentas y resultados
+  const done = b.items.filter((i) => i.status === 'ready' || i.status === 'error').length;
+  const progress = b.running ? `
+    <div style="margin:0 0 14px"><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>Auditando… ${fmtInt(done)} de ${fmtInt(b.items.filter((i) => i.status !== 'idle').length)}</span><span class="footnote">${b.cancel ? 'Terminando las que están en curso…' : ''}</span></div>
+    <div style="height:8px;border-radius:6px;background:var(--color-border,#e5e7eb);overflow:hidden"><div style="height:100%;width:${Math.round((done / Math.max(1, b.items.filter((i) => i.status !== 'idle').length)) * 100)}%;background:var(--color-accent,#03a694);transition:width .3s"></div></div></div>` : '';
+  const stop = b.stopMsg ? `<div class="error-panel" style="margin-bottom:14px"><strong>Se detuvo el lote.</strong> ${e(b.stopMsg)} Las cuentas que faltan quedan sin auditar; puedes completarlas más tarde.</div>` : '';
+
+  const ready = b.items.filter((i) => i.status === 'ready');
+  const avg = ready.length ? ready.reduce((t, i) => t + i.report.score.total, 0) / ready.length : null;
+  const byLabel = (l) => ready.filter((i) => i.report.score.label === l).length;
+  const totalCrit = ready.reduce((t, i) => t + i.report.score.critical, 0);
+  const stat = (label, value, sub) => `<div class="card stat-card"><div class="stat-label">${label}</div><div class="stat-value">${value}</div>${sub ? `<div class="stat-sub">${sub}</div>` : ''}</div>`;
+  const cards = ready.length ? `<div class="stat-grid">
+    ${stat('Auditadas', `${fmtInt(ready.length)}`, `de ${fmtInt(b.items.length)} marcadas`)}
+    ${stat('Puntaje promedio', avg.toFixed(0), 'sobre 100')}
+    ${stat('Sanas / Mejorables', `${fmtInt(byLabel('Sana'))} / ${fmtInt(byLabel('Mejorable'))}`, '')}
+    ${stat('Requieren atención', fmtInt(byLabel('Requiere atención')), `${fmtInt(totalCrit)} críticos en total`)}
+  </div>` : '';
+
+  const styles = AUDIT_LABEL_STYLE();
+  const tr = b.items.map((it) => {
+    const r = it.report;
+    let result;
+    if (it.status === 'ready') {
+      const st = styles[r.score.label] || AUDIT_PRIORITY.info;
+      const top = auditBatchTopFindings(r);
+      result = `
+        <td style="text-align:center;white-space:nowrap"><strong style="font-size:18px">${r.score.total}</strong><div><span class="ar-pill" style="background:${st.bg};color:${st.fg}">${e(r.score.label)}</span></div></td>
+        <td style="text-align:right">${r.score.critical}</td><td style="text-align:right">${r.score.warnings}</td>
+        <td style="min-width:300px;font-size:12px">${top.shown.map((t) => `<div>${e(t)}</div>`).join('') || '<span class="footnote">Sin hallazgos</span>'}${top.more ? `<div class="footnote">y ${top.more} más</div>` : ''}</td>`;
+    } else {
+      const msg = it.status === 'running' ? '<span class="spinner" style="display:inline-block;width:14px;height:14px;vertical-align:middle"></span> Auditando…'
+        : it.status === 'pending' ? '<span class="footnote">En cola</span>'
+          : it.status === 'error' ? `<span style="color:var(--danger,#d5455f)">${e(it.error || 'No se pudo auditar.')}</span>` : '<span class="footnote">Sin auditar</span>';
+      result = `<td colspan="4" style="font-size:12px">${msg}</td>`;
+    }
+    return `<tr>
+      <td style="min-width:150px">${e(it.name)}<div class="field-hint" style="font-family:ui-monospace,monospace">${e(it.id)}</div>${it.status === 'ready' ? `<button class="btn-outline xs" style="margin-top:6px" data-audit-batch-open="${e(it.id)}">Ver informe</button>` : ''}</td>
+      <td><input type="text" data-audit-batch-field="hotel_name" data-audit-batch-id="${e(it.id)}" value="${e(it.hotel_name)}" style="width:140px" ${b.running ? 'disabled' : ''} /></td>
+      <td><input type="text" data-audit-batch-field="brand_terms" data-audit-batch-id="${e(it.id)}" value="${e(it.brand_terms)}" style="width:150px" ${b.running ? 'disabled' : ''} /></td>
+      ${result}
+      <td>${b.running ? '' : `<button class="btn-link" data-audit-batch-remove="${e(it.id)}" title="Quitar de la lista">×</button>`}</td>
+    </tr>`;
+  }).join('');
+  const table = b.items.length ? `
+    ${stop}${progress}${cards}
+    <div class="card table-panel">
+      <div class="table-panel-head">
+        <h3>Cuentas del lote (${fmtInt(b.items.length)})</h3>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn-outline xs" data-action="audit-batch-csv" ${ready.length ? '' : 'disabled'}>Descargar CSV</button>
+          <button class="btn-accent xs" data-action="audit-batch-html" ${ready.length ? '' : 'disabled'} title="Resumen y el informe completo de cada cuenta en un solo archivo">Descargar informes (HTML)</button>
+        </div>
+      </div>
+      <div class="table-scroll"><table>
+        <thead><tr><th>Cuenta</th><th>Nombre del hotel</th><th>Términos de marca</th><th style="text-align:center">Puntaje</th><th style="text-align:right">Críticos</th><th style="text-align:right">Advert.</th><th>Hallazgos principales</th><th></th></tr></thead>
+        <tbody>${tr}</tbody></table></div>
+      <p class="footnote" style="margin-top:10px">Los hallazgos principales son los críticos y luego las advertencias. «Ver informe» abre el informe completo de esa cuenta, con las mismas descargas que la auditoría de una cuenta. Puntaje: cada crítico resta 5 y cada advertencia 2.</p>
+    </div>` : '';
+
+  return `
+    <div class="card control-panel align-end" style="flex-wrap:wrap;gap:16px 24px">${picker}</div>
+    ${settings}
+    ${table}`;
+}
+
+// Datos de una auditoría del lote en las variables que usa el informe de una cuenta, para reutilizarlo tal cual.
+function auditBodyForBatchItem(it) {
+  const s = state.audit;
+  const saved = { report: s.report, name: s.reportAccountName, ai: s.ai, sim: s.api.simulated };
+  try {
+    s.report = it.report; s.reportAccountName = it.name; s.ai = { status: 'idle', narrativa: null, error: null }; s.api.simulated = it.simulated;
+    return auditReportBodyHtml();
+  } finally {
+    s.report = saved.report; s.reportAccountName = saved.name; s.ai = saved.ai; s.api.simulated = saved.sim;
+  }
+}
+
+function auditBatchGoalText(b) {
+  return b.goal === 'roas' && b.target ? `ROAS objetivo ${b.target}%` : b.goal === 'cpa' && b.target ? `CPA objetivo ${b.target}` : 'Volumen de reservas';
+}
+
+function downloadAuditBatchCsv() {
+  const b = state.audit.batch;
+  const rows = [['Cuenta', 'ID', 'Nombre del hotel', 'Términos de marca', 'Puntaje', 'Etiqueta', 'Críticos', 'Advertencias', 'Informativos', 'Moneda', 'Gasto', 'Conversiones', 'ROAS', 'CPA %', 'Críticos (reglas)', 'Advertencias (reglas)', 'Meta', 'Periodo', 'Error']];
+  b.items.forEach((it) => {
+    const r = it.report;
+    if (!r) { rows.push([it.name, it.id, it.hotel_name, it.brand_terms, '', '', '', '', '', '', '', '', '', '', '', '', auditBatchGoalText(b), `${b.days} días`, it.error || (it.status === 'ready' ? '' : 'Sin auditar')]); return; }
+    const sm = r.summary;
+    rows.push([it.name, it.id, it.hotel_name, it.brand_terms, r.score.total, r.score.label, r.score.critical, r.score.warnings, r.score.info, sm.currency || '',
+      Math.round(sm.cost), Math.round(sm.conversions), sm.roas != null ? Math.round(sm.roas * 100) + '%' : '', sm.cpa_pct != null ? (sm.cpa_pct * 100).toFixed(1) + '%' : '',
+      r.findings.filter((f) => f.severity === 'critico').map((f) => f.id).join(' '), r.findings.filter((f) => f.severity === 'advertencia').map((f) => f.id).join(' '),
+      auditBatchGoalText(b), `${r.meta.date_from} a ${r.meta.date_to}`, '']);
+  });
+  engine.downloadCsv(`auditoria-varias-cuentas_${new Date().toISOString().slice(0, 10)}.csv`, rows);
+}
+
+function buildAuditBatchHtml() {
+  const b = state.audit.batch;
+  const e = escapeHtml;
+  const ready = b.items.filter((i) => i.status === 'ready');
+  const styles = AUDIT_LABEL_STYLE();
+  const today = new Date().toISOString().slice(0, 10);
+  const avg = ready.length ? ready.reduce((t, i) => t + i.report.score.total, 0) / ready.length : 0;
+  const sorted = [...ready].sort((x, y) => x.report.score.total - y.report.score.total);
+  const rows = sorted.map((it) => {
+    const r = it.report; const st = styles[r.score.label] || AUDIT_PRIORITY.info; const top = auditBatchTopFindings(r);
+    return `<tr><td><a href="#aud-${e(it.id)}">${e(it.hotel_name || it.name)}</a><div style="font-size:11px;color:#6b7280">${e(it.name)} · ${e(it.id)}</div></td>
+      <td style="text-align:center"><strong>${r.score.total}</strong></td>
+      <td><span class="ar-pill" style="background:${st.bg};color:${st.fg}">${e(r.score.label)}</span></td>
+      <td style="text-align:right">${r.score.critical}</td><td style="text-align:right">${r.score.warnings}</td>
+      <td style="font-size:12px;text-align:left">${top.shown.map((t) => `<div>${e(t)}</div>`).join('')}${top.more ? `<div style="color:#6b7280">y ${top.more} más</div>` : ''}</td></tr>`;
+  }).join('');
+  const failed = b.items.filter((i) => i.status !== 'ready');
+  const summary = `
+    <div class="ar" style="max-width:1120px">
+      <div class="ar-eyebrow">Auditoría de varias cuentas</div>
+      <div class="ar-title">${fmtInt(ready.length)} cuenta${ready.length === 1 ? '' : 's'} auditada${ready.length === 1 ? '' : 's'}</div>
+      <div class="ar-sub">Meta: ${e(auditBatchGoalText(b))} · últimos ${Number(b.days)} días · generado el ${today} · puntaje promedio ${avg.toFixed(0)}/100</div>
+      ${ready.some((i) => i.simulated) ? '<div class="ar-note"><strong>Datos de ejemplo (modo simulado).</strong> No son de cuentas reales.</div>' : ''}
+      <div class="ar-note">El nombre del hotel y los términos de marca se dedujeron del nombre de la cuenta; de ellos dependen solo las revisiones de marca. Ordenadas de menor a mayor puntaje.</div>
+      <div class="ar-card"><div class="ar-tw"><table class="ar-tbl ar-compact"><thead><tr><th style="min-width:220px">Hotel / cuenta</th><th>Puntaje</th><th>Estado</th><th>Críticos</th><th>Advert.</th><th style="min-width:380px;text-align:left">Hallazgos principales</th></tr></thead><tbody>${rows}</tbody></table></div></div>
+      ${failed.length ? `<div class="ar-note"><strong>Sin auditar (${failed.length}):</strong> ${failed.map((i) => `${e(i.name)}${i.error ? ` (${e(i.error)})` : ''}`).join('; ')}</div>` : ''}
+    </div>`;
+  const reports = sorted.map((it) => `<div id="aud-${e(it.id)}" style="page-break-before:always;padding-top:28px">${auditBodyForBatchItem(it)}</div>`).join('');
+  return `<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Auditoría de varias cuentas — ${today}</title>
+${themedFontsLink(PLUS_JAKARTA_HREF)}
+<style>body{margin:0;padding:40px 20px;background:#f4f5f8}@media print{body{background:#fff;padding:0}@page{margin:14mm}}${AUDIT_REPORT_CSS}.ar-tbl a{color:inherit;font-weight:600}</style>
+</head><body>${summary}${reports}</body></html>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -15883,6 +16197,32 @@ function bindEvents() {
       if (field === 'goal') render(); // cambia la etiqueta y si hay campo de meta
     });
   });
+  // Auditoría de varias cuentas
+  document.querySelectorAll('[data-audit-mode]').forEach((btn) => btn.addEventListener('click', () => { state.audit.mode = btn.dataset.auditMode; render(); }));
+  const auditBatchSearch = document.getElementById('audit-batch-search');
+  if (auditBatchSearch) auditBatchSearch.addEventListener('input', (e) => { state.audit.batch.search = e.target.value; render(); hotelRefocus('audit-batch-search'); });
+  document.querySelectorAll('[data-audit-batch-toggle]').forEach((el) => el.addEventListener('change', () => {
+    const b = state.audit.batch;
+    const id = el.dataset.auditBatchToggle;
+    if (b.running) return;
+    if (el.checked) { const acc = state.audit.api.accounts.find((x) => x.id === id); if (acc) auditBatchAdd(acc); } else b.items = b.items.filter((i) => i.id !== id);
+    render();
+  }));
+  document.querySelectorAll('[data-audit-batch-remove]').forEach((el) => el.addEventListener('click', () => {
+    const b = state.audit.batch;
+    b.items = b.items.filter((i) => i.id !== el.dataset.auditBatchRemove);
+    render();
+  }));
+  document.querySelectorAll('[data-audit-batch-open]').forEach((el) => el.addEventListener('click', () => auditBatchOpen(el.dataset.auditBatchOpen)));
+  document.querySelectorAll('[data-audit-batch-field]').forEach((el) => el.addEventListener('change', () => {
+    const it = state.audit.batch.items.find((i) => i.id === el.dataset.auditBatchId);
+    if (it) it[el.dataset.auditBatchField] = el.value;
+  }));
+  const abOn = (id, fn) => { const el = document.getElementById(id); if (el) el.addEventListener('change', fn); };
+  abOn('audit-batch-goal', (e) => { state.audit.batch.goal = e.target.value; render(); });
+  abOn('audit-batch-target', (e) => { state.audit.batch.target = e.target.value; });
+  abOn('audit-batch-days', (e) => { state.audit.batch.days = Number(e.target.value); });
+  abOn('audit-batch-words', (e) => { state.audit.batch.brandWords = e.target.value; });
   // Administración
   const adminGrantUser = document.getElementById('admin-grant-user');
   if (adminGrantUser) adminGrantUser.addEventListener('change', (e) => { state.admin.grant.userId = e.target.value; });
@@ -16441,6 +16781,14 @@ function handleAction(action) {
     case 'admin-grant-submit': grantAdminAccess(); break;
     case 'audit-load-accounts': loadAuditAccounts(); break;
     case 'audit-run': runAudit(); break;
+    case 'audit-batch-run': runAuditBatch(false); break;
+    case 'audit-batch-retry': runAuditBatch(true); break;
+    case 'audit-batch-cancel': state.audit.batch.cancel = true; render(); break;
+    case 'audit-batch-clear': state.audit.batch.items = []; render(); break;
+    case 'audit-batch-addvisible': { auditBatchVisibleAccounts().forEach((acc) => auditBatchAdd(acc)); render(); break; }
+    case 'audit-batch-csv': downloadAuditBatchCsv(); break;
+    case 'audit-batch-html': downloadTextFile(buildAuditBatchHtml(), `auditoria-varias-cuentas_${new Date().toISOString().slice(0, 10)}.html`, 'text/html'); break;
+    case 'audit-batch-back': state.audit.mode = 'batch'; state.audit.fromBatch = false; render(); window.scrollTo(0, 0); break;
     case 'audit-history': loadAuditHistoryOnly(); break;
     case 'audit-ai': runAuditAi(); break;
     case 'audit-mcc-load': loadAuditMccGroups(); break;
