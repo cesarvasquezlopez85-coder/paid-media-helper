@@ -516,6 +516,12 @@ def _fetch_pacing_range(customer_id, month_from, month_to, today):
     return aggregate_pacing_months(months, spend_by_month, target_by_month, today)
 
 
+def _is_ended_experiment(campaign):
+    """Campaña de experimento que ya terminó (Google la deja ENABLED pero con serving_status ENDED).
+    No es una campaña real de la cuenta: comparte presupuesto con la original y mete ruido en las listas."""
+    return campaign.get("experimentType") == "EXPERIMENT" and campaign.get("servingStatus") == "ENDED"
+
+
 def fetch_account_campaigns_budget(customer_id):
     """Campañas ACTIVAS de la cuenta con sus KPIs principales del mes en
     curso y su presupuesto diario — para poder ajustarlo directo desde
@@ -540,21 +546,31 @@ def fetch_account_campaigns_budget(customer_id):
     una vez, sin depender solo del flag de Google."""
     today = datetime.date.today()
     month_start = today.replace(day=1)
-    query = f"""
+    base_select = """
         SELECT campaign.id, campaign.name, campaign.bidding_strategy_type,
                campaign.target_roas.target_roas, campaign.maximize_conversion_value.target_roas,
                campaign_budget.resource_name, campaign_budget.amount_micros,
                campaign_budget.explicitly_shared,
                metrics.impressions, metrics.clicks, metrics.ctr,
-               metrics.cost_micros, metrics.conversions, metrics.conversions_value, metrics.cost_per_conversion
+               metrics.cost_micros, metrics.conversions, metrics.conversions_value, metrics.cost_per_conversion"""
+    where = f"""
         FROM campaign
         WHERE campaign.status = 'ENABLED'
           AND segments.date BETWEEN '{month_start.isoformat()}' AND '{today.isoformat()}'
     """
-    results = _search(customer_id, query)
+    # Los experimentos que ya terminaron (campaña de tipo EXPERIMENT con serving_status ENDED)
+    # no son campañas reales de la cuenta: se dejan fuera. Si Google rechazara esos dos campos,
+    # se vuelve a la consulta de siempre para no tumbar la ventana.
+    try:
+        results = _search(customer_id, base_select + ",\n               campaign.experiment_type, campaign.serving_status" + where)
+    except Exception as e:  # noqa: BLE001
+        print(f"[pacing-campaigns] sin filtro de experimentos terminados ({customer_id}): {' '.join(str(e).split())[:200]}", flush=True)
+        results = _search(customer_id, base_select + where)
     rows = []
     for r in results:
         campaign = r.get("campaign", {})
+        if _is_ended_experiment(campaign):
+            continue
         budget = r.get("campaignBudget", {})
         metrics = r.get("metrics", {})
         target_roas = campaign.get("targetRoas", {}).get("targetRoas")
@@ -812,6 +828,9 @@ def fetch_campaigns_overview(customer_id, date_from, date_to):
         FROM campaign
         WHERE campaign.status != 'REMOVED'
     """
+    # Con los dos campos extra se dejan fuera los experimentos terminados; si Google los rechazara, se
+    # vuelve a la consulta de siempre para no tumbar la sección.
+    list_query_exp = list_query.replace("campaign_budget.amount_micros", "campaign_budget.amount_micros,\n          campaign.experiment_type,\n          campaign.serving_status")
     metrics_query = f"""
         SELECT
           campaign.id,
@@ -859,8 +878,15 @@ def fetch_campaigns_overview(customer_id, date_from, date_to):
         }
     empty = {"impressions": 0, "clicks": 0, "cost": 0.0, "conversions": 0.0, "conv_value": 0.0}
     out = []
-    for r in _search(customer_id, list_query):
+    try:
+        list_results = _search(customer_id, list_query_exp)
+    except Exception as e:  # noqa: BLE001
+        print(f"[campanas] sin filtro de experimentos terminados ({customer_id}): {' '.join(str(e).split())[:200]}", flush=True)
+        list_results = _search(customer_id, list_query)
+    for r in list_results:
         c = r.get("campaign", {})
+        if _is_ended_experiment(c):
+            continue
         cid = str(c.get("id"))
         target_roas = c.get("targetRoas", {}).get("targetRoas")
         if target_roas is None:
