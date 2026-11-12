@@ -8,7 +8,7 @@ El generador de copys de anuncio desde una URL estuvo oculto del menú desde el 
 
 Ya no es solo un prototipo de Streamlit, y ya no corre solo local: existe una implementación web completa (`webapp/`, HTML/CSS/JS + un servidor Python sin dependencias externas) con login por usuario/contraseña, que reproduce el diseño hecho en Claude Design. **Vive en producción en [Railway](https://railway.app)**, en `https://paid-media-helper.up.railway.app`, con auto-deploy desde la rama `main` del repo de GitHub — cualquier cambio que se suba se despliega solo, sin pasos manuales. También se puede correr local con `python3 webapp/server.py` → `http://localhost:8642` — ver "Cómo corre la plataforma" más abajo.
 
-Desde el 2026-11-04 hay además secciones que solo ve y usa el super admin mientras se afinan: **Hoteles** (modificadores de oferta de campañas de hotel, con la diferencia de precio frente a la competencia, un análisis con IA y una nota para el revenue manager del hotel), **Campañas** (todas las campañas de las cuentas vigiladas, con KPIs y un detalle por campaña) y la pestaña **Con IA** de Negativización. El **Historial de cambios** (quién cambió qué en una cuenta) se abrió a todos los usuarios el 2026-11-12. Ver "Novedades desde la V4" y las Funciones 15 a 17.
+Desde el 2026-11-04 hay además secciones que solo ve y usa el super admin mientras se afinan: **Hoteles** (modificadores de oferta de campañas de hotel, con la diferencia de precio frente a la competencia, un análisis con IA y una nota para el revenue manager del hotel), **Campañas** (todas las campañas de las cuentas vigiladas, con KPIs y un detalle por campaña) y la pestaña **Con IA** de Negativización. El **Historial de cambios** (quién cambió qué en una cuenta) se abrió a todos los usuarios el 2026-11-12. El mismo día se sumó **Audiencias** (solo super admin, solo lectura: listas, dónde se usan y rendimiento por audiencia). Ver "Novedades desde la V4" y las Funciones 15 a 18.
 
 ## Versión V4 (2026-11-03)
 
@@ -41,12 +41,13 @@ El sidebar sigue diciendo V4. Todo esto está publicado en producción. Las secc
 
 ## Novedades del 2026-11-10 al 2026-11-12
 
-Todo esto está publicado en producción (último despliegue verificado: `4b8fd00`, 2026-11-12). Detalle en las Funciones 7, 13, 16 y 17.
+Todo esto está publicado en producción (último despliegue verificado: `4b8fd00`, 2026-11-12). Detalle en las Funciones 7, 13, 16, 17 y 18.
 
 - **Proyección de ventas (2026-11-10):** mejoras de precisión y lectura (`714457f`), meta de crecimiento que **se suma a la proyección**, descarga en HTML (`bc28f4c`), pantalla simplificada con semáforo de confiabilidad (`6beb4ee`) y, tras probarla con un histórico real de Medellín, elección automática entre con y sin tendencia y rango calibrado con pruebas hacia atrás (`ffba59a`). Ver Función 7.
 - **Ritmo de consumo (2026-11-12):** dentro de "Agregar un MCC completo" aparece la lista de MCCs agregados, cada uno con una "×" que deja de vigilar sus cuentas (`447174d`); quitar una cuenta o un MCC ya no recarga el gasto de todas las demás (`447174d`); la tarjeta se abrió a usuarios con MCC asignado, que solo ven y agregan los suyos (`663818a`); y la ventana de campañas deja fuera los experimentos terminados (`4b8fd00`). Ver Función 13.
 - **Ritmo de consumo, filtro por tipo de cuenta (2026-11-12, `87e9578`):** selector Todas / Hoteles (nombre que empieza por GHA-CPC) / SEM (las demás). Ver Función 13.
 - **Campañas (2026-11-12, super admin):** filtro por MCC (`e8778a9`), tipo de campaña con selección múltiple (`9d86a28`) y experimentos terminados fuera (`4b8fd00`). Ver Función 16.
+- **Audiencias (2026-11-12, `0445108`, solo super admin):** sección nueva, de solo lectura, con tres pestañas: Resumen de listas, Dónde se usan (mapa de calor por campaña) y Rendimiento por audiencia (CPA % y tres gráficas). Probada con una cuenta real. Ver Función 18.
 - **Historial de cambios abierto a todos los usuarios (2026-11-12, `45ec640`):** el endpoint pasó de exigir super admin a exigir sesión; sigue validando el acceso a cada cuenta. Ver Función 17.
 
 ## Versión V3 (2026-10-14)
@@ -69,13 +70,13 @@ Fue la versión del sidebar entre el 2026-07-29 y el 2026-10-14. El salto de V1 
 - **Conectada de verdad desde el 2026-07-28** (no solo en modo simulado): la primera prueba contra una cuenta real de la agencia encontró y corrigió varios bugs reales (versión de API retirada, un parámetro no soportado, un nombre de campo equivocado, un filtro que dejaba fuera la mayoría de las cuentas del MCC) — ver el detalle completo en la sección de Función 1 más abajo y en `roadmap.md`.
 - Mientras las credenciales de Google no estén configuradas (o para cualquier cuenta de prueba), todo sigue funcionando en **modo simulado** — mismos botones, mismo flujo, datos de ejemplo en vez de reales.
 
-## Estado: V4 — diecisiete funciones construidas y en el menú (copys solo para administradores desde el 2026-11-01; Hoteles y Campañas solo para el super admin; Historial de cambios abierto a todos desde el 2026-11-12)
+## Estado: V4 — dieciocho funciones construidas y en el menú (copys solo para administradores desde el 2026-11-01; Hoteles, Campañas y Audiencias solo para el super admin; Historial de cambios abierto a todos desde el 2026-11-12)
 
 **Menú reordenado (2026-07-29):** las cuatro funciones conectadas a Google Ads quedan agrupadas arriba — Rendimiento, Comparar periodos, Oportunidad de ingresos, Negativización — y las dos que no dependen de Google Ads (Bookings, Proyección de ventas) quedan abajo.
 
 **Menú actual (al 2026-10-14), de arriba a abajo:** Auditoría de cuenta, Rendimiento, ROAS, Recomendaciones, IA Max, Negativización, Exclusiones de contenido, Planificador de keywords, Ritmo de consumo, Oportunidad de ingresos, Comparar periodos, Bookings, Proyección de ventas — las once primeras se conectan a Google Ads (nueve leen/escriben sobre una cuenta elegida, Oportunidad de ingresos puede analizar varias a la vez y Ritmo de consumo vigila varias); las dos últimas no dependen de la API.
 
-**Menú actual (al 2026-11-12), de arriba a abajo:** Auditoría de cuenta, Campañas*, Historial de cambios, Rendimiento, ROAS, IA Max, Hoteles*, Ritmo de consumo, Oportunidad de ingresos, Planificador de keywords, Negativización, Comparar periodos, Bookings, Proyección de ventas, Recomendaciones, Exclusiones de contenido, Generador de copys (solo administradores) y Administración (solo administradores). Los marcados con * solo los ve el super admin.
+**Menú actual (al 2026-11-12), de arriba a abajo:** Auditoría de cuenta, Campañas*, Audiencias*, Historial de cambios, Rendimiento, ROAS, IA Max, Hoteles*, Ritmo de consumo, Oportunidad de ingresos, Planificador de keywords, Negativización, Comparar periodos, Bookings, Proyección de ventas, Recomendaciones, Exclusiones de contenido, Generador de copys (solo administradores) y Administración (solo administradores). Los marcados con * solo los ve el super admin.
 
 ### Función 1 — Análisis de rendimiento
 
@@ -485,6 +486,33 @@ Todas las campañas de las cuentas de la lista de **Ritmo de consumo** del usuar
 
 **Pruebas.** Modo simulado de punta a punta (las 7 pestañas, errores por pestaña, Escape para cerrar, ancho de móvil, los tres botones). Con datos reales, solo lectura: cada consulta del detalle se validó por separado contra una cuenta Search (1456539019) y una Performance Max (22424047131) de la cuenta 5608875865. **Sin probar:** campañas Demand Gen, Display y Shopping en los grupos, radios de ubicación y una campaña con objetivo de ROAS o CPA configurado.
 
+### Función 18 — Audiencias (nueva, 2026-11-12, solo super admin, fase 1: solo lectura)
+
+Todo lo que una cuenta tiene en audiencias, en una sección con tres pestañas. Va en el menú justo después de Campañas (ver "Menú actual"). Solo super admin: el endpoint `/api/google-ads/audiences` usa `_require_super_admin_json` (401 sin sesión, 403 a los demás) y valida el acceso a la cuenta con `_user_can_access_account`. **No escribe nada en Google Ads**; las fases de escritura (modificadores de puja, agregar y quitar audiencias con `validateOnly`) quedan para después. Commit `0445108`.
+
+**Cuenta y periodo.** Se elige una de las cuentas de Ritmo de consumo y un periodo (días). Cada pestaña pide sus datos una sola vez por cuenta y periodo; hay botón para recargar.
+
+**Pestañas.**
+- **Resumen:** cuántas listas tiene la cuenta, cuántas están en uso y cuáles no, tamaños (gráfica de tamaño por lista) y avisos por lista: Cerrada, Vacía o Muy pequeña para Búsqueda (menos de 1.000 usuarios). Las listas **Similares** (`SIMILAR`, ya retiradas por Google) se cuentan aparte para no inflar los avisos: en la cuenta real de prueba eran 215 de 535. Las de origen que Google administra salen como "Solo lectura".
+- **Dónde se usan:** mapa de calor de audiencia por campaña (y por grupo de anuncios) con el modo de cada una: **observación** (solo mide) o **segmentación** (limita a quién se muestra, `bidOnly` en `targeting_setting`), si es exclusión y su modificador de puja. Quita el prefijo común de los nombres de campaña para que quepan los encabezados y la primera columna queda fija al desplazar. Muestra también las señales de audiencia de Performance Max (por grupo de recursos).
+- **Rendimiento:** por audiencia, gasto, clics, conversiones, valor, CPC, CPA y **CPA %**, con tres gráficas: (1) dispersión de CPA % contra conversiones, (2) barras de CPA % contra el promedio de la cuenta, en puntos porcentuales ("pp"), y (3) el mapa de calor. Filtros por tipo y por campaña, y descarga en CSV.
+
+**CPA %.** Gasto ÷ valor de conversión (se muestra como porcentaje, p. ej. 14,2 %; N/D si no hay valor). A pedido de cesar se deja en porcentaje y no en moneda, como en Ritmo de consumo. Las barras y la dispersión **topan en 3 veces el promedio** (mínimo 30 %) con una marca ▸ y una nota, para que un valor extremo (en la prueba real llegó a 1.152 %) no aplaste la escala; el valor real sigue en la tabla. Las etiquetas de la dispersión se acomodan sin taparse.
+
+**Fuentes (GAQL, API v26).** `user_list` (id, nombre, tipo, estado de membresía, solo lectura, tamaños en Búsqueda y Display, vigencia); `campaign_criterion` y `ad_group_criterion` de los tipos USER_LIST, USER_INTEREST, CUSTOM_AUDIENCE y COMBINED_AUDIENCE; `campaign_audience_view` y `ad_group_audience_view` para las métricas (se unen por campaña o grupo y criterio); `campaign` y `ad_group` con `targeting_setting` para observación o segmentación; `user_interest`, `custom_audience` y `combined_audience` para los nombres y la taxonomía (en el mercado, afinidad); `audience` y `asset_group_signal` para las señales de Performance Max.
+
+**Cómo se pide (cliente `fetch_account_audiences`).** Ocho consultas en paralelo con `ThreadPoolExecutor` (máximo 3 a la vez), con un reintento a los 2 segundos si Google contesta tiempo agotado o `RESOURCE_EXHAUSTED` (429). Cada bloque captura su propio error y la respuesta trae `errors` para avisar qué parte falló sin tumbar toda la pantalla; solo se lanza error si fallan juntos los bloques centrales (listas, campañas y los dos de criterios), para que una cuenta sin permiso no parezca "sin audiencias". En modo simulado (`simulated_account_audiences`) hay 10 audiencias en uso, listas vacías, pequeñas y cerradas y 2 similares.
+
+**Hallazgos de las pruebas reales.** La primera carga contra la cuenta real fallaba por tiempo agotado (13 s en serie) y luego por 429 con dos cargas seguidas: por eso se paralelizó con tope y reintento. Una cuenta inexistente en modo real daba 403 en todos los bloques y la pantalla se veía vacía: ahora muestra el error.
+
+**Límites que conviene saber.**
+- **Observación y solapamiento:** un mismo clic puede contar en varias audiencias, así que la suma por audiencia no coincide con el total de la cuenta. No se deben sumar.
+- **Performance Max** no da rendimiento por audiencia (solo las señales); **Demand Gen** no se revisó, así que una lista usada solo ahí aparece como "Sin usar".
+- **Explorar** (descubrir audiencias de Google para agregar) no se construyó: la API no da el tamaño de las audiencias de Google.
+- En cuentas con muchas listas de solo lectura los avisos pueden ser muchos; los criterios se pueden afinar.
+
+**Pruebas.** Modo simulado de punta a punta (pestañas, filtros, "Mostrar más", CSV, gráficas) y datos reales, solo lectura, en la cuenta GHL Hotel Montería COPS (6670061203): 535 listas (320 activas y 215 similares), 28 campañas, 234 filas de uso, 33 audiencias en uso en 3 campañas y 24 con gasto; 258 listas con avisos. Publicado con `0445108` (Railway SUCCESS). **Sin probar todavía** por el equipo en producción.
+
 ### Función 17 — Historial de cambios de Google Ads (nueva, 2026-11-06; abierta a todos los usuarios desde el 2026-11-12)
 
 Quién cambió qué en una cuenta de la lista de Ritmo de consumo, a partir de `change_event`. Periodo de 7, 14 o 30 días (Google solo guarda 30). Endpoint `/api/google-ads/account-changes` (solo lectura). **Abierto a todos los usuarios el 2026-11-12 (commit `45ec640`):** el endpoint pasó de `_require_super_admin_json` a `_require_auth_json` y se quitó el candado del menú y de la pantalla. Sigue siendo solo lectura y valida `_user_can_access_account`: cada usuario ve las cuentas de su lista de Ritmo de consumo y solo las que tiene permitidas (asignadas directamente o por su MCC); sin cuentas ve "tu lista de Ritmo de consumo está vacía". Validado en local con super admin, admin y usuario común con y sin permiso (200 o 403 según corresponde; sin sesión, 401) y con el despliegue `45ec640` en producción. **Pendiente** confirmarlo con una usuaria real.
@@ -596,7 +624,8 @@ Cada usuario no-admin solo puede leer/escribir en las cuentas de Google Ads que 
 - **Campañas (Función 16):** el botón de pausar y activar de la pantalla y su registro solo se probaron en modo simulado; con datos reales se probó la función de Google Ads (2026-11-06). El detalle se validó en lectura en una campaña Search y una Performance Max; falta Demand Gen, Display, Shopping, radios de ubicación y una campaña con objetivo de ROAS o CPA configurado. La información de subastas de competidores no está disponible por la API con el acceso actual.
 - **Historial de cambios (Función 17):** Google guarda 30 días, puede tardar en mostrar un cambio reciente, y de los anuncios solo avisa que cambió el texto. No es un historial propio de la plataforma.
 - **Hoteles (Función 15):** sin probar crear un tramo que falta en un grupo; las cuentas con plantilla externa de modificadores son de solo lectura. El panel de precio se validó con datos reales (BLESS); el análisis con IA y la nota, solo con datos simulados porque ninguna cuenta de prueba con tramos editables tiene volumen.
-- **Secciones solo para el super admin:** Hoteles, Campañas y la pestaña "Con IA" de Negativización no están abiertas al equipo; abrirlas es una decisión de cesar. Sus botones hacia Negativización, AI Max y Hoteles desde el detalle de Campañas no están construidos.
+- **Audiencias (Función 18):** solo lectura y solo super admin. Un clic puede contar en varias audiencias de observación, así que la suma por audiencia no coincide con el total de la cuenta; Performance Max no da rendimiento por audiencia y Demand Gen no se revisó (sus listas pueden aparecer como "Sin usar"); no hay pestaña Explorar porque la API no da el tamaño de las audiencias de Google; en cuentas con muchas listas de solo lectura los avisos pueden ser muchos.
+- **Secciones solo para el super admin:** Hoteles, Campañas, Audiencias y la pestaña "Con IA" de Negativización no están abiertas al equipo; abrirlas es una decisión de cesar. Sus botones hacia Negativización, AI Max y Hoteles desde el detalle de Campañas no están construidos.
 - **Monedas:** con datos de Google Ads se muestra el código de la moneda de la cuenta; Comparar periodos y Oportunidad de ingresos no suman cuentas de monedas distintas.
 
 ## Próximos pasos
@@ -636,12 +665,15 @@ Cada usuario no-admin solo puede leer/escribir en las cuentas de Google Ads que 
 32. Confirmar con una usuaria real (Tania, con acceso por MCC) que ve el Historial de cambios y que "Agregar un MCC completo" le lista y agrega sus MCCs.
 33. Avisar al equipo por correo de que el Historial de cambios ya está abierto (borrador redactado el 2026-11-10), y mencionar que ahora cada persona puede agregar sus MCCs completos en Ritmo de consumo.
 34. ~~Documentar en la presentación al equipo las funciones nuevas~~ — hecho el 2026-11-12: `Presentacion_al_equipo_Paid_Media_Helper.pptx` (sin versionar) ahora tiene 39 diapositivas; se actualizaron el menú, Ritmo de consumo (MCC y filtro Hoteles/SEM), Proyección de ventas (pantalla y captura nuevas), Campañas, Historial de cambios (abierto a todos), Administración y Próximos pasos, y se agregó la diapositiva «Novedades · 10 al 12 de noviembre». Pendiente: recapturar la pantalla de Campañas (diapositiva 30) con el filtro por MCC.
+35. Probar Audiencias en producción como super admin con varias cuentas (también una con Demand Gen o Performance Max) y ajustar los criterios de aviso según lo que se vea.
+36. Audiencias, fases siguientes: modificadores de puja, agregar y quitar audiencias con `validateOnly` y vista previa, y una pestaña Explorar; y decidir si se abre al equipo.
+37. Agregar una diapositiva de Audiencias a la presentación al equipo (hoy tiene 39 y no la incluye).
 
 ## Archivos del proyecto
 
 | Archivo | Para qué sirve |
 |---|---|
-| `webapp/` | Implementación web completa (HTML/CSS/JS + servidor Python + `Dockerfile`), con login, control de acceso por cuenta, pantalla de Administración, y las diecisiete funciones — en producción en Railway, o local con `python3 webapp/server.py`. Ver `webapp/README.md` |
+| `webapp/` | Implementación web completa (HTML/CSS/JS + servidor Python + `Dockerfile`), con login, control de acceso por cuenta, pantalla de Administración, y las dieciocho funciones — en producción en Railway, o local con `python3 webapp/server.py`. Ver `webapp/README.md` |
 | `webapp/login.js` | JS del login/registro (separado de `login.html` el 2026-07-30, por la Content-Security-Policy nueva — ver "Seguridad — endurecimiento") |
 | `webapp/google_ads_client.py` | Cliente de la API de Google Ads (lectura de cuentas/campañas/términos de búsqueda, y escritura de negativos) — solo `urllib`, sin la librería oficial, para no agregar dependencias pip al servidor |
 | `webapp/claude_client.py` | Cliente de la API de Claude (análisis con IA de Rendimiento, Auditoría, Negativización, copys y Hoteles, y registro del consumo en `ai_usage`) — mismo criterio que `google_ads_client.py`: solo `urllib`, sin el SDK oficial de Anthropic |
