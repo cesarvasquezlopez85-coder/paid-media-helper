@@ -11160,6 +11160,7 @@ function buildAuditMarkdown() {
   lines.push(`- Periodo analizado: ${m.date_from} a ${m.date_to} (${r.summary.days} días)`);
   lines.push(`- Generada: ${m.generated_at.replace('T', ' ')}`);
   if (s.api.simulated) lines.push('- **Datos de ejemplo (modo simulado), no son de una cuenta real.**');
+  if ((m.excluded_experiments || []).length) lines.push(`- Se dejaron fuera ${m.excluded_experiments.length} campaña(s) de experimento ya finalizada(s), que no cuentan en el puntaje: ${m.excluded_experiments.slice(0, 6).map((x) => x.name).join('; ')}${m.excluded_experiments.length > 6 ? ` y ${m.excluded_experiments.length - 6} más` : ''}.`);
   lines.push('', `## Puntaje de salud: ${r.score.total}/100 — ${r.score.label}`, '');
   lines.push(`${r.score.critical} crítico(s), ${r.score.warnings} advertencia(s), ${r.score.info} informativo(s).`, '');
   lines.push('| Área | Puntaje | Críticos | Advertencias |', '|---|---|---|---|');
@@ -11513,6 +11514,7 @@ function auditReportBodyHtml() {
       <div class="ar-title">${e(auditReportTitle())}</div>
       <div class="ar-sub">Cuenta ${e(m.customer_id || 'N/D')}${m.account_name ? ` (${e(m.account_name)})` : ''} · ${e(m.date_from)} a ${e(m.date_to)} (${sm.days} días) · Generada ${e(m.generated_at.slice(0, 10))}</div>
       ${s.api.simulated ? '<div class="ar-note"><strong>Datos de ejemplo (modo simulado).</strong> No son de una cuenta real.</div>' : ''}
+      ${(m.excluded_experiments || []).length ? `<div class="ar-note">Se dejaron fuera ${m.excluded_experiments.length} campaña${m.excluded_experiments.length === 1 ? '' : 's'} de experimento ya finalizada${m.excluded_experiments.length === 1 ? '' : 's'} (no cuentan en el puntaje ni en las cifras): ${e(m.excluded_experiments.slice(0, 6).map((x) => x.name).join('; '))}${m.excluded_experiments.length > 6 ? ` y ${m.excluded_experiments.length - 6} más` : ''}.</div>` : ''}
       <div class="ar-card">
         <div class="ar-score">
           ${donut}

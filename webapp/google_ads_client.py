@@ -4023,7 +4023,7 @@ def fetch_audit_data(customer_id, date_from, date_to):
     data = {"unavailable": {}}
 
     campaigns = []
-    for r in _search(customer_id, f"""
+    campaigns_query = f"""
         SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type,
                campaign.bidding_strategy_type, campaign.campaign_budget, campaign.start_date_time,
                campaign.network_settings.target_google_search,
@@ -4031,11 +4031,24 @@ def fetch_audit_data(customer_id, date_from, date_to):
                campaign.network_settings.target_content_network,
                campaign.geo_target_type_setting.positive_geo_target_type,
                metrics.cost_micros, metrics.conversions, metrics.conversions_value,
-               metrics.impressions, metrics.clicks
+               metrics.impressions, metrics.clicks{{extra}}
         FROM campaign
         WHERE {between} AND campaign.status != 'REMOVED'
-    """):
+    """
+    # Los experimentos que ya terminaron (tipo EXPERIMENT con serving_status ENDED) no son campañas reales de la
+    # cuenta: se dejan fuera de la auditoría y del puntaje, igual que en Ritmo de consumo y Campañas. Si Google
+    # rechazara esos dos campos, se vuelve a la consulta de siempre para no tumbar la auditoría.
+    try:
+        campaign_rows = _search(customer_id, campaigns_query.format(extra=",\n               campaign.experiment_type, campaign.serving_status"))
+    except Exception as e:  # noqa: BLE001
+        print(f"[audit] sin filtro de experimentos terminados ({customer_id}): {' '.join(str(e).split())[:200]}", flush=True)
+        campaign_rows = _search(customer_id, campaigns_query.format(extra=""))
+    ended_experiments = []
+    for r in campaign_rows:
         c, m = r.get("campaign", {}), r.get("metrics", {})
+        if _is_ended_experiment(c):
+            ended_experiments.append({"id": str(c.get("id")), "name": c.get("name") or "(sin nombre)"})
+            continue
         ns = c.get("networkSettings", {})
         campaigns.append({
             "id": str(c.get("id")), "name": c.get("name") or "(sin nombre)", "status": c.get("status") or "UNKNOWN",
@@ -4053,6 +4066,9 @@ def fetch_audit_data(customer_id, date_from, date_to):
             "clicks": _int_or_none(m.get("clicks")) or 0,
         })
     data["campaigns"] = campaigns
+    data["excluded_experiments"] = ended_experiments
+    # Para las consultas que no traen la campaña en cada fila: se dejan fuera con la propia consulta.
+    excl = f"\n              AND campaign.id NOT IN ({', '.join(e['id'] for e in ended_experiments)})" if ended_experiments else ""
 
     def block(name, fn):
         try:
@@ -4180,7 +4196,7 @@ def fetch_audit_data(customer_id, date_from, date_to):
             SELECT ad_group.id, ad_group.name
             FROM ad_group_criterion
             WHERE ad_group_criterion.type = 'KEYWORD' AND ad_group_criterion.negative = FALSE
-              AND ad_group_criterion.status = 'ENABLED' AND ad_group.status = 'ENABLED' AND campaign.status = 'ENABLED'
+              AND ad_group_criterion.status = 'ENABLED' AND ad_group.status = 'ENABLED' AND campaign.status = 'ENABLED'""" + excl + """
         """)
         counts = {}
         for r in rows:
@@ -4224,7 +4240,7 @@ def fetch_audit_data(customer_id, date_from, date_to):
         out = []
         for r in _search(customer_id, """
             SELECT campaign.id, campaign.status, campaign_asset.field_type FROM campaign_asset
-            WHERE campaign_asset.status = 'ENABLED' AND campaign.status = 'ENABLED'
+            WHERE campaign_asset.status = 'ENABLED' AND campaign.status = 'ENABLED'""" + excl + """
         """):
             out.append({"field_type": r.get("campaignAsset", {}).get("fieldType")})
         for r in _search(customer_id, "SELECT customer_asset.field_type FROM customer_asset WHERE customer_asset.status = 'ENABLED'"):
@@ -4398,7 +4414,7 @@ def fetch_audit_data(customer_id, date_from, date_to):
                 SELECT asset_group.id, asset_group.status, campaign.id, campaign.status,
                        asset_group_asset.field_type, asset_group_asset.status
                 FROM asset_group_asset
-                WHERE asset_group_asset.status = 'ENABLED' AND asset_group.status = 'ENABLED' AND campaign.status = 'ENABLED'
+                WHERE asset_group_asset.status = 'ENABLED' AND asset_group.status = 'ENABLED' AND campaign.status = 'ENABLED'""" + excl + """
             """)
             return [{"asset_group_id": str(r.get("assetGroup", {}).get("id")),
                      "field_type": r.get("assetGroupAsset", {}).get("fieldType")} for r in rows]
@@ -4409,7 +4425,7 @@ def fetch_audit_data(customer_id, date_from, date_to):
                 SELECT asset_group.id, asset_group.status, campaign.id, campaign.status,
                        asset_group_signal.audience.audience, asset_group_signal.search_theme.text
                 FROM asset_group_signal
-                WHERE asset_group.status = 'ENABLED' AND campaign.status = 'ENABLED'
+                WHERE asset_group.status = 'ENABLED' AND campaign.status = 'ENABLED'""" + excl + """
             """)
             return [{"asset_group_id": str(r.get("assetGroup", {}).get("id"))} for r in rows]
         block("pmax_signals", pmax_signals)
@@ -4507,7 +4523,7 @@ def fetch_audit_data(customer_id, date_from, date_to):
                    campaign.aca_migration_date_time, campaign.broad_match_migration_date_time
             FROM campaign
             WHERE campaign.status = 'ENABLED' AND campaign.advertising_channel_type = 'SEARCH'
-              AND campaign.ai_max_setting.enable_ai_max = TRUE
+              AND campaign.ai_max_setting.enable_ai_max = TRUE""" + excl + """
         """)
         out = []
         for r in rows:
@@ -4556,6 +4572,12 @@ def fetch_audit_data(customer_id, date_from, date_to):
         block("ai_max_url_exclusions", lambda: fetch_ai_max_url_exclusions(customer_id))
         block("ai_max_negatives", lambda: fetch_account_negative_keywords(customer_id))
 
+    # Lo que sí trae la campaña en cada fila (términos, palabras clave, negativas, audiencias, PMax…): se quitan las de los experimentos terminados.
+    if ended_experiments:
+        ended_ids = {e["id"] for e in ended_experiments}
+        for k, v in list(data.items()):
+            if isinstance(v, list) and v and all(isinstance(x, dict) for x in v) and any("campaign_id" in x for x in v):
+                data[k] = [x for x in v if str(x.get("campaign_id")) not in ended_ids]
     return data
 
 

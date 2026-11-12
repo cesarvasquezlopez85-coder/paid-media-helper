@@ -2820,6 +2820,7 @@ class Handler(SimpleHTTPRequestHandler):
             "date_from": date_from.isoformat(), "date_to": date_to.isoformat(),
             "generated_at": datetime.datetime.now().isoformat(timespec="seconds"), "context": ctx,
             "unavailable": data.get("unavailable") or {},
+            "excluded_experiments": data.get("excluded_experiments") or [],
         }
         # Historial: se guarda esta auditoría y se devuelve la serie de la cuenta junto con el informe.
         # Si falla el guardado, el informe se entrega igual, solo sin tendencia.
