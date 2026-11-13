@@ -230,7 +230,7 @@ const state = {
   // campaña a la vez. Misma regla que ROAS/IA Max: vista previa antes de escribir.
   hotel: {
     mode: 'single', // 'single' (una cuenta: modificadores) | 'ranking' (precio frente a la competencia en varias cuentas)
-    rank: { items: [], search: '', view: 'price', sortBy: 'price_diff', sortVis: 'share', sortMonthly: 'name', monthFrom: '', monthTo: '', compareYear: true, expanded: [], running: false, cancel: false, token: 0, stopMsg: '', notice: '', loadedFrom: '', loadedTo: '' },
+    rank: { items: [], search: '', view: 'price', sortBy: 'price_diff', sortVis: 'share', sortMonthly: 'name', dir: { price: 'desc', visibility: 'asc', monthly: 'asc' }, monthFrom: '', monthTo: '', compareYear: true, expanded: [], running: false, cancel: false, token: 0, stopMsg: '', notice: '', loadedFrom: '', loadedTo: '' },
     api: {
       statusChecked: false, configured: false,
       accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
@@ -8309,6 +8309,9 @@ function fetchHotelCampaigns() {
   const a = s.api;
   const customerId = hotelCustomerId();
   if (!customerId && !a.simulated) { a.error = 'Elige una cuenta o escribe su ID primero.'; render(); return; }
+  if (customerId && !a.simulated && a.accountsStatus === 'ready' && !a.accounts.some((acc) => acc.id === customerId)) {
+    a.error = 'Esta sección solo trabaja con cuentas de hoteles (nombre que empieza por GHA-CPC). Ese ID no está entre ellas.'; render(); return;
+  }
   if (!a.dateFrom || !a.dateTo) { a.error = 'Elige el rango de fechas.'; render(); return; }
   a.error = null;
   s.list.status = 'loading'; s.list.error = null;
@@ -8877,7 +8880,7 @@ function renderHotelApiPanel() {
       ${simulatedNotice}
       ${renderHotelMccFilterPanel()}
       <div class="field">
-        <label>Cuenta${mccFilterActive ? ` (${visibleAccounts.length} en "${escapeHtml(a.mcc.selectedName)}")` : ''}</label>
+        <label>Cuenta (solo GHA-CPC)${mccFilterActive ? ` (${visibleAccounts.length} en "${escapeHtml(a.mcc.selectedName)}")` : ''}</label>
         <select id="hotel-api-account" style="width:320px">${accountOptions}</select>
       </div>
       <div class="field">
@@ -9000,27 +9003,33 @@ async function runHotelRank(onlyPending) {
 }
 
 // Las cuentas con datos primero, ordenadas por el criterio elegido (de mayor a menor); después las que no tienen campañas de hotel con impresiones y las que fallaron.
+// Dirección natural al elegir un criterio: el que más interesa ver primero (más caro, menor cuota, más perdidas…).
+const HOTEL_SORT_DEFAULT_DIR = { price_diff: 'desc', not_lowest_share: 'desc', cost: 'desc', impressions: 'desc', share: 'asc', missed: 'desc', eligible: 'desc', name: 'asc', last: 'asc' };
+
+// Ordena por un valor numérico en la dirección elegida; los que no tienen valor van siempre al final.
+function hotelSortByValue(list, valueOf, dir) {
+  const withVal = []; const without = [];
+  list.forEach((it) => { const v = valueOf(it); (v === null || v === undefined || Number.isNaN(v) ? without : withVal).push([v, it]); });
+  withVal.sort((x, y) => (dir === 'asc' ? x[0] - y[0] : y[0] - x[0]));
+  return [...withVal.map((x) => x[1]), ...without.map((x) => x[1])];
+}
+
 function hotelRankSortedItems() {
   const r = state.hotel.rank;
+  const has = (it) => it.status === 'ready' && it.data && it.data.summary;
+  const rest = r.items.filter((it) => !has(it));
+  const ready = r.items.filter(has);
   if (r.view === 'visibility') {
-    const vkey = {
-      share: (sm) => (sm.impression_share === null || sm.impression_share === undefined ? Infinity : -sm.impression_share),
-      missed: (sm) => sm.missed || 0,
-      eligible: (sm) => sm.eligible || 0,
-    }[r.sortVis] || ((sm) => -sm.impression_share);
-    const has = (it) => it.status === 'ready' && it.data && it.data.summary;
-    return [...r.items.filter(has).sort((x, y) => vkey(y.data.summary) - vkey(x.data.summary)), ...r.items.filter((it) => !has(it))];
+    const f = { share: (sm) => sm.impression_share, missed: (sm) => sm.missed || 0, eligible: (sm) => sm.eligible || 0 }[r.sortVis] || ((sm) => sm.impression_share);
+    return [...hotelSortByValue(ready, (it) => f(it.data.summary), r.dir.visibility), ...rest];
   }
-  const key = {
-    price_diff: (sm) => (sm.price_diff === null || sm.price_diff === undefined ? -Infinity : sm.price_diff),
-    not_lowest_share: (sm) => (sm.not_lowest_share === null || sm.not_lowest_share === undefined ? -Infinity : sm.not_lowest_share),
+  const f = {
+    price_diff: (sm) => sm.price_diff,
+    not_lowest_share: (sm) => sm.not_lowest_share,
     cost: (sm) => sm.cost || 0,
     impressions: (sm) => sm.impressions || 0,
   }[r.sortBy] || ((sm) => sm.price_diff);
-  const withData = (it) => it.status === 'ready' && it.data && it.data.summary;
-  const first = r.items.filter(withData).sort((x, y) => key(y.data.summary) - key(x.data.summary));
-  const rest = r.items.filter((it) => !withData(it));
-  return [...first, ...rest];
+  return [...hotelSortByValue(ready, (it) => f(it.data.summary), r.dir.price), ...rest];
 }
 
 // El código del hotel es lo último del nombre de la cuenta: «Estelar Medellín - aptosmedellin» → aptosmedellin, «GHA-CPC-armony:CO» → armony.
@@ -9152,12 +9161,11 @@ function hotelMonthlyRows() {
   const r = state.hotel.rank;
   const last = r.loadedMonthTo || r.monthTo;
   const has = (it) => it.monthly && it.monthly.status === 'ready' && it.monthly.data && Object.keys(it.monthly.data.months || {}).length;
-  const key = r.sortMonthly === 'last'
-    ? (it) => { const v = hotelMonthShare(it, last); return v ? v.share : Infinity; }
-    : null;
   const withData = r.items.filter(has);
-  withData.sort(key ? (x, y) => key(x) - key(y) : (x, y) => hotelRowName(x.name).localeCompare(hotelRowName(y.name)));
-  return [...withData, ...r.items.filter((it) => !has(it))];
+  const sorted = r.sortMonthly === 'last'
+    ? hotelSortByValue(withData, (it) => { const v = hotelMonthShare(it, last); return v ? v.share : null; }, r.dir.monthly)
+    : [...withData].sort((x, y) => (r.dir.monthly === 'asc' ? 1 : -1) * hotelRowName(x.name).localeCompare(hotelRowName(y.name)));
+  return [...sorted, ...r.items.filter((it) => !has(it))];
 }
 
 function downloadHotelMonthlyCsv() {
@@ -9298,6 +9306,14 @@ async function downloadHotelSingleHtml() {
   await hotelWriteHtml('Campañas de hotel', `${account} · ${range}`, box.innerHTML, `campanas-${cambiosSlug(acc ? acc.name : id)}`);
 }
 
+// «Orden»: mayor a menor / menor a mayor (en el criterio por nombre: A-Z / Z-A).
+function hotelSortDirField(isName) {
+  const r = state.hotel.rank;
+  const dir = r.dir[r.view === 'monthly' ? 'monthly' : (r.view === 'visibility' ? 'visibility' : 'price')];
+  const lbl = isName ? ['A → Z', 'Z → A'] : ['De menor a mayor', 'De mayor a menor'];
+  return `<div class="field"><label>Orden</label><select id="hotel-rank-dir"><option value="asc" ${dir === 'asc' ? 'selected' : ''}>${lbl[0]}</option><option value="desc" ${dir === 'desc' ? 'selected' : ''}>${lbl[1]}</option></select></div>`;
+}
+
 function renderHotelMonthly(picker) {
   const r = state.hotel.rank;
   const e = escapeHtml;
@@ -9312,7 +9328,8 @@ function renderHotelMonthly(picker) {
         <div class="field"><label>Hasta</label><input type="month" id="hotel-rank-month-to" value="${e(r.monthTo)}" max="${hotelMonthNow()}" ${r.running ? 'disabled' : ''} /></div>
       </div>
       <div class="field"><label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="hotel-rank-compare" ${r.compareYear ? 'checked' : ''} ${r.running ? 'disabled' : ''} /> Comparar con el mismo periodo del año anterior</label></div>
-      <div class="field"><label>Ordenar filas por</label><select id="hotel-rank-sort"><option value="name" ${r.sortMonthly === 'name' ? 'selected' : ''}>Nombre del hotel</option><option value="last" ${r.sortMonthly === 'last' ? 'selected' : ''}>Cuota del último mes (la menor primero)</option></select></div>
+      <div class="field"><label>Ordenar filas por</label><select id="hotel-rank-sort"><option value="name" ${r.sortMonthly === 'name' ? 'selected' : ''}>Nombre del hotel</option><option value="last" ${r.sortMonthly === 'last' ? 'selected' : ''}>Cuota del último mes</option></select></div>
+      ${hotelSortDirField(r.sortMonthly !== 'last')}
       ${r.running
         ? `<button class="btn-outline" data-action="hotel-rank-cancel" ${r.cancel ? 'disabled' : ''}>${r.cancel ? 'Cancelando…' : 'Cancelar'}</button>`
         : `<button class="btn-accent" data-action="hotel-rank-run" ${r.items.length ? '' : 'disabled'}>${anyDone ? 'Calcular de nuevo las' : 'Calcular la cuota de las'} ${fmtInt(r.items.length)} cuentas</button>
@@ -9461,7 +9478,7 @@ function renderHotelRanking() {
         <button class="btn-outline sm" data-action="hotel-rank-addwatched" ${r.running || full ? 'disabled' : ''} title="Agrega tus cuentas de hoteles (GHA-CPC) de la lista de Ritmo de consumo">Marcar mis cuentas de Ritmo de consumo</button>
         <button class="btn-outline sm" data-action="hotel-rank-clear" ${r.running || !r.items.length ? 'disabled' : ''}>Vaciar selección</button></div></div>
       <div style="width:100%">
-        <p class="footnote" style="margin:0 0 6px"><strong>${fmtInt(r.items.length)} de ${HOTEL_RANK_MAX}</strong> cuentas marcadas${filtered.length > shown.length ? ` · se ven ${shown.length} de ${fmtInt(filtered.length)}: afina la búsqueda o el MCC` : ` · ${fmtInt(filtered.length)} en la lista`}.${full ? ' Llegaste al tope; calcula este ranking y luego arma otro.' : ''}</p>
+        <p class="footnote" style="margin:0 0 6px"><strong>${fmtInt(r.items.length)} de ${HOTEL_RANK_MAX}</strong> cuentas marcadas${filtered.length > shown.length ? ` · se ven ${shown.length} de ${fmtInt(filtered.length)}: afina la búsqueda o el MCC` : ` · ${fmtInt(filtered.length)} en la lista (solo cuentas GHA-CPC)`}.${full ? ' Llegaste al tope; calcula este ranking y luego arma otro.' : ''}</p>
         ${r.notice ? `<p class="footnote" style="margin:0 0 6px;color:var(--color-text-heading)">${e(r.notice)}</p>` : ''}
         <div class="table-scroll" style="max-height:240px"><table><tbody>${rows || '<tr><td class="footnote">Ninguna cuenta coincide.</td></tr>'}</tbody></table></div>
       </div>`;
@@ -9471,8 +9488,8 @@ function renderHotelRanking() {
   const nPending = r.items.filter((i) => i.status === 'idle' || i.status === 'error').length;
   const anyDone = r.items.some((i) => i.status === 'ready');
   const sortOpts = (r.view === 'visibility'
-    ? [['share', 'Cuota de impresiones (la menor primero)'], ['missed', 'Impresiones perdidas'], ['eligible', 'Impresiones elegibles']]
-    : [['price_diff', 'Diferencia de precio (más caro primero)'], ['not_lowest_share', '% de impresiones donde no es el más barato'], ['cost', 'Gasto'], ['impressions', 'Impresiones']])
+    ? [['share', 'Cuota de impresiones'], ['missed', 'Impresiones perdidas'], ['eligible', 'Impresiones elegibles']]
+    : [['price_diff', 'Diferencia de precio'], ['not_lowest_share', '% de impresiones donde no es el más barato'], ['cost', 'Gasto'], ['impressions', 'Impresiones']])
     .map(([k, l]) => `<option value="${k}" ${(r.view === 'visibility' ? r.sortVis : r.sortBy) === k ? 'selected' : ''}>${e(l)}</option>`).join('');
   const settings = `
     <div class="card control-panel align-end" style="flex-wrap:wrap;gap:16px 24px">
@@ -9482,6 +9499,7 @@ function renderHotelRanking() {
         <div class="field"><label>Hasta</label><input type="date" id="hotel-api-date-to" value="${e(a.dateTo)}" ${r.running ? 'disabled' : ''} /></div>
       </div>
       <div class="field"><label>Ordenar por</label><select id="hotel-rank-sort">${sortOpts}</select></div>
+      ${hotelSortDirField(false)}
       ${r.running
         ? `<button class="btn-outline" data-action="hotel-rank-cancel" ${r.cancel ? 'disabled' : ''}>${r.cancel ? 'Cancelando…' : 'Cancelar'}</button>`
         : `<button class="btn-accent" data-action="hotel-rank-run" ${r.items.length ? '' : 'disabled'}>${anyDone ? 'Calcular de nuevo las' : 'Calcular el ranking de las'} ${fmtInt(r.items.length)} cuentas</button>
@@ -9637,8 +9655,10 @@ function loadHotelGoogleAdsAccounts() {
     .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
-      a.accounts = data.accounts || [];
+      // Hoteles solo trabaja con las cuentas de hoteles: las que su nombre empieza por GHA-CPC (en modo simulado se dejan todas).
+      const all = data.accounts || [];
       a.simulated = !!data.simulated;
+      a.accounts = a.simulated ? all : all.filter((acc) => pacingIsHotelAccount(acc.name));
       a.accountsStatus = 'ready';
       render();
     })
@@ -16318,7 +16338,9 @@ function bindEvents() {
   const hotelRankSearch = document.getElementById('hotel-rank-search');
   if (hotelRankSearch) hotelRankSearch.addEventListener('input', (e) => { state.hotel.rank.search = e.target.value; render(); hotelRefocus('hotel-rank-search'); });
   const hotelRankSort = document.getElementById('hotel-rank-sort');
-  if (hotelRankSort) hotelRankSort.addEventListener('change', (e) => { const r = state.hotel.rank; if (r.view === 'monthly') r.sortMonthly = e.target.value; else if (r.view === 'visibility') r.sortVis = e.target.value; else r.sortBy = e.target.value; render(); });
+  if (hotelRankSort) hotelRankSort.addEventListener('change', (e) => { const r = state.hotel.rank; if (r.view === 'monthly') { r.sortMonthly = e.target.value; r.dir.monthly = HOTEL_SORT_DEFAULT_DIR[e.target.value]; } else if (r.view === 'visibility') { r.sortVis = e.target.value; r.dir.visibility = HOTEL_SORT_DEFAULT_DIR[e.target.value]; } else { r.sortBy = e.target.value; r.dir.price = HOTEL_SORT_DEFAULT_DIR[e.target.value]; } render(); });
+  const hotelRankDir = document.getElementById('hotel-rank-dir');
+  if (hotelRankDir) hotelRankDir.addEventListener('change', (e) => { const r = state.hotel.rank; r.dir[r.view === 'monthly' ? 'monthly' : (r.view === 'visibility' ? 'visibility' : 'price')] = e.target.value; render(); });
   const hotelMonthFrom = document.getElementById('hotel-rank-month-from');
   if (hotelMonthFrom) hotelMonthFrom.addEventListener('change', (e) => { state.hotel.rank.monthFrom = e.target.value; });
   const hotelMonthTo = document.getElementById('hotel-rank-month-to');
