@@ -1731,6 +1731,62 @@ def fetch_campaign_keywords(customer_id, campaign_id, date_from, date_to, limit=
     return out
 
 
+def fetch_campaign_keyword_daily(customer_id, campaign_id, date_from, date_to, limit=10):
+    """Evolución día a día de las palabras clave de mayor gasto de una campaña Search (por defecto 10): impresiones,
+    clics, gasto y cuota de impresiones de búsqueda de cada una. Dos consultas: primero cuáles son las principales en
+    el rango y luego su serie diaria (pedir la serie de todas las palabras clave de una campaña grande no cabe).
+    La cuota de impresiones viene vacía los días en que Google no la calcula."""
+    campaign_id = int(campaign_id)
+    top = _search(customer_id, f"""
+        SELECT ad_group.id, ad_group.name, ad_group_criterion.criterion_id, ad_group_criterion.keyword.text,
+               ad_group_criterion.keyword.match_type, metrics.cost_micros, metrics.impressions
+        FROM keyword_view
+        WHERE campaign.id = {campaign_id} AND segments.date BETWEEN '{date_from}' AND '{date_to}'
+          AND ad_group_criterion.status != 'REMOVED' AND ad_group_criterion.negative = FALSE
+          AND metrics.impressions > 0
+        ORDER BY metrics.cost_micros DESC, metrics.impressions DESC
+        LIMIT {int(limit)}
+    """)
+    keywords = {}
+    for r in top:
+        crit = r.get("adGroupCriterion", {})
+        key = f"{r.get('adGroup', {}).get('id')}~{crit.get('criterionId')}"
+        if not crit.get("criterionId") or key in keywords:
+            continue
+        kw = crit.get("keyword", {})
+        keywords[key] = {
+            "key": key, "text": kw.get("text") or "", "match_type": kw.get("matchType") or "",
+            "ad_group": r.get("adGroup", {}).get("name") or "", "days": [],
+        }
+    if not keywords:
+        return {"date_from": date_from, "date_to": date_to, "keywords": []}
+    criterion_ids = sorted({k.split("~")[1] for k in keywords})
+    rows = _search(customer_id, f"""
+        SELECT ad_group.id, ad_group_criterion.criterion_id, segments.date,
+               metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.search_impression_share
+        FROM keyword_view
+        WHERE campaign.id = {campaign_id} AND segments.date BETWEEN '{date_from}' AND '{date_to}'
+          AND ad_group_criterion.criterion_id IN ({", ".join(criterion_ids)})
+          AND ad_group_criterion.status != 'REMOVED' AND ad_group_criterion.negative = FALSE
+        ORDER BY segments.date
+    """)
+    for r in rows:
+        key = f"{r.get('adGroup', {}).get('id')}~{r.get('adGroupCriterion', {}).get('criterionId')}"
+        kw = keywords.get(key)
+        date = r.get("segments", {}).get("date")
+        if kw is None or not date:
+            continue
+        m = r.get("metrics", {})
+        kw["days"].append({
+            "date": date,
+            "impressions": _int_or_none(m.get("impressions")) or 0,
+            "clicks": _int_or_none(m.get("clicks")) or 0,
+            "cost": _micros_to_units(_int_or_none(m.get("costMicros"))) or 0.0,
+            "impr_share": _float_or_none(m.get("searchImpressionShare")),
+        })
+    return {"date_from": date_from, "date_to": date_to, "keywords": list(keywords.values())}
+
+
 def fetch_campaign_position(customer_id, campaign_id, date_from, date_to, prev_from, prev_to):
     """Posición en la subasta: cuotas de impresiones superior y absoluta, lo perdido por presupuesto y ranking, cuota
     de clics y de coincidencia exacta. Los competidores (información de subastas) Google no los entrega a este
@@ -3590,6 +3646,32 @@ def simulated_account_changes(days=30):
             "campaign_id": cid, "campaign_name": cname, "ad_group_name": group,
         })
     return {"changes": out, "truncated": False, "days": days, "errors": {}}
+
+
+def simulated_campaign_keyword_daily(campaign_id, date_from, date_to):
+    """Datos de ejemplo de la evolución de las 10 palabras clave principales (determinista por campaña)."""
+    camp = next((c for c in simulated_campaigns_overview() if c["campaign_id"] == str(campaign_id)), None)
+    if camp is None or camp["channel_type"] != "SEARCH":
+        return {"date_from": date_from, "date_to": date_to, "keywords": []}
+    texts = ["hotel estelar bogota", "hotel cerca aeropuerto", "reservar hotel centro", "hoteles baratos", "hotel con piscina",
+             "hotel zona rosa", "mejor hotel bogota", "hotel para negocios", "hotel familiar", "hotel desayuno incluido"]
+    matches = ["BROAD", "PHRASE", "EXACT", "BROAD", "PHRASE", "EXACT", "BROAD", "PHRASE", "EXACT", "BROAD"]
+    start = datetime.date.fromisoformat(date_from)
+    end = datetime.date.fromisoformat(date_to)
+    n_days = (end - start).days + 1
+    out = []
+    for i, (text, match) in enumerate(zip(texts, matches)):
+        days = []
+        for d in range(n_days):
+            day = start + datetime.timedelta(days=d)
+            wave = 1 + 0.25 * ((d + i * 3) % 7 - 3) / 3
+            imps = int((900 - i * 70) * wave)
+            clicks = int(imps * (0.05 - i * 0.002))
+            cpc = (1.1 + i * 0.08) * (1 + 0.1 * ((d + i) % 5 - 2) / 2)
+            share = None if (i == 9 and d % 6 == 0) else round(max(0.05, min(1.0, 0.75 - i * 0.05 + 0.08 * ((d + i) % 6 - 3) / 3)), 3)
+            days.append({"date": day.isoformat(), "impressions": imps, "clicks": clicks, "cost": round(clicks * cpc, 2), "impr_share": share})
+        out.append({"key": f"1000~{2000 + i}", "text": text, "match_type": match, "ad_group": "Grupo principal", "days": days})
+    return {"date_from": date_from, "date_to": date_to, "keywords": out}
 
 
 def simulated_campaign_insight(view, campaign_id):

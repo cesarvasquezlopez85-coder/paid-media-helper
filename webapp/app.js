@@ -1442,7 +1442,7 @@ function mountCharts() {
   if (state.page === 'rendimiento') mountRendCharts();
   else if (state.page === 'roas') mountRoasCharts();
   else if (state.page === 'keywordplanner') mountKeywordPlannerCharts();
-  else if (state.page === 'campanas') mountCampanaCharts();
+  else if (state.page === 'campanas') { mountCampanaCharts(); mountCampanaKwCharts(); }
   else if (state.page === 'audiencias') mountAudienciasCharts();
 }
 
@@ -14142,6 +14142,7 @@ function emptyCampanaDetail(token) {
     key: null, token, tab: 'resumen', exporting: false, exportError: null,
     status: 'idle', error: null, days: [], currency: '', simulated: false,
     breakdown: emptyCampanaPart(), ctx: emptyCampanaPart(), seg: emptyCampanaPart(), kw: emptyCampanaPart(), pos: emptyCampanaPart(),
+    kwd: emptyCampanaPart(), kwdDays: 30, kwdHidden: [], // evolución de las palabras clave principales: ventana (7/14/30) y las ocultas en la leyenda
   };
 }
 
@@ -14232,7 +14233,12 @@ function ensureCampanaTab(tab) {
   else if (tab === 'graficas') { loadCampanaDaily(); loadCampanaPart('ctx', '/api/google-ads/campaign-insight', { view: 'context' }); }
   else if (tab === 'grupos') loadCampanaPart('breakdown', '/api/google-ads/campaign-breakdown', { channel_type: row.channel_type });
   else if (tab === 'segmentos') loadCampanaPart('seg', '/api/google-ads/campaign-insight', { view: 'segments' });
-  else if (tab === 'palabras' && row.channel_type === 'SEARCH') loadCampanaPart('kw', '/api/google-ads/campaign-insight', { view: 'keywords' });
+  else if (tab === 'palabras' && row.channel_type === 'SEARCH') {
+    loadCampanaPart('kw', '/api/google-ads/campaign-insight', { view: 'keywords' });
+    // La evolución usa siempre los últimos 30 días completos (hasta ayer), sin importar el rango de la tabla; 7 y 14 se recortan en pantalla.
+    const to = isoDay(Date.now() - 86400000);
+    loadCampanaPart('kwd', '/api/google-ads/campaign-insight', { view: 'keyword_daily', date_from: isoDay(Date.now() - 30 * 86400000), date_to: to });
+  }
   else if (tab === 'posicion') loadCampanaPart('pos', '/api/google-ads/campaign-insight', { view: 'position' });
 }
 
@@ -14641,7 +14647,7 @@ function renderCampanaKeywordsTab(row, cur) {
   if (row.channel_type !== 'SEARCH') {
     return `<div class="card state-panel idle"><p>Las palabras clave solo existen en campañas de Search. Esta es una campaña de ${escapeHtml(campanasTypeLabel(row.channel_type))}.</p></div>`;
   }
-  return campanaPartHtml(state.campanas.detail.kw, 'las palabras clave', (list) => {
+  return renderCampanaKwTrend(cur) + campanaPartHtml(state.campanas.detail.kw, 'las palabras clave', (list) => {
     const kws = (list || []).filter((k) => k.impressions > 0 || k.cost > 0);
     const total = kws.reduce((a, k) => a + k.cost, 0);
     const wasted = kws.filter((k) => k.cost > 0 && k.conversions === 0);
@@ -14665,6 +14671,102 @@ function renderCampanaKeywordsTab(row, cur) {
       `${summary}${campanaTable(`<th>Palabra clave</th><th>Concordancia</th><th>Nivel de calidad</th><th>CTR esperado</th><th>Relevancia del anuncio</th><th>Página de destino</th>${CAMPANA_KPI_HEAD}`, rows, 'No hay palabras clave con actividad en este rango.', 14)}`,
       'El Nivel de calidad (1-10) y sus tres componentes los calcula Google: 7 o más es sano; por debajo de 5 sube el costo por clic. El componente "Inferior a la media" te dice qué arreglar: anuncio, página o CTR.');
   });
+}
+
+// ---- Evolución de las palabras clave principales (impresiones, CPC y cuota de impresiones de búsqueda) ----
+const CAMPANA_KW_COLORS = ['#03a694', '#2f4468', '#ff9800', '#d5455f', '#7b61c9', '#3a9d5d', '#d65db1', '#9c6644', '#8a9a2b', '#2f8fd8'];
+const CAMPANA_KW_WINDOWS = [7, 14, 30];
+
+// Los últimos N días (terminando en el último día traído) como lista de fechas AAAA-MM-DD.
+function campanaKwDates(data, n) {
+  const end = Date.parse(`${data.date_to}T00:00:00Z`);
+  const out = [];
+  for (let i = n - 1; i >= 0; i -= 1) out.push(isoDay(end - i * 86400000));
+  return out;
+}
+
+// Serie de una palabra clave sobre las fechas dadas: impresiones (0 si no hubo), CPC (vacío sin clics), CTR en % (vacío sin impresiones) y cuota (vacía si Google no la da).
+function campanaKwSeries(kw, dates) {
+  const byDate = new Map(kw.days.map((x) => [x.date, x]));
+  return {
+    impressions: dates.map((dt) => (byDate.get(dt) ? byDate.get(dt).impressions : 0)),
+    cpc: dates.map((dt) => { const x = byDate.get(dt); return x && x.clicks ? x.cost / x.clicks : null; }),
+    ctr: dates.map((dt) => { const x = byDate.get(dt); return x && x.impressions ? (x.clicks / x.impressions) * 100 : null; }),
+    share: dates.map((dt) => { const x = byDate.get(dt); return x && x.impr_share != null ? x.impr_share : null; }),
+  };
+}
+
+function renderCampanaKwTrend() {
+  const d = state.campanas.detail;
+  const body = campanaPartHtml(d.kwd, 'la evolución de las palabras clave', (data) => {
+    const kws = (data && data.keywords) || [];
+    if (!kws.length) return '<p class="field-hint" style="padding:20px 0;text-align:center">No hay palabras clave con actividad en los últimos 30 días.</p>';
+    const hidden = new Set(d.kwdHidden);
+    const windowBtns = `<div class="seg-control">${CAMPANA_KW_WINDOWS.map((n) => `<button class="seg-btn ${d.kwdDays === n ? 'active' : ''}" data-camp-kwd-days="${n}">${n} días</button>`).join('')}</div>`;
+    const chips = kws.map((k, i) => `<span class="camp-kw-chip" data-camp-kwd-toggle="${escapeHtml(k.key)}" title="${hidden.has(k.key) ? 'Mostrar' : 'Ocultar'} en las gráficas" style="display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border:1px solid var(--color-border,#e5e7eb);border-radius:999px;font-size:12px;cursor:pointer;${hidden.has(k.key) ? 'opacity:.4;text-decoration:line-through' : ''}"><span style="width:10px;height:10px;border-radius:50%;background:${CAMPANA_KW_COLORS[i % CAMPANA_KW_COLORS.length]}"></span>${escapeHtml(k.text)}<span style="opacity:.6">${escapeHtml(CAMPANA_MATCH_ES[k.match_type] || '')}</span></span>`).join('');
+    const card = (id, title, hint) => `
+      <div class="card" style="padding:16px 18px">
+        <h4 style="margin:0 0 4px;font-size:12.5px;color:var(--color-text-heading);text-transform:uppercase;letter-spacing:.04em">${title}</h4>
+        <p class="field-hint" style="margin:0 0 10px">${hint}</p>
+        <div style="height:230px"><canvas id="${id}"></canvas></div>
+      </div>`;
+    return `
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:0 0 10px">${windowBtns}<span class="field-hint" style="margin:0">Últimos ${d.kwdDays} días, hasta ${escapeHtml(data.date_to)} · las ${fmtInt(kws.length)} palabras clave de mayor gasto en los últimos 30 días</span></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin:0 0 14px">${chips}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(420px,100%),1fr));gap:16px">
+        ${card('camp-chart-kwimp', 'Impresiones', 'Veces que se mostró cada palabra clave por día. Una caída sostenida en una palabra clave es visibilidad perdida en esa búsqueda.')}
+        ${card('camp-chart-kwctr', 'CTR', 'Clics ÷ impresiones de la palabra clave por día. Si cae mientras sube la cuota, el anuncio sale en búsquedas menos relevantes; si cae junto con un CPC que sube, el Nivel de calidad se está deteriorando.')}
+        ${card('camp-chart-kwcpc', 'CPC medio', 'Lo que costó cada clic de la palabra clave por día (vacío los días sin clics). Un CPC que sube solo es puja más cara por esa búsqueda.')}
+        ${card('camp-chart-kwshare', 'Cuota de impresiones de búsqueda', 'Qué parte de las búsquedas posibles mostró la palabra clave. Vacío los días en que Google no la calcula (poco volumen).')}
+      </div>
+      <p class="field-hint" style="margin:10px 0 0">Pulsa una palabra clave de la lista para ocultarla o mostrarla en las cuatro gráficas.</p>`;
+  });
+  return campanaSection('Evolución de las palabras clave principales', body);
+}
+
+function mountCampanaKwCharts() {
+  const c = state.campanas;
+  const d = c.detail;
+  if (!d.key || d.tab !== 'palabras' || d.kwd.status !== 'ready' || !window.Chart) return;
+  const data = d.kwd.data;
+  const kws = (data && data.keywords) || [];
+  if (!kws.length) return;
+  const cur = d.currency;
+  const dates = campanaKwDates(data, d.kwdDays);
+  const labels = dates.map((x) => x.slice(5));
+  const hidden = new Set(d.kwdHidden);
+  const grid = cssVar('--color-border') || '#e5e7eb';
+  const muted = cssVar('--color-text-muted') || '#666';
+  const tick = (fmt) => ({ callback: fmt, color: muted, font: { size: 11 } });
+  const money = (v) => campanasMoney(v, cur);
+  const axisMoney = (v) => v.toFixed(Math.abs(v) < 10 ? 2 : 0);
+  const pct = (v) => `${Math.round(v * 100)}%`;
+  const pct1 = (v) => `${(v * 100).toFixed(1)}%`;
+  const shown = kws.map((k, i) => ({ k, color: CAMPANA_KW_COLORS[i % CAMPANA_KW_COLORS.length], s: campanaKwSeries(k, dates) })).filter((x) => !hidden.has(x.k.key));
+  const mount = (id, field, yTicks, fmt, extraY) => {
+    const canvas = document.getElementById(id);
+    if (!canvas) return;
+    chartRegistry[id] = new window.Chart(canvas.getContext('2d'), {
+      type: 'line',
+      data: { labels, datasets: shown.map(({ k, color, s }) => ({ type: 'line', label: k.text, data: s[field], borderColor: color, backgroundColor: color, borderWidth: 2, pointRadius: d.kwdDays <= 14 ? 2.5 : 1.5, tension: 0.25, spanGaps: false })) },
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: { duration: 250 },
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: { backgroundColor: cssVar('--navy-900') || '#0f172a', padding: 8, cornerRadius: 6, itemSort: (a, b) => (b.parsed.y || 0) - (a.parsed.y || 0), callbacks: { label: (item) => (item.parsed.y == null ? null : `${item.dataset.label}: ${fmt(item.parsed.y)}`) } },
+        },
+        scales: {
+          x: { grid: { display: false }, ticks: { color: muted, font: { size: 10 }, maxTicksLimit: 12 } },
+          y: { beginAtZero: true, grid: { color: grid }, ticks: tick(yTicks), ...extraY },
+        },
+      },
+    });
+  };
+  mount('camp-chart-kwimp', 'impressions', (v) => fmtInt(v), (v) => fmtInt(v), {});
+  mount('camp-chart-kwctr', 'ctr', (v) => `${v.toFixed(v < 10 ? 1 : 0)}%`, (v) => `${v.toFixed(2)}%`, {});
+  mount('camp-chart-kwcpc', 'cpc', axisMoney, money, {});
+  mount('camp-chart-kwshare', 'share', pct, pct1, { max: 1 });
 }
 
 // ---- Posición en la subasta ----
@@ -14980,7 +15082,7 @@ function campanaLoadAllParts(token) {
   CAMPANA_EXPORT_TABS.forEach(ensureCampanaTab);
   const statuses = () => {
     const d = c.detail;
-    return [d.status, d.ctx.status, d.breakdown.status, d.seg.status, d.pos.status, ...(row.channel_type === 'SEARCH' ? [d.kw.status] : [])];
+    return [d.status, d.ctx.status, d.breakdown.status, d.seg.status, d.pos.status, ...(row.channel_type === 'SEARCH' ? [d.kw.status, d.kwd.status] : [])];
   };
   return new Promise((resolve, reject) => {
     const t0 = Date.now();
@@ -14997,19 +15099,32 @@ function campanaChartImages(token) {
   const c = state.campanas;
   const d = c.detail;
   const prevTab = d.tab;
+  const snap = (keys, out) => keys.forEach((k) => {
+    const cv = document.getElementById(`camp-chart-${k}`);
+    if (!cv) return;
+    const flat = document.createElement('canvas');
+    flat.width = cv.width; flat.height = cv.height;
+    const g = flat.getContext('2d');
+    g.fillStyle = '#fff'; g.fillRect(0, 0, flat.width, flat.height); g.drawImage(cv, 0, 0);
+    out[k] = flat.toDataURL('image/png');
+  });
+  const row = campanaDetailRow();
+  const out = {};
   d.tab = 'graficas';
   render();
   return new Promise((resolve) => setTimeout(() => {
-    const out = {};
-    ['is', 'lost', 'spend', 'clicks', 'conv', 'cpc'].forEach((k) => {
-      const cv = document.getElementById(`camp-chart-${k}`);
-      if (!cv) return;
-      const flat = document.createElement('canvas');
-      flat.width = cv.width; flat.height = cv.height;
-      const g = flat.getContext('2d');
-      g.fillStyle = '#fff'; g.fillRect(0, 0, flat.width, flat.height); g.drawImage(cv, 0, 0);
-      out[k] = flat.toDataURL('image/png');
-    });
+    snap(['is', 'lost', 'spend', 'clicks', 'conv', 'cpc'], out);
+    // Palabras clave (solo Search): su evolución también son gráficas.
+    if (row && row.channel_type === 'SEARCH' && c.detail.token === token) {
+      d.tab = 'palabras';
+      render();
+      setTimeout(() => {
+        snap(['kwimp', 'kwctr', 'kwcpc', 'kwshare'], out);
+        if (c.detail.token === token) { c.detail.tab = prevTab; render(); }
+        resolve(out);
+      }, 900);
+      return;
+    }
     if (c.detail.token === token) { c.detail.tab = prevTab; render(); }
     resolve(out);
   }, 900));
@@ -16040,6 +16155,12 @@ function bindEvents() {
   // Campañas
   document.querySelectorAll('[data-camp-open]').forEach((el) => el.addEventListener('click', () => openCampanaDetail(el.dataset.campOpen)));
   document.querySelectorAll('[data-camp-tab]').forEach((el) => el.addEventListener('click', () => setCampanaTab(el.dataset.campTab)));
+  document.querySelectorAll('[data-camp-kwd-days]').forEach((el) => el.addEventListener('click', () => { state.campanas.detail.kwdDays = Number(el.dataset.campKwdDays); render(); }));
+  document.querySelectorAll('[data-camp-kwd-toggle]').forEach((el) => el.addEventListener('click', () => {
+    const d = state.campanas.detail; const k = el.dataset.campKwdToggle;
+    d.kwdHidden = d.kwdHidden.includes(k) ? d.kwdHidden.filter((x) => x !== k) : [...d.kwdHidden, k];
+    render();
+  }));
   document.querySelectorAll('[data-camp-go]').forEach((el) => el.addEventListener('click', () => campanaGoTo(el.dataset.campGo)));
   const campDetailOverlay = document.querySelector('.camp-detail-overlay');
   if (campDetailOverlay) campDetailOverlay.addEventListener('click', (e) => {

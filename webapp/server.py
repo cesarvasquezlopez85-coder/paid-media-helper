@@ -2469,7 +2469,7 @@ class Handler(SimpleHTTPRequestHandler):
         prev_to = (query.get("prev_to") or [""])[0].strip()
         date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-        if view not in ("context", "segments", "keywords", "position"):
+        if view not in ("context", "segments", "keywords", "position", "keyword_daily"):
             self._send_json(400, {"error": "Vista desconocida."})
             return
         if not campaign_id.isdigit():
@@ -2479,9 +2479,20 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(400, {"error": "date_from y date_to deben tener formato AAAA-MM-DD."})
             return
         has_prev = bool(date_pattern.match(prev_from) and date_pattern.match(prev_to))
+        if view == "keyword_daily":
+            try:
+                span = (datetime.date.fromisoformat(date_to) - datetime.date.fromisoformat(date_from)).days
+            except ValueError:
+                span = -1
+            if span < 0 or span > 62:
+                self._send_json(400, {"error": "El rango de la evolución de palabras clave debe ser de 1 a 63 días."})
+                return
 
         if not google_ads_client.is_configured():
-            data = google_ads_client.simulated_campaign_insight(view, campaign_id)
+            if view == "keyword_daily":
+                data = google_ads_client.simulated_campaign_keyword_daily(campaign_id, date_from, date_to)
+            else:
+                data = google_ads_client.simulated_campaign_insight(view, campaign_id)
             self._send_json(200, {"data": data, "simulated": True, "currency": "USD"})
             return
 
@@ -2500,6 +2511,8 @@ class Handler(SimpleHTTPRequestHandler):
                 data = google_ads_client.fetch_campaign_segments(customer_id, campaign_id, date_from, date_to)
             elif view == "keywords":
                 data = google_ads_client.fetch_campaign_keywords(customer_id, campaign_id, date_from, date_to)
+            elif view == "keyword_daily":
+                data = google_ads_client.fetch_campaign_keyword_daily(customer_id, campaign_id, date_from, date_to)
             else:
                 data = google_ads_client.fetch_campaign_position(customer_id, campaign_id, date_from, date_to, prev_from if has_prev else None, prev_to if has_prev else None)
             self._send_json(200, {"data": data, "simulated": False, "currency": google_ads_client.fetch_customer_currency(customer_id)})
