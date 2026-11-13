@@ -827,6 +827,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_hotel_price_account(parse_qs(parsed.query))
             return
 
+        if path == "/api/google-ads/hotel-share-monthly":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_hotel_share_monthly(parse_qs(parsed.query))
+            return
+
         if path == "/api/google-ads/hotel-modifiers":
             if not self._require_super_admin_json():
                 return
@@ -3500,6 +3506,33 @@ class Handler(SimpleHTTPRequestHandler):
             return
         try:
             self._send_json(200, {**google_ads_client.fetch_hotel_price_account(customer_id, *dates), "simulated": False})
+        except Exception as e:  # noqa: BLE001
+            self._send_google_ads_error(e)
+
+    def _handle_google_ads_hotel_share_monthly(self, query):
+        """Cuota de impresiones mes a mes de una cuenta (matriz por hotel y mes). Solo lectura; el navegador la pide cuenta por cuenta."""
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        month_from = (query.get("month_from") or [""])[0].strip()
+        month_to = (query.get("month_to") or [""])[0].strip()
+        try:
+            google_ads_client._hotel_month_bounds(month_from, month_to)
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not _hotel_rank_limiter.allow(f"user:{user['id']}", *HOTEL_RANK_RATE_LIMIT):
+            self._send_json(429, {"error": f"Alcanzaste el límite de {HOTEL_RANK_RATE_LIMIT[0]} cuentas por hora en el ranking de Hoteles."})
+            return
+        if not google_ads_client.is_configured():
+            self._send_json(200, {**google_ads_client.simulated_hotel_share_monthly(customer_id or "0", month_from, month_to), "simulated": True})
+            return
+        if not self._hotel_account_access(customer_id):
+            return
+        try:
+            self._send_json(200, {**google_ads_client.fetch_hotel_share_monthly(customer_id, month_from, month_to), "simulated": False})
         except Exception as e:  # noqa: BLE001
             self._send_google_ads_error(e)
 

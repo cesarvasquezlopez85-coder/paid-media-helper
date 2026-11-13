@@ -5280,6 +5280,23 @@ def fetch_hotel_price_account(customer_id, date_from, date_to):
                 (int(m.get("impressions", 0)), _float_or_none(m.get("hotelPriceDifferencePercentage"))))
     except RuntimeError:
         buckets = None
+    # Cuota de impresiones perdida por presupuesto y por ranking de cada campaña (para repartir las impresiones perdidas).
+    lost = {}
+    try:
+        for r in _search(customer_id, f"""
+            SELECT campaign.id, metrics.search_budget_lost_impression_share, metrics.search_rank_lost_impression_share,
+                   metrics.search_top_impression_share
+            FROM campaign
+            WHERE campaign.advertising_channel_type = 'HOTEL' AND campaign.status = 'ENABLED' AND {where}
+        """):
+            m = r["metrics"]
+            lost[r["campaign"]["id"]] = {
+                "budget": _float_or_none(m.get("searchBudgetLostImpressionShare")),
+                "rank": _float_or_none(m.get("searchRankLostImpressionShare")),
+                "top": _float_or_none(m.get("searchTopImpressionShare")),
+            }
+    except RuntimeError:
+        lost = None
     campaigns, all_rows, all_buckets = [], [], {}
     for r in camp_rows:
         c = r["campaign"]
@@ -5291,6 +5308,7 @@ def fetch_hotel_price_account(customer_id, date_from, date_to):
             "impressions": a["impressions"], "clicks": a["clicks"], "cost": a["cost"], "conversions": a["conversions"],
             "eligible": a["eligible"], "price_diff": _hotel_price_weighted(a["rows"], lambda i: i[0], lambda i: i[1]),
         }
+        item.update(_hotel_missed(a["eligible"], a["impressions"], (lost or {}).get(c["id"]) if lost is not None else None))
         item.update(_hotel_bucket_shares(buckets.get(c["id"]) if buckets is not None else None))
         campaigns.append(item)
         all_rows.extend(a["rows"])
@@ -5304,8 +5322,36 @@ def fetch_hotel_price_account(customer_id, date_from, date_to):
             "eligible": sum(x["eligible"] for x in campaigns),
             "price_diff": _hotel_price_weighted(all_rows, lambda i: i[0], lambda i: i[1]),
             **_hotel_bucket_shares(all_buckets if buckets is not None else None),
+            **_hotel_missed_total(campaigns),
         }
     out["campaigns"] = campaigns
+    return out
+
+
+def _hotel_missed(eligible, impressions, lost):
+    """Impresiones perdidas de una campaña: las elegibles que no se mostraron. Con la cuota perdida por presupuesto y por
+    ranking que informa Google se reparten en esas dos causas (cuota × elegibles) y lo que sobra queda en «otras».
+    `lost` None = Google no entregó las cuotas: solo se informa el total."""
+    missed = max(0, eligible - impressions)
+    out = {"missed": missed, "missed_rank": None, "missed_budget": None, "missed_other": None,
+           "impression_share": (impressions / eligible) if eligible else None}
+    if lost is not None and (lost.get("rank") is not None or lost.get("budget") is not None):
+        rank = min(missed, round((lost.get("rank") or 0) * eligible))
+        budget = min(missed - rank, round((lost.get("budget") or 0) * eligible))
+        out.update({"missed_rank": rank, "missed_budget": budget, "missed_other": max(0, missed - rank - budget)})
+    return out
+
+
+def _hotel_missed_total(campaigns):
+    """Suma de las impresiones perdidas de varias campañas (los conteos sí se pueden sumar; son independientes de la moneda)."""
+    eligible = sum(c["eligible"] for c in campaigns)
+    imp = sum(c["impressions"] for c in campaigns)
+    out = {"missed": sum(c["missed"] for c in campaigns), "impression_share": (imp / eligible) if eligible else None,
+           "missed_rank": None, "missed_budget": None, "missed_other": None}
+    if all(c["missed_rank"] is not None for c in campaigns):
+        out["missed_rank"] = sum(c["missed_rank"] for c in campaigns)
+        out["missed_budget"] = sum(c["missed_budget"] for c in campaigns)
+        out["missed_other"] = sum(c["missed_other"] for c in campaigns)
     return out
 
 
@@ -5324,6 +5370,60 @@ def _hotel_bucket_shares(by_bucket):
         "lowest_share": imp(["LOWEST_UNIQUE", "LOWEST_TIED"]) / total * 100,
         "not_lowest_diff": _hotel_price_weighted(nl, lambda i: i[0], lambda i: i[1]) if nl else None,
     }
+
+
+def _hotel_month_bounds(month_from, month_to):
+    """De dos meses AAAA-MM saca la primera y la última fecha (la última, como mucho hoy). ValueError con mensaje para el usuario."""
+    pat = re.compile(r"^(\d{4})-(\d{2})$")
+    m1, m2 = pat.match(str(month_from or "")), pat.match(str(month_to or ""))
+    if not m1 or not m2 or not (1 <= int(m1.group(2)) <= 12) or not (1 <= int(m2.group(2)) <= 12):
+        raise ValueError("month_from y month_to deben tener formato AAAA-MM.")
+    y1, mo1, y2, mo2 = int(m1.group(1)), int(m1.group(2)), int(m2.group(1)), int(m2.group(2))
+    if (y1, mo1) > (y2, mo2):
+        raise ValueError("El mes inicial no puede ser posterior al final.")
+    if (y2 - y1) * 12 + (mo2 - mo1) + 1 > 36:
+        raise ValueError("El rango no puede pasar de 36 meses.")
+    end = datetime.date(y2, mo2, calendar.monthrange(y2, mo2)[1])
+    return datetime.date(y1, mo1, 1).isoformat(), min(end, datetime.date.today()).isoformat()
+
+
+def fetch_hotel_share_monthly(customer_id, month_from, month_to):
+    """Impresiones elegibles e impresiones de todas las campañas de hotel de la cuenta, mes a mes (también las pausadas hoy,
+    para que el histórico sea comparable). La cuota de impresiones de cada mes es impresiones ÷ elegibles. Solo lectura."""
+    customer_id = _hotel_valid_id(customer_id)
+    d_from, d_to = _hotel_month_bounds(month_from, month_to)
+    months = {}
+    for r in _search(customer_id, f"""
+        SELECT segments.month, metrics.impressions, metrics.hotel_eligible_impressions
+        FROM hotel_performance_view WHERE segments.date BETWEEN '{d_from}' AND '{d_to}'
+    """):
+        key = str(r["segments"]["month"])[:7]
+        m = r["metrics"]
+        a = months.setdefault(key, {"eligible": 0, "impressions": 0})
+        a["impressions"] += int(m.get("impressions", 0))
+        a["eligible"] += int(float(m.get("hotelEligibleImpressions", 0) or 0))
+    return {"customer_id": customer_id, "months": months}
+
+
+def simulated_hotel_share_monthly(customer_id, month_from, month_to):
+    """Cuota mensual de ejemplo: cada cuenta simulada tiene un nivel y una caída reciente distintos; una llega a más de 100 %."""
+    d_from, d_to = _hotel_month_bounds(month_from, month_to)
+    start, end = datetime.date.fromisoformat(d_from), datetime.date.fromisoformat(d_to)
+    seed = sum(int(ch) for ch in str(customer_id) if ch.isdigit()) % 9
+    months, y, m = {}, start.year, start.month
+    if str(customer_id)[-1:] == "7":
+        return {"customer_id": str(customer_id), "months": {}}  # una cuenta sin datos de hotel
+    while datetime.date(y, m, 1) <= end:
+        i = (y - 2025) * 12 + m
+        share = 0.93 - 0.02 * seed + 0.03 * ((i * 5 + seed) % 4) / 3 - (0.02 * max(0, i - 20) * (1 + seed % 3))
+        if seed == 8 and m == 8:
+            share = 1.01
+        eligible = 30000 + 4000 * ((i + seed) % 5)
+        months[f"{y}-{m:02d}"] = {"eligible": eligible, "impressions": round(eligible * max(0.2, share))}
+        m += 1
+        if m == 13:
+            y, m = y + 1, 1
+    return {"customer_id": str(customer_id), "months": months}
 
 
 def _hotel_validate_changes(changes):
@@ -5547,11 +5647,14 @@ def simulated_hotel_price_account(customer_id, date_from=None, date_to=None):
             d = None if b["price_diff"] is None else b["price_diff"] + shift
             by_bucket[b["bucket"]] = [(b["impressions"], d)]
         rows = [(i[0], i[1]) for items in by_bucket.values() for i in items]
+        eligible = price["summary"]["eligible"] + seed * 900  # cada cuenta simulada pierde una parte distinta
+        lost = {"rank": max(0.0, (eligible - camp["impressions"]) / eligible * 0.88), "budget": 0.0 if seed % 3 else 0.03}
         item = {
             "campaign_id": camp["campaign_id"], "campaign_name": camp["campaign_name"],
             "bidding_strategy_type": camp["bidding_strategy_type"], "impressions": camp["impressions"], "clicks": camp["clicks"],
-            "cost": camp["cost"], "conversions": camp["conversions"], "eligible": price["summary"]["eligible"],
+            "cost": camp["cost"], "conversions": camp["conversions"], "eligible": eligible,
             "price_diff": _hotel_price_weighted(rows, lambda i: i[0], lambda i: i[1]),
+            **_hotel_missed(eligible, camp["impressions"], lost),
             **_hotel_bucket_shares(by_bucket),
         }
         campaigns.append(item)
@@ -5570,6 +5673,7 @@ def simulated_hotel_price_account(customer_id, date_from=None, date_to=None):
             "eligible": sum(x["eligible"] for x in campaigns),
             "price_diff": _hotel_price_weighted(all_rows, lambda i: i[0], lambda i: i[1]),
             **_hotel_bucket_shares(all_buckets),
+            **_hotel_missed_total(campaigns),
         },
     }
 

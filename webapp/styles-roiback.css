@@ -572,6 +572,19 @@ main.content { flex: 1; overflow-y: auto; height: 100%; }
 /* Ranking de precio de Hoteles: celdas centradas en vertical aunque alguna lleve una segunda línea. */
 .hotel-rank-table td { vertical-align: middle; }
 .hotel-rank-table td .footnote { white-space: nowrap; }
+/* Cuota de impresiones por mes (Hoteles): mapa de calor hotel × mes. */
+.hotel-month-table { border-collapse: separate; border-spacing: 0; }
+.hotel-month-table th.hm-year { background: #1f3b73; color: #fff; text-align: center; font-size: 13px; }
+.hotel-month-table th.hm-mon { background: #1f3b73; color: #fff; text-align: center; font-size: 12px; text-transform: none; padding: 6px 8px; }
+.hotel-month-table th.hm-name { background: #1f3b73; color: #fff; text-align: left; }
+.hotel-month-table td.hm-name { white-space: nowrap; min-width: 150px; }
+.hotel-month-table td.hm-cell { text-align: center; font-weight: 500; padding: 6px 8px; min-width: 46px; color: #1f2937; border: 1px solid rgba(255,255,255,.7); }
+.hotel-month-table td.hm-empty { color: #9ca3af; }
+.hotel-month-table .hm-gap { width: 18px; min-width: 18px; padding: 0; background: transparent; border: 0; }
+.hotel-month-table tr.hm-total-row td { border-top: 2px solid var(--color-text-heading); font-weight: 700; }
+.hotel-month-table tr.hm-total-row td.hm-name { background: var(--gray-50, #f6f7f9); }
+.hotel-month-table tr.hm-total-row td { position: sticky; bottom: 0; z-index: 1; }
+.hotel-month-table tr.hm-total-row td.hm-gap { background: #fff; border-top: 0; }
 /* Ritmo de consumo: con un solo Total, se queda abajo mientras se recorre la lista. */
 .table-scroll.sticky-head tfoot.pacing-tfoot-sticky td { position: sticky; bottom: 0; z-index: 2; background: var(--gray-50, #f6f7f9); box-shadow: 0 -1px 0 var(--color-border); }
 

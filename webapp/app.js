@@ -230,7 +230,7 @@ const state = {
   // campaña a la vez. Misma regla que ROAS/IA Max: vista previa antes de escribir.
   hotel: {
     mode: 'single', // 'single' (una cuenta: modificadores) | 'ranking' (precio frente a la competencia en varias cuentas)
-    rank: { items: [], search: '', sortBy: 'price_diff', expanded: [], running: false, cancel: false, token: 0, stopMsg: '', notice: '', loadedFrom: '', loadedTo: '' },
+    rank: { items: [], search: '', view: 'price', sortBy: 'price_diff', sortVis: 'share', sortMonthly: 'name', monthFrom: '', monthTo: '', compareYear: true, expanded: [], running: false, cancel: false, token: 0, stopMsg: '', notice: '', loadedFrom: '', loadedTo: '' },
     api: {
       statusChecked: false, configured: false,
       accountsStatus: 'idle', accounts: [], accountId: '', accountIdManual: '',
@@ -8786,6 +8786,7 @@ function renderHotelDetail() {
       <button class="btn-outline sm" data-action="hotel-back">← Campañas</button>
       <h3 style="margin:0">${escapeHtml(data.campaign_name)}</h3>
       <span class="footnote">${escapeHtml(BID_STRATEGY_LABELS_ES[data.bidding_strategy_type] || data.bidding_strategy_type || '')} · ${data.ad_groups} grupo${data.ad_groups === 1 ? '' : 's'} de anuncios · ${fmtInt(t.clicks)} clics · ${hotelMoney(t.cost, currency)} · ${t.conversions ? t.conversions.toFixed(1) : 0} conv.</span>
+      <button class="btn-outline xs" data-action="hotel-single-html" style="margin-left:auto">Descargar HTML</button>
     </div>
     <p class="footnote" style="margin:0 0 14px">Un <strong>modificador</strong> es un multiplicador que Google aplica sobre la puja base de la campaña en ese tramo: 1 = sin ajuste, 0,8 = pujar un 20 % menos, 1,3 = un 30 % más, 0 = no servir. El <strong>CPC pagado</strong> es lo que costó cada clic en el periodo, no la puja.</p>
     ${lockBanner}
@@ -8796,14 +8797,14 @@ function renderHotelDetail() {
     ${flowHtml}`;
 }
 
-function renderHotelCampaignList() {
+function renderHotelCampaignList(forExport) {
   const s = state.hotel;
   const l = s.list;
   const currency = l.currency;
-  const q = (l.filter || '').trim().toLowerCase();
+  const q = forExport ? '' : (l.filter || '').trim().toLowerCase();
   const all = l.campaigns || [];
   const filtered = q ? all.filter((c) => c.campaign_name.toLowerCase().includes(q) || c.campaign_id.includes(q)) : all;
-  const shown = filtered.slice(0, HOTEL_RENDER_LIMIT);
+  const shown = forExport ? filtered : filtered.slice(0, HOTEL_RENDER_LIMIT);
   const rows = shown.map((c) => `
     <tr>
       <td>${escapeHtml(c.campaign_name)}</td>
@@ -8825,7 +8826,7 @@ function renderHotelCampaignList() {
     <div class="card table-panel">
       <div class="table-panel-head">
         <h3>Campañas de hotel (${fmtInt(all.length)})</h3>
-        <input type="text" id="hotel-campaign-filter" placeholder="Buscar por nombre o ID…" value="${escapeHtml(l.filter)}" style="width:280px" />
+        <span style="display:inline-flex;gap:8px;align-items:center"><input type="text" id="hotel-campaign-filter" placeholder="Buscar por nombre o ID…" value="${escapeHtml(l.filter)}" style="width:280px" /><button class="btn-outline xs" data-action="hotel-single-html">Descargar HTML</button></span>
       </div>
       <div class="table-scroll">
         <table>
@@ -9001,6 +9002,15 @@ async function runHotelRank(onlyPending) {
 // Las cuentas con datos primero, ordenadas por el criterio elegido (de mayor a menor); después las que no tienen campañas de hotel con impresiones y las que fallaron.
 function hotelRankSortedItems() {
   const r = state.hotel.rank;
+  if (r.view === 'visibility') {
+    const vkey = {
+      share: (sm) => (sm.impression_share === null || sm.impression_share === undefined ? Infinity : -sm.impression_share),
+      missed: (sm) => sm.missed || 0,
+      eligible: (sm) => sm.eligible || 0,
+    }[r.sortVis] || ((sm) => -sm.impression_share);
+    const has = (it) => it.status === 'ready' && it.data && it.data.summary;
+    return [...r.items.filter(has).sort((x, y) => vkey(y.data.summary) - vkey(x.data.summary)), ...r.items.filter((it) => !has(it))];
+  }
   const key = {
     price_diff: (sm) => (sm.price_diff === null || sm.price_diff === undefined ? -Infinity : sm.price_diff),
     not_lowest_share: (sm) => (sm.not_lowest_share === null || sm.not_lowest_share === undefined ? -Infinity : sm.not_lowest_share),
@@ -9011,6 +9021,364 @@ function hotelRankSortedItems() {
   const first = r.items.filter(withData).sort((x, y) => key(y.data.summary) - key(x.data.summary));
   const rest = r.items.filter((it) => !withData(it));
   return [...first, ...rest];
+}
+
+// El código del hotel es lo último del nombre de la cuenta: «Estelar Medellín - aptosmedellin» → aptosmedellin, «GHA-CPC-armony:CO» → armony.
+function hotelCodeFromName(name) {
+  const raw = String(name || '').replace(/:[A-Za-z]{1,3}$/, '').trim();
+  const segs = raw.split(/\s*[-–—]\s*/).map((x) => x.trim()).filter(Boolean);
+  return (segs.length > 1 ? segs[segs.length - 1] : raw).toLowerCase();
+}
+
+// Cuota de impresiones con color: rojo por debajo de 50 %, ámbar hasta 75 %, verde desde ahí (cortes orientativos nuestros).
+function hotelVisShareBadge(share) {
+  if (share === null || share === undefined) return '<span class="footnote">—</span>';
+  const cls = share < 0.5 ? 'bad' : (share < 0.75 ? 'warn' : 'good');
+  return `<span class="delta-badge ${cls}">${(share * 100).toFixed(1)} %</span>`;
+}
+
+function downloadHotelVisCsv() {
+  const r = state.hotel.rank;
+  const sh = (v) => (v === null || v === undefined ? '' : (v * 100).toFixed(2));
+  const rows = [['Código', 'Cuenta', 'ID', 'Campaña', 'Impresiones elegibles', 'Impresiones', 'Impresiones perdidas', 'Perdidas por ranking', 'Perdidas por presupuesto', 'Perdidas por otras causas', 'Cuota de impresiones %', 'Periodo', 'Nota']];
+  const period = r.loadedFrom ? `${r.loadedFrom} a ${r.loadedTo}` : '';
+  hotelRankSortedItems().forEach((it) => {
+    const d = it.data;
+    const code = hotelCodeFromName(it.name);
+    if (it.status !== 'ready' || !d) { rows.push([code, it.name, it.id, '', '', '', '', '', '', '', '', period, it.error || 'Sin consultar']); return; }
+    if (!d.summary) { rows.push([code, it.name, it.id, '', '', '', '', '', '', '', '', period, 'Sin campañas de hotel activas con impresiones']); return; }
+    const row = (camp, x) => [code, it.name, it.id, camp, x.eligible, x.impressions, x.missed, x.missed_rank ?? '', x.missed_budget ?? '', x.missed_other ?? '', sh(x.impression_share), period, ''];
+    rows.push(row('', d.summary));
+    d.campaigns.forEach((c) => rows.push(row(c.campaign_name, c)));
+  });
+  engine.downloadCsv(`ranking-visibilidad-hoteles_${new Date().toISOString().slice(0, 10)}.csv`, rows);
+}
+
+// ---- Cuota de impresiones por mes (matriz hotel × mes, con el mismo periodo del año anterior) ----
+const HOTEL_MONTH_LABELS = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+
+function hotelMonthNow() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`; }
+function hotelShiftMonth(ym, delta) {
+  const [y, m] = ym.split('-').map(Number);
+  const t = y * 12 + (m - 1) + delta;
+  return `${Math.floor(t / 12)}-${String((t % 12) + 1).padStart(2, '0')}`;
+}
+function hotelMonthList(from, to) {
+  const out = [];
+  for (let m = from; m <= to && out.length < 40; m = hotelShiftMonth(m, 1)) out.push(m);
+  return out;
+}
+function hotelMonthLabel(ym) { const [y, m] = ym.split('-').map(Number); return `${HOTEL_MONTH_LABELS[m - 1]}-${String(y).slice(2)}`; }
+
+// Por defecto: de abril al último mes completo (o de enero si todavía no llegó abril).
+function hotelMonthDefaults() {
+  const last = hotelShiftMonth(hotelMonthNow(), -1);
+  const y = last.slice(0, 4);
+  return { from: last.slice(5) >= '04' ? `${y}-04` : `${y}-01`, to: last };
+}
+function hotelEnsureMonthDefaults() {
+  const r = state.hotel.rank;
+  if (!r.monthFrom || !r.monthTo) { const d = hotelMonthDefaults(); r.monthFrom = d.from; r.monthTo = d.to; }
+}
+
+// Rojo (cuota baja) → amarillo → verde (cuota alta), como el mapa de calor del reporte.
+function hotelShareColor(share) {
+  if (share === null || share === undefined) return 'transparent';
+  const x = Math.max(0.3, Math.min(1, share));
+  const hue = x <= 0.7 ? 5 + ((x - 0.3) / 0.4) * 47 : 52 + ((x - 0.7) / 0.3) * 73;
+  return `hsl(${hue.toFixed(0)}, 70%, 68%)`;
+}
+
+// Cuota de un mes de una cuenta: {share, eligible, impressions} o null si no hay elegibles.
+function hotelMonthShare(it, ym) {
+  const m = it.monthly && it.monthly.data && it.monthly.data.months ? it.monthly.data.months[ym] : null;
+  if (!m || !m.eligible) return null;
+  return { share: m.impressions / m.eligible, eligible: m.eligible, impressions: m.impressions };
+}
+
+// Nombre del hotel para la fila: lo que va antes del primer « - » del nombre de la cuenta (sin la moneda del final).
+function hotelRowName(name) { return auditDeduceBrand(name).hotel_name || name; }
+
+function hotelMonthlyBlocks() {
+  const r = state.hotel.rank;
+  const cur = hotelMonthList(r.monthFrom, r.monthTo);
+  const blocks = [{ months: cur, kind: 'current' }];
+  if (r.compareYear) blocks.unshift({ months: cur.map((m) => hotelShiftMonth(m, -12)), kind: 'previous' });
+  return blocks;
+}
+
+async function runHotelMonthly(onlyPending) {
+  const s = state.hotel;
+  const r = s.rank;
+  if (r.running) return;
+  hotelEnsureMonthDefaults();
+  if (r.monthFrom > r.monthTo) { r.stopMsg = 'El mes inicial no puede ser posterior al final.'; render(); return; }
+  if (hotelMonthList(r.monthFrom, r.monthTo).length > 24) { r.stopMsg = 'Elige un rango de 24 meses o menos.'; render(); return; }
+  const todo = r.items.filter((it) => (onlyPending ? !it.monthly || it.monthly.status === 'error' || it.monthly.status === 'idle' : true));
+  if (!todo.length) return;
+  r.running = true; r.cancel = false; r.stopMsg = '';
+  r.loadedMonthFrom = r.monthFrom; r.loadedMonthTo = r.monthTo; r.loadedCompare = r.compareYear;
+  const from = r.compareYear ? hotelShiftMonth(r.monthFrom, -12) : r.monthFrom;
+  const token = ++r.token;
+  todo.forEach((it) => { it.monthly = { status: 'pending', data: null, error: null }; });
+  render();
+  let next = 0;
+  const worker = async () => {
+    while (!r.cancel && r.token === token) {
+      const it = todo[next]; next += 1;
+      if (!it) return;
+      it.monthly.status = 'running'; render();
+      try {
+        const params = new URLSearchParams({ customer_id: it.id, month_from: from, month_to: r.monthTo });
+        const res = await fetch(`/api/google-ads/hotel-share-monthly?${params.toString()}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { const err = new Error(data.error || 'Error desconocido.'); err.status = res.status; throw err; }
+        it.monthly = { status: 'ready', data, error: null };
+      } catch (err) {
+        it.monthly = { status: 'error', data: null, error: err.message || String(err) };
+        if (err.status === 429) { r.cancel = true; r.stopMsg = it.monthly.error; }
+      }
+      render();
+    }
+  };
+  await Promise.all(Array.from({ length: HOTEL_RANK_CONCURRENCY }, worker));
+  if (r.token !== token) return;
+  r.running = false;
+  todo.forEach((it) => { if (it.monthly.status === 'pending') it.monthly.status = 'idle'; });
+  render();
+}
+
+function hotelMonthlyRows() {
+  const r = state.hotel.rank;
+  const last = r.loadedMonthTo || r.monthTo;
+  const has = (it) => it.monthly && it.monthly.status === 'ready' && it.monthly.data && Object.keys(it.monthly.data.months || {}).length;
+  const key = r.sortMonthly === 'last'
+    ? (it) => { const v = hotelMonthShare(it, last); return v ? v.share : Infinity; }
+    : null;
+  const withData = r.items.filter(has);
+  withData.sort(key ? (x, y) => key(x) - key(y) : (x, y) => hotelRowName(x.name).localeCompare(hotelRowName(y.name)));
+  return [...withData, ...r.items.filter((it) => !has(it))];
+}
+
+function downloadHotelMonthlyCsv() {
+  const r = state.hotel.rank;
+  const blocks = (r.loadedMonthFrom ? [{ months: hotelMonthList(r.loadedMonthFrom, r.loadedMonthTo), kind: 'current' }] : []);
+  if (r.loadedCompare && blocks.length) blocks.unshift({ months: blocks[0].months.map((m) => hotelShiftMonth(m, -12)), kind: 'previous' });
+  const cols = blocks.flatMap((b) => b.months);
+  const pct = (v) => (v === null || v === undefined ? '' : (v * 100).toFixed(1));
+  const rows = [['Hotel', 'Cuenta', 'ID', ...cols.map(hotelMonthLabel)]];
+  hotelMonthlyRows().forEach((it) => {
+    rows.push([hotelRowName(it.name), it.name, it.id, ...cols.map((m) => { const v = hotelMonthShare(it, m); return v ? pct(v.share) : ''; })]);
+  });
+  const tot = (m) => { let e = 0; let i = 0; r.items.forEach((it) => { const v = hotelMonthShare(it, m); if (v) { e += v.eligible; i += v.impressions; } }); return e ? pct(i / e) : ''; };
+  rows.push(['Total de las cuentas marcadas', '', '', ...cols.map(tot)]);
+  engine.downloadCsv(`ranking-cuota-por-mes-hoteles_${new Date().toISOString().slice(0, 10)}.csv`, rows);
+}
+
+const HOTEL_RANK_EXPORT_CSS = `
+  body { margin: 0; background: #fff; }
+  .hrank-export { max-width: 1280px; margin: 0 auto; padding: 28px 20px 40px; }
+  .hrank-export h1 { font-size: 22px; margin: 0 0 6px; }
+  .hrank-export p.meta { color: #6b7280; font-size: 13px; margin: 0 0 4px; }
+  .hrank-export .stat-grid { margin: 18px 0; }
+  .hrank-export .table-scroll { max-height: none !important; overflow-x: auto !important; overflow-y: visible !important; }
+  .hrank-export thead th { position: static; }
+  .hrank-export .table-panel-head .footnote { border-top: 0; padding-top: 0; margin: 0; }
+  .hrank-export .hotel-month-table tr.hm-total-row td { position: static; }
+  @page { size: landscape; margin: 10mm; }
+  @media print { .hrank-export { padding: 0; } .hrank-export tr { break-inside: avoid; } }
+`;
+
+// Descarga en HTML de la vista abierta del ranking (Precio, Visibilidad o Cuota por mes): lo mismo que se ve,
+// sin botones ni filtros y, en Precio y Visibilidad, con todas las cuentas desplegadas por campaña.
+async function downloadHotelRankHtml() {
+  const r = state.hotel.rank;
+  const view = r.view === 'monthly' ? 'monthly' : (r.view === 'visibility' ? 'visibility' : 'price');
+  const savedExpanded = r.expanded;
+  let inner;
+  try {
+    r.expanded = r.items.map((i) => i.id);
+    const box = document.createElement('div');
+    box.innerHTML = renderHotelRanking();
+    inner = [...box.querySelectorAll('.stat-grid, .table-panel')];
+  } finally {
+    r.expanded = savedExpanded;
+  }
+  if (!inner || !inner.length) return;
+  const wrap = document.createElement('div');
+  inner.forEach((el) => wrap.appendChild(el));
+  wrap.querySelectorAll('button[data-hotel-rank-expand]').forEach((b) => {
+    const span = document.createElement('span');
+    span.style.fontWeight = '600';
+    span.textContent = b.textContent.replace(/^[▾▸]\s*/, '');
+    b.replaceWith(span);
+  });
+  wrap.querySelectorAll('button, select, input, .spinner').forEach((el) => el.remove());
+  wrap.querySelectorAll('p.footnote').forEach((p) => {
+    p.textContent = p.textContent.replace(' Pulsa el nombre de una cuenta para ver sus campañas, y «Abrir» para ir a sus modificadores.', ' Cada cuenta aparece desplegada por campaña.').replace(' Pulsa el código de una cuenta para ver sus campañas.', ' Cada cuenta aparece desplegada por campaña.');
+  });
+  const titles = { price: 'Ranking de precio frente a la competencia', visibility: 'Ranking de visibilidad (impresiones perdidas)', monthly: 'Cuota de impresiones por mes' };
+  let period = '';
+  if (view === 'monthly') {
+    period = r.loadedMonthFrom ? `meses de ${hotelMonthLabel(r.loadedMonthFrom)} a ${hotelMonthLabel(r.loadedMonthTo)}${r.loadedCompare ? ' y los mismos meses del año anterior' : ''}` : '';
+  } else if (r.loadedFrom) {
+    period = `del ${r.loadedFrom} al ${r.loadedTo}`;
+  }
+  await hotelWriteHtml(titles[view], `${fmtInt(r.items.length)} cuentas marcadas${period ? ` · ${period}` : ''}`, wrap.innerHTML,
+    { price: 'ranking-precio', visibility: 'ranking-visibilidad', monthly: 'ranking-cuota-por-mes' }[view]);
+}
+
+// Arma y descarga el HTML autónomo de cualquier pantalla de Hoteles (título, línea de contexto y contenido ya limpio).
+async function hotelWriteHtml(title, metaText, bodyInner, slug) {
+  const today = new Date().toISOString().slice(0, 10);
+  const body = `
+    <h1>Hoteles · ${escapeHtml(title)}</h1>
+    <p class="meta">${escapeHtml(metaText)} · generado el ${today}</p>
+    ${state.hotel.api.simulated ? '<p class="meta"><strong>Datos de ejemplo (modo simulado).</strong></p>' : ''}
+    ${bodyInner}`;
+  const css = await appCssText();
+  const html = `<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml('Hoteles · ' + title)}</title>
+<style>${css}</style>
+<style>${HOTEL_RANK_EXPORT_CSS}</style></head><body><main class="hrank-export">${body}</main></body></html>`;
+  downloadTextFile(html, `hoteles-${slug}_${today}.html`, 'text/html');
+}
+
+// Una cuenta: la lista de campañas de hotel o el detalle de la campaña abierta (precio, análisis con IA y modificadores por tramo),
+// en solo lectura: sin botones, sin la columna de edición y sin la vista previa de cambios.
+async function downloadHotelSingleHtml() {
+  const s = state.hotel;
+  const a = s.api;
+  const id = hotelCustomerId();
+  const acc = (a.accounts || []).find((x) => x.id === id);
+  const account = `${acc ? acc.name : 'Cuenta'} (${id})`;
+  const range = `${a.dateFrom} a ${a.dateTo}`;
+  const box = document.createElement('div');
+  const strip = (root) => {
+    root.querySelectorAll('button, select, input, .spinner').forEach((el) => el.remove());
+  };
+  if (s.detail.campaignId && s.detail.data) {
+    box.innerHTML = renderHotelDetail();
+    // Fuera: el encabezado de navegación (se rehace sin botón), el pie del editor y todo lo que sigue (vista previa/confirmar).
+    const kids = [...box.children];
+    const head = kids[0];
+    const title = box.querySelector('h3') ? box.querySelector('h3').textContent : 'Campaña';
+    const sub = head.querySelector('span.footnote') ? head.querySelector('span.footnote').textContent : '';
+    const cut = kids.findIndex((k) => k.matches && k.matches('p.footnote') && k.textContent.startsWith('El cambio se aplica por campaña'));
+    if (cut >= 0) kids.slice(cut).forEach((k) => k.remove());
+    head.innerHTML = `<h3 style="margin:0">${escapeHtml(title)}</h3><span style="font-size:12.5px;color:var(--color-text-muted)">${escapeHtml(sub)}</span>`;
+    // El análisis con IA solo entra si ya se corrió; sin resultado es solo un botón.
+    const ai = s.detail.ai;
+    const aiReady = ai && ai.campaignId === s.detail.campaignId && ai.status === 'ready';
+    box.querySelectorAll('.card.table-panel').forEach((card) => {
+      const h = card.querySelector('h3');
+      if (h && h.textContent.trim() === 'Análisis con IA') {
+        if (!aiReady) { card.remove(); return; }
+        const use = card.querySelector('[data-action="hotel-ai-use"]');
+        if (use && use.parentElement) use.parentElement.remove();
+        card.querySelectorAll('details').forEach((d) => { d.open = true; });
+      }
+    });
+    // Tramos: sin la última columna ("Nuevo modificador"), que solo sirve para editar.
+    box.querySelectorAll('table').forEach((t) => {
+      const ths = [...t.querySelectorAll('thead th')];
+      if (!ths.length || !/^Nuevo modificador/.test(ths[ths.length - 1].textContent)) return;
+      ths[ths.length - 1].remove();
+      t.querySelectorAll('tbody tr').forEach((tr) => { const c = tr.querySelectorAll(':scope > td'); if (c.length) c[c.length - 1].remove(); });
+    });
+    strip(box);
+    await hotelWriteHtml(`Modificadores de ${title}`, `${account} · ${range}`, box.innerHTML, `campana-${cambiosSlug(title)}`);
+    return;
+  }
+  const l = s.list;
+  if (!(l.campaigns || []).length) return;
+  box.innerHTML = renderHotelCampaignList(true);
+  strip(box);
+  await hotelWriteHtml('Campañas de hotel', `${account} · ${range}`, box.innerHTML, `campanas-${cambiosSlug(acc ? acc.name : id)}`);
+}
+
+function renderHotelMonthly(picker) {
+  const r = state.hotel.rank;
+  const e = escapeHtml;
+  hotelEnsureMonthDefaults();
+  const nPending = r.items.filter((i) => !i.monthly || i.monthly.status === 'idle' || i.monthly.status === 'error').length;
+  const anyDone = r.items.some((i) => i.monthly && i.monthly.status === 'ready');
+  const settings = `
+    <div class="card control-panel align-end" style="flex-wrap:wrap;gap:16px 24px">
+      <h3 class="section-title" style="margin:0;width:100%">Meses a mostrar</h3>
+      <div style="display:flex;gap:24px;flex-wrap:nowrap">
+        <div class="field"><label>Desde</label><input type="month" id="hotel-rank-month-from" value="${e(r.monthFrom)}" max="${hotelMonthNow()}" ${r.running ? 'disabled' : ''} /></div>
+        <div class="field"><label>Hasta</label><input type="month" id="hotel-rank-month-to" value="${e(r.monthTo)}" max="${hotelMonthNow()}" ${r.running ? 'disabled' : ''} /></div>
+      </div>
+      <div class="field"><label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="hotel-rank-compare" ${r.compareYear ? 'checked' : ''} ${r.running ? 'disabled' : ''} /> Comparar con el mismo periodo del año anterior</label></div>
+      <div class="field"><label>Ordenar filas por</label><select id="hotel-rank-sort"><option value="name" ${r.sortMonthly === 'name' ? 'selected' : ''}>Nombre del hotel</option><option value="last" ${r.sortMonthly === 'last' ? 'selected' : ''}>Cuota del último mes (la menor primero)</option></select></div>
+      ${r.running
+        ? `<button class="btn-outline" data-action="hotel-rank-cancel" ${r.cancel ? 'disabled' : ''}>${r.cancel ? 'Cancelando…' : 'Cancelar'}</button>`
+        : `<button class="btn-accent" data-action="hotel-rank-run" ${r.items.length ? '' : 'disabled'}>${anyDone ? 'Calcular de nuevo las' : 'Calcular la cuota de las'} ${fmtInt(r.items.length)} cuentas</button>
+           ${anyDone && nPending ? `<button class="btn-outline" data-action="hotel-rank-retry">Completar las ${fmtInt(nPending)} que faltan</button>` : ''}`}
+      <p class="field-hint" style="width:100%;margin:0">Solo lectura: una consulta por cuenta (de a ${HOTEL_RANK_CONCURRENCY}) con todas las campañas de hotel de la cuenta, también las pausadas hoy, para que los meses se puedan comparar. Deja esta pestaña abierta mientras corre.</p>
+    </div>`;
+  const inRun = r.items.filter((i) => i.monthly && i.monthly.status !== 'idle').length;
+  const done = r.items.filter((i) => i.monthly && (i.monthly.status === 'ready' || i.monthly.status === 'error')).length;
+  const progress = r.running ? `
+    <div style="margin:0 0 14px"><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>Consultando… ${fmtInt(done)} de ${fmtInt(inRun)}</span><span class="footnote">${r.cancel ? 'Terminando las que están en curso…' : ''}</span></div>
+    <div style="height:8px;border-radius:6px;background:var(--color-border,#e5e7eb);overflow:hidden"><div style="height:100%;width:${Math.round((done / Math.max(1, inRun)) * 100)}%;background:var(--color-accent,#03a694);transition:width .3s"></div></div></div>` : '';
+  const stop = r.stopMsg ? `<div class="error-panel" style="margin-bottom:14px"><strong>No se pudo continuar.</strong> ${e(r.stopMsg)}</div>` : '';
+
+  let table = '';
+  if (r.items.length && (anyDone || r.running)) {
+    const blocks = r.loadedMonthFrom ? [{ months: hotelMonthList(r.loadedMonthFrom, r.loadedMonthTo) }] : [];
+    if (r.loadedCompare && blocks.length) blocks.unshift({ months: blocks[0].months.map((m) => hotelShiftMonth(m, -12)) });
+    const nowYm = hotelMonthNow();
+    const yearGroups = (months) => { const g = []; months.forEach((m) => { const y = m.slice(0, 4); if (g.length && g[g.length - 1].y === y) g[g.length - 1].n += 1; else g.push({ y, n: 1 }); }); return g; };
+    const head1 = blocks.map((b, bi) => `${bi ? '<th class="hm-gap"></th>' : ''}${yearGroups(b.months).map((g) => `<th colspan="${g.n}" class="hm-year">${g.y}</th>`).join('')}`).join('');
+    const head2 = blocks.map((b, bi) => `${bi ? '<th class="hm-gap"></th>' : ''}${b.months.map((m) => `<th class="hm-mon" title="${m === nowYm ? 'Mes en curso: dato parcial' : ''}">${hotelMonthLabel(m).slice(0, 3)}${m === nowYm ? '*' : ''}</th>`).join('')}`).join('');
+    const cell = (it, m) => {
+      const v = hotelMonthShare(it, m);
+      if (!v) return '<td class="hm-cell hm-empty">—</td>';
+      return `<td class="hm-cell" style="background:${hotelShareColor(v.share)}" title="${fmtInt(v.impressions)} impresiones de ${fmtInt(v.eligible)} elegibles">${Math.round(v.share * 100)}%</td>`;
+    };
+    const rowsHtml = hotelMonthlyRows().map((it) => {
+      const st = it.monthly ? it.monthly.status : 'idle';
+      const nameTd = `<td class="hm-name">${e(hotelRowName(it.name))}<div class="field-hint" style="font-family:ui-monospace,monospace">${e(it.id)}</div></td>`;
+      if (st === 'ready' && it.monthly.data && Object.keys(it.monthly.data.months || {}).length) {
+        return `<tr>${nameTd}${blocks.map((b, bi) => `${bi ? '<td class="hm-gap"></td>' : ''}${b.months.map((m) => cell(it, m)).join('')}`).join('')}</tr>`;
+      }
+      const span = blocks.reduce((t, b) => t + b.months.length, 0) + Math.max(0, blocks.length - 1);
+      const msg = st === 'running' ? '<span class="spinner" style="display:inline-block;width:14px;height:14px;vertical-align:middle"></span> Consultando…'
+        : st === 'pending' ? '<span class="footnote">En cola</span>'
+          : st === 'error' ? `<span style="color:var(--danger,#d5455f)">${e(it.monthly.error || 'No se pudo consultar.')}</span>`
+            : st === 'ready' ? '<span class="footnote">Sin datos de hotel en estos meses</span>' : '<span class="footnote">Sin consultar</span>';
+      return `<tr>${nameTd}<td colspan="${span}" style="font-size:12px">${msg}</td></tr>`;
+    }).join('');
+    const totCell = (m) => {
+      let el = 0; let im = 0;
+      r.items.forEach((it) => { const v = hotelMonthShare(it, m); if (v) { el += v.eligible; im += v.impressions; } });
+      if (!el) return '<td class="hm-cell hm-empty">—</td>';
+      return `<td class="hm-cell hm-total" style="background:${hotelShareColor(im / el)}" title="${fmtInt(im)} impresiones de ${fmtInt(el)} elegibles">${Math.round((im / el) * 100)}%</td>`;
+    };
+    const totalRow = anyDone ? `<tr class="hm-total-row"><td class="hm-name"><strong>Total de las cuentas marcadas</strong></td>${blocks.map((b, bi) => `${bi ? '<td class="hm-gap"></td>' : ''}${b.months.map(totCell).join('')}`).join('')}</tr>` : '';
+    table = `
+      ${stop}${progress}
+      <div class="card table-panel">
+        <div class="table-panel-head">
+          <h3>Cuota de impresiones por mes (% de las veces elegibles en que se muestra el anuncio)</h3>
+          <span style="display:inline-flex;gap:8px"><button class="btn-outline xs" data-action="hotel-rank-csv" ${anyDone ? '' : 'disabled'}>Descargar CSV</button><button class="btn-outline xs" data-action="hotel-rank-html" ${anyDone ? '' : 'disabled'}>Descargar HTML</button></span>
+        </div>
+        <div class="table-scroll"><table class="hotel-month-table">
+          <thead><tr><th rowspan="2" class="hm-name">Hotel</th>${head1}</tr><tr>${head2}</tr></thead>
+          <tbody>${rowsHtml}${totalRow}</tbody></table></div>
+        <p class="footnote" style="margin-top:10px">Cuota de impresiones = impresiones ÷ impresiones elegibles de todas las campañas de hotel de la cuenta en el mes. El total es sobre el conjunto (suma de impresiones ÷ suma de elegibles), no un promedio de porcentajes. Puede pasar de 100 % cuando Google cuenta más impresiones que elegibles. El color va de rojo (poca cuota) a verde (mucha). ${r.loadedMonthTo === nowYm || r.monthTo === nowYm ? 'El mes marcado con * está en curso y su dato es parcial. ' : ''}Pasa el cursor sobre una celda para ver las impresiones y las elegibles.</p>
+      </div>`;
+  } else if (stop || progress) {
+    table = `${stop}${progress}`;
+  }
+  return `
+    <div class="card control-panel align-end" style="flex-wrap:wrap;gap:16px 24px">${picker}</div>
+    ${settings}
+    ${hotelRankViewToggle()}
+    ${table}`;
 }
 
 function hotelRankOpen(id) {
@@ -9099,10 +9467,13 @@ function renderHotelRanking() {
       </div>`;
   }
 
+  if (r.view === 'monthly') return renderHotelMonthly(picker);
   const nPending = r.items.filter((i) => i.status === 'idle' || i.status === 'error').length;
   const anyDone = r.items.some((i) => i.status === 'ready');
-  const sortOpts = [['price_diff', 'Diferencia de precio (más caro primero)'], ['not_lowest_share', '% de impresiones donde no es el más barato'], ['cost', 'Gasto'], ['impressions', 'Impresiones']]
-    .map(([k, l]) => `<option value="${k}" ${r.sortBy === k ? 'selected' : ''}>${e(l)}</option>`).join('');
+  const sortOpts = (r.view === 'visibility'
+    ? [['share', 'Cuota de impresiones (la menor primero)'], ['missed', 'Impresiones perdidas'], ['eligible', 'Impresiones elegibles']]
+    : [['price_diff', 'Diferencia de precio (más caro primero)'], ['not_lowest_share', '% de impresiones donde no es el más barato'], ['cost', 'Gasto'], ['impressions', 'Impresiones']])
+    .map(([k, l]) => `<option value="${k}" ${(r.view === 'visibility' ? r.sortVis : r.sortBy) === k ? 'selected' : ''}>${e(l)}</option>`).join('');
   const settings = `
     <div class="card control-panel align-end" style="flex-wrap:wrap;gap:16px 24px">
       <h3 class="section-title" style="margin:0;width:100%">Periodo y orden</h3>
@@ -9126,6 +9497,7 @@ function renderHotelRanking() {
   const stop = r.stopMsg ? `<div class="error-panel" style="margin-bottom:14px"><strong>Se detuvo el ranking.</strong> ${e(r.stopMsg)} Las cuentas que faltan quedan sin consultar; puedes completarlas más tarde.</div>` : '';
 
   const withData = r.items.filter((i) => i.status === 'ready' && i.data && i.data.summary);
+  if (r.view === 'visibility') return renderHotelVisibility({ picker, settings, stop, progress, withData, anyDone });
   const count = (f) => withData.filter((i) => f(i.data.summary.price_diff)).length;
   const stat = (label, value, sub) => `<div class="card stat-card"><div class="stat-label">${label}</div><div class="stat-value">${value}</div>${sub ? `<div class="stat-sub">${sub}</div>` : ''}</div>`;
   const cards = r.items.some((i) => i.status === 'ready') ? `<div class="stat-grid">
@@ -9168,7 +9540,7 @@ function renderHotelRanking() {
     <div class="card table-panel">
       <div class="table-panel-head">
         <h3>Cuentas (${fmtInt(r.items.length)})${r.loadedFrom ? ` · ${e(r.loadedFrom)} a ${e(r.loadedTo)}` : ''}</h3>
-        <button class="btn-outline xs" data-action="hotel-rank-csv" ${anyDone ? '' : 'disabled'}>Descargar CSV</button>
+        <span style="display:inline-flex;gap:8px"><button class="btn-outline xs" data-action="hotel-rank-csv" ${anyDone ? '' : 'disabled'}>Descargar CSV</button><button class="btn-outline xs" data-action="hotel-rank-html" ${anyDone ? '' : 'disabled'}>Descargar HTML</button></span>
       </div>
       <div class="table-scroll"><table class="hotel-rank-table">
         <thead><tr><th>Cuenta</th><th style="text-align:right">Impresiones</th><th style="text-align:right" title="Promedio ponderado por impresiones frente al anunciante más barato; negativo = más barato">Diferencia de precio</th><th style="text-align:right" title="Impresiones donde otro anunciante tenía un precio más bajo, y cuánto más caro sale el hotel en ellas">No es el más barato</th><th style="text-align:right">Más barato o empatado</th><th style="text-align:right">Gasto</th><th style="text-align:right">Conv.</th><th>Veredicto</th><th></th></tr></thead>
@@ -9179,6 +9551,72 @@ function renderHotelRanking() {
   return `
     <div class="card control-panel align-end" style="flex-wrap:wrap;gap:16px 24px">${picker}</div>
     ${settings}
+    ${hotelRankViewToggle()}
+    ${table}`;
+}
+
+function hotelRankViewToggle() {
+  const v = state.hotel.rank.view;
+  return `<div class="seg-control" style="margin:0 0 16px;width:fit-content">
+    <button class="seg-btn ${v === 'price' ? 'active' : ''}" data-hotel-rank-view="price">Precio</button>
+    <button class="seg-btn ${v === 'visibility' ? 'active' : ''}" data-hotel-rank-view="visibility">Visibilidad (impresiones perdidas)</button>
+    <button class="seg-btn ${v === 'monthly' ? 'active' : ''}" data-hotel-rank-view="monthly">Cuota por mes</button></div>`;
+}
+
+function renderHotelVisibility({ picker, settings, stop, progress, withData, anyDone }) {
+  const r = state.hotel.rank;
+  const e = escapeHtml;
+  const sum = (f) => withData.reduce((t, i) => t + (f(i.data.summary) || 0), 0);
+  const elig = sum((x) => x.eligible);
+  const imp = sum((x) => x.impressions);
+  const missed = sum((x) => x.missed);
+  const haveSplit = withData.length && withData.every((i) => i.data.summary.missed_rank !== null && i.data.summary.missed_rank !== undefined);
+  const pctOf = (v) => (missed ? `${((v / missed) * 100).toFixed(0)} % de las perdidas` : '');
+  const stat = (label, value, sub) => `<div class="card stat-card"><div class="stat-label">${label}</div><div class="stat-value">${value}</div>${sub ? `<div class="stat-sub">${sub}</div>` : ''}</div>`;
+  const cards = withData.length ? `<div class="stat-grid">
+    ${stat('Cuentas con datos', fmtInt(withData.length), `de ${fmtInt(r.items.length)} marcadas`)}
+    ${stat('Cuota de impresiones', elig ? `${((imp / elig) * 100).toFixed(1)} %` : 'N/D', `${fmtInt(imp)} de ${fmtInt(elig)} elegibles`)}
+    ${stat('Impresiones perdidas', fmtInt(missed), 'elegibles que no se mostraron')}
+    ${haveSplit ? stat('Por ranking', fmtInt(sum((x) => x.missed_rank)), pctOf(sum((x) => x.missed_rank))) : ''}
+    ${haveSplit ? stat('Por presupuesto', fmtInt(sum((x) => x.missed_budget)), pctOf(sum((x) => x.missed_budget))) : ''}
+  </div>` : '';
+  const num = (v) => (v === null || v === undefined ? '<span class="footnote">—</span>' : fmtInt(v));
+  const cells = (x) => `<td style="text-align:right">${fmtInt(x.eligible)}</td><td style="text-align:right">${fmtInt(x.impressions)}</td>
+    <td style="text-align:right">${fmtInt(x.missed)}</td><td style="text-align:right">${num(x.missed_rank)}</td>
+    <td style="text-align:right">${num(x.missed_budget)}</td><td style="text-align:right">${num(x.missed_other)}</td>
+    <td style="text-align:right">${hotelVisShareBadge(x.impression_share)}</td>`;
+  const body = hotelRankSortedItems().map((it) => {
+    const d = it.data;
+    const code = hotelCodeFromName(it.name);
+    const nameCell = (open) => `<td style="min-width:200px"><button class="btn-link" data-hotel-rank-expand="${e(it.id)}" ${d && d.campaigns && d.campaigns.length ? '' : 'disabled'} style="text-align:left">${open === null ? '' : (open ? '▾ ' : '▸ ')}${e(code)}</button><div class="field-hint">${e(it.name)} · <span style="font-family:ui-monospace,monospace">${e(it.id)}</span></div></td>`;
+    const tail = `<td style="white-space:nowrap">${it.status === 'ready' && d && d.summary ? `<button class="btn-outline xs" data-hotel-rank-open="${e(it.id)}">Abrir</button> ` : ''}${r.running ? '' : `<button class="btn-link" data-hotel-rank-remove="${e(it.id)}" title="Quitar de la lista">×</button>`}</td>`;
+    if (it.status === 'ready' && d && d.summary) {
+      const open = r.expanded.includes(it.id);
+      const sub = open ? d.campaigns.map((c) => `<tr style="background:var(--gray-50)"><td style="padding-left:28px;font-size:12px">${e(c.campaign_name)}</td>${cells(c)}<td></td></tr>`).join('') : '';
+      return `<tr>${nameCell(open)}${cells(d.summary)}${tail}</tr>${sub}`;
+    }
+    const msg = it.status === 'running' ? '<span class="spinner" style="display:inline-block;width:14px;height:14px;vertical-align:middle"></span> Consultando…'
+      : it.status === 'pending' ? '<span class="footnote">En cola</span>'
+        : it.status === 'error' ? `<span style="color:var(--danger,#d5455f)">${e(it.error || 'No se pudo consultar.')}</span>`
+          : it.status === 'ready' ? '<span class="footnote">Sin campañas de hotel activas con impresiones en el periodo</span>' : '<span class="footnote">Sin consultar</span>';
+    return `<tr>${nameCell(null)}<td colspan="7" style="font-size:12px">${msg}</td>${tail}</tr>`;
+  }).join('');
+  const table = r.items.length ? `
+    ${stop}${progress}${cards}
+    <div class="card table-panel">
+      <div class="table-panel-head">
+        <h3>Cuentas (${fmtInt(r.items.length)})${r.loadedFrom ? ` · ${e(r.loadedFrom)} a ${e(r.loadedTo)}` : ''}</h3>
+        <span style="display:inline-flex;gap:8px"><button class="btn-outline xs" data-action="hotel-rank-csv" ${anyDone ? '' : 'disabled'}>Descargar CSV</button><button class="btn-outline xs" data-action="hotel-rank-html" ${anyDone ? '' : 'disabled'}>Descargar HTML</button></span>
+      </div>
+      <div class="table-scroll"><table class="hotel-rank-table">
+        <thead><tr><th>Hotel (código)</th><th style="text-align:right" title="Veces que una búsqueda pudo mostrar el anuncio del hotel">Impresiones elegibles</th><th style="text-align:right">Impresiones</th><th style="text-align:right" title="Elegibles menos impresiones">Perdidas</th><th style="text-align:right" title="Perdidas porque el anuncio no ganó la subasta (puja, tarifas o disponibilidad)">Por ranking</th><th style="text-align:right" title="Perdidas porque el presupuesto diario se agotó">Por presupuesto</th><th style="text-align:right" title="Lo que no se explica por ranking ni presupuesto">Otras</th><th style="text-align:right" title="Impresiones ÷ elegibles">Cuota de impresiones</th><th></th></tr></thead>
+        <tbody>${body}</tbody></table></div>
+      <p class="footnote" style="margin-top:10px">Impresiones perdidas = elegibles − impresiones. Google informa la cuota perdida por ranking y por presupuesto de cada campaña; aquí se convierten en impresiones (cuota × elegibles) y lo que sobra queda en «Otras». La cuota de impresiones (impresiones ÷ elegibles) va en rojo por debajo de 50 %, en ámbar hasta 75 % y en verde desde ahí; son cortes orientativos nuestros, no de Google. Pulsa el código de una cuenta para ver sus campañas.</p>
+    </div>` : '';
+  return `
+    <div class="card control-panel align-end" style="flex-wrap:wrap;gap:16px 24px">${picker}</div>
+    ${settings}
+    ${hotelRankViewToggle()}
     ${table}`;
 }
 
@@ -15880,7 +16318,14 @@ function bindEvents() {
   const hotelRankSearch = document.getElementById('hotel-rank-search');
   if (hotelRankSearch) hotelRankSearch.addEventListener('input', (e) => { state.hotel.rank.search = e.target.value; render(); hotelRefocus('hotel-rank-search'); });
   const hotelRankSort = document.getElementById('hotel-rank-sort');
-  if (hotelRankSort) hotelRankSort.addEventListener('change', (e) => { state.hotel.rank.sortBy = e.target.value; render(); });
+  if (hotelRankSort) hotelRankSort.addEventListener('change', (e) => { const r = state.hotel.rank; if (r.view === 'monthly') r.sortMonthly = e.target.value; else if (r.view === 'visibility') r.sortVis = e.target.value; else r.sortBy = e.target.value; render(); });
+  const hotelMonthFrom = document.getElementById('hotel-rank-month-from');
+  if (hotelMonthFrom) hotelMonthFrom.addEventListener('change', (e) => { state.hotel.rank.monthFrom = e.target.value; });
+  const hotelMonthTo = document.getElementById('hotel-rank-month-to');
+  if (hotelMonthTo) hotelMonthTo.addEventListener('change', (e) => { state.hotel.rank.monthTo = e.target.value; });
+  const hotelCompare = document.getElementById('hotel-rank-compare');
+  if (hotelCompare) hotelCompare.addEventListener('change', (e) => { state.hotel.rank.compareYear = e.target.checked; });
+  document.querySelectorAll('[data-hotel-rank-view]').forEach((btn) => btn.addEventListener('click', () => { state.hotel.rank.view = btn.dataset.hotelRankView; render(); }));
   document.querySelectorAll('[data-hotel-rank-toggle]').forEach((el) => el.addEventListener('change', () => {
     const r = state.hotel.rank;
     const id = el.dataset.hotelRankToggle;
@@ -16791,13 +17236,15 @@ function handleAction(action) {
     case 'iamax-created-csv': downloadIaMaxCreatedCsv(); break;
     case 'iamax-tab-cruce': state.iamax.tab = 'cruce'; render(); break;
     case 'hotel-api-load-accounts': loadHotelGoogleAdsAccounts(); break;
-    case 'hotel-rank-run': runHotelRank(false); break;
-    case 'hotel-rank-retry': runHotelRank(true); break;
+    case 'hotel-rank-run': if (state.hotel.rank.view === 'monthly') runHotelMonthly(false); else runHotelRank(false); break;
+    case 'hotel-rank-retry': if (state.hotel.rank.view === 'monthly') runHotelMonthly(true); else runHotelRank(true); break;
     case 'hotel-rank-cancel': state.hotel.rank.cancel = true; render(); break;
     case 'hotel-rank-clear': state.hotel.rank.items = []; state.hotel.rank.notice = ''; render(); break;
     case 'hotel-rank-addvisible': { hotelRankVisibleAccounts().forEach((acc) => hotelRankAdd(acc)); state.hotel.rank.notice = ''; render(); break; }
     case 'hotel-rank-addwatched': hotelRankAddWatched(); break;
-    case 'hotel-rank-csv': downloadHotelRankCsv(); break;
+    case 'hotel-rank-html': downloadHotelRankHtml(); break;
+    case 'hotel-single-html': downloadHotelSingleHtml(); break;
+    case 'hotel-rank-csv': if (state.hotel.rank.view === 'monthly') downloadHotelMonthlyCsv(); else if (state.hotel.rank.view === 'visibility') downloadHotelVisCsv(); else downloadHotelRankCsv(); break;
     case 'hotel-mcc-load': loadHotelMccGroups(); break;
     case 'hotel-mcc-clear': clearHotelMccFilter(); break;
     case 'hotel-api-fetch': fetchHotelCampaigns(); break;
