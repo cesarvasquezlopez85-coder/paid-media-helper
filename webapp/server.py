@@ -2407,7 +2407,7 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(429, {"error": f"Alcanzaste el límite de {INVEST_RATE_LIMIT[0]} cuentas por hora en «Dónde invertir»."})
             return
         if not google_ads_client.is_configured():
-            self._send_json(200, {**google_ads_client.simulated_campaign_windows(customer_id or "0"), "simulated": True})
+            self._send_json(200, {**google_ads_client.simulated_campaign_windows(customer_id or "0"), "pacing": google_ads_client.simulated_account_pacing(customer_id or "0"), "simulated": True})
             return
         if not customer_id.isdigit():
             self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
@@ -2416,7 +2416,14 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
             return
         try:
-            self._send_json(200, {**google_ads_client.fetch_campaign_windows(customer_id), "simulated": False})
+            data = google_ads_client.fetch_campaign_windows(customer_id)
+            # El ritmo del mes es un dato de apoyo: si falla, la vista sigue funcionando sin él.
+            try:
+                pacing = google_ads_client.fetch_account_pacing_light(customer_id)
+            except Exception as e:  # noqa: BLE001
+                print(f"[invest-pacing] customer_id={customer_id} {' '.join(str(e).split())[:200]}", flush=True)
+                pacing = None
+            self._send_json(200, {**data, "pacing": pacing, "simulated": False})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)
 

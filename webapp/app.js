@@ -14175,6 +14175,60 @@ async function runCampanasInvest(onlyPending) {
   render();
 }
 
+// ---- Ritmo del mes de la cuenta (mismas cifras y criterio que Ritmo de consumo; solo se muestra, no cambia los veredictos) ----
+function investPacing(customerId) {
+  const d = investAccountData(customerId);
+  if (!d || !d.pacing) return null;
+  return pacingComputed(d.pacing);
+}
+
+function investPacingBadge(c) {
+  if (!c) return '<span class="delta-badge neutral">N/D</span>';
+  if (!c.hasTarget) return '<span class="delta-badge neutral">Sin objetivo en Billing</span>';
+  return pacingStatusBadge(c.deviationPct, false);
+}
+
+// Aviso para las filas "Subir presupuesto" (y para el panel de ajuste): sube dinero a una cuenta que ya va pasada de su mes, o
+// le recuerda que hay margen si va por abajo. Devuelve {text, kind: 'warn'|'ok'} o null.
+function investPacingNote(customerId, verdictKey) {
+  const c = investPacing(customerId);
+  if (!c || !c.hasTarget) return null;
+  if (c.budgetExceeded) return { kind: 'warn', text: 'La cuenta ya superó su objetivo del mes: conviene no subir sin revisar el presupuesto de cuenta.' };
+  if (c.deviationPct > PACING_TOLERANCE) return { kind: 'warn', text: `La cuenta va por arriba del ritmo del mes (${pacingDeviationLabel(c.deviationPct)}): revisa antes de subir.` };
+  if (verdictKey === 'raise' && c.deviationPct < -PACING_TOLERANCE) return { kind: 'ok', text: `La cuenta va por abajo del ritmo del mes (${pacingDeviationLabel(c.deviationPct)}): hay margen para subir.` };
+  return null;
+}
+
+function investPacingCellHtml(customerId) {
+  const c = investPacing(customerId);
+  if (!c) return '<td>N/D</td>';
+  if (!c.hasTarget) return `<td>${investPacingBadge(c)}</td>`;
+  return `<td>${investPacingBadge(c)}<div class="field-hint" style="margin-top:4px">${fmtPct0(c.consumedPct)} consumido · ${fmtPct0(c.expectedPct)} esperado</div></td>`;
+}
+
+function investPacingCardHtml(accountIds, nameOf, currencyOf) {
+  const list = accountIds.filter((id) => investAccountData(id)).map((id) => {
+    const d = investAccountData(id);
+    return { id, name: nameOf(id), cur: currencyOf(id), raw: d.pacing, c: d.pacing ? pacingComputed(d.pacing) : null };
+  });
+  if (!list.length) return '';
+  list.sort((a, b) => (b.c && b.c.hasTarget ? b.c.deviationPct : -Infinity) - (a.c && a.c.hasTarget ? a.c.deviationPct : -Infinity) || a.name.localeCompare(b.name));
+  const e = escapeHtml;
+  const body = list.map((a) => {
+    if (!a.c) return `<tr><td>${e(a.name)}</td><td colspan="6" class="footnote">No se pudo traer el ritmo de esta cuenta.</td></tr>`;
+    if (!a.c.hasTarget) return `<tr><td>${e(a.name)}</td><td>${campanasMoney(a.raw.spend_mtd, a.cur)}</td><td colspan="5">${investPacingBadge(a.c)}</td></tr>`;
+    return `<tr><td>${e(a.name)}</td><td>${campanasMoney(a.raw.spend_mtd, a.cur)}</td><td>${campanasMoney(a.raw.monthly_target, a.cur)}</td>
+      <td><div style="min-width:120px"><strong style="color:${pacingSemaforoColor(a.c.deviationPct)}">${fmtPct0(a.c.consumedPct)}</strong>${pacingProgressBar(a.c)}</div></td>
+      <td>${fmtPct0(a.c.expectedPct)}</td><td>${investPacingBadge(a.c)} <span class="field-hint">${pacingDeviationLabel(a.c.deviationPct)}</span></td>
+      <td>${a.c.budgetExceeded ? 'Objetivo superado' : campanasMoney(a.c.recommendedDaily, a.cur)}</td></tr>`;
+  }).join('');
+  return `<div class="card table-panel">
+    <div class="table-panel-head"><h3>Ritmo del mes de las cuentas (${fmtInt(list.length)})</h3></div>
+    <div class="table-scroll"><table><thead><tr><th>Cuenta</th><th>Gasto del mes</th><th>Objetivo del mes</th><th>% consumido</th><th>% esperado (hasta ayer)</th><th>Estado</th><th title="Lo que queda del objetivo mensual ÷ los días que quedan del mes, hoy incluido">Inversión diaria recomendada</th></tr></thead><tbody>${body}</tbody></table></div>
+    <p class="footnote" style="margin-top:10px">Mismas cifras y criterio que Ritmo de consumo: el objetivo sale del presupuesto de cuenta activo en Billing, el gasto es el del mes en curso y lo esperado se calcula hasta ayer. "En ritmo" = dentro de ±${(PACING_TOLERANCE * 100).toFixed(0)} % de lo esperado. Solo informa: no cambia los veredictos, pero avisa en las filas "Subir presupuesto" de una cuenta que ya va por arriba del ritmo.</p>
+  </div>`;
+}
+
 // ---- Ajuste de presupuesto desde la fila (escribe de verdad en Google Ads, con vista previa y confirmación) ----
 const INVEST_BUDGET_MAX = 0.30;   // igual que BUDGET_MAX_CHANGE del servidor: ±30 % por vez
 const INVEST_BUDGET_SUGGEST = 0.15;
@@ -14266,6 +14320,7 @@ function investBudgetPanelHtml(x, cols) {
         <button class="btn-outline xs" data-action="camp-budget-cancel" ${busy ? 'disabled' : ''}>Cancelar</button>
       </div>
       <p class="field-hint" style="margin:6px 0 0">Entre ${campanasMoney(b.min, r.currency)} y ${campanasMoney(b.max, r.currency)} (±30 % por vez). No se escribe nada hasta que confirmes la vista previa.</p>
+      ${(() => { const n = x.verdict.key === 'reduce' ? null : investPacingNote(r.customer_id, x.verdict.key); return n && n.kind === 'warn' ? `<div class="error-panel" style="margin-top:8px;font-size:12px">⚠ ${e(n.text)}</div>` : ''; })()}
       ${adj.error ? `<div class="error-panel" style="margin-top:8px;font-size:12px">${e(adj.error)}</div>` : ''}`;
     if (adj.status === 'applying') inner = '<p class="footnote" style="margin:0">Aplicando…</p>';
   }
@@ -14280,9 +14335,10 @@ function investTone(ratio) {
 function investCardsHtml(list) {
   const ready = list.filter((x) => x.ready);
   const n = (k) => ready.filter((x) => x.verdict.key === k).length;
+  const raiseWarn = ready.filter((x) => x.verdict.key === 'raise' && (investPacingNote(x.row.customer_id, 'raise') || {}).kind === 'warn').length;
   const card = (k, sub) => `<div class="card stat-card"><div class="stat-label">${INVEST_VERDICTS[k].label}</div><div class="stat-value">${fmtInt(n(k))}</div><div class="stat-sub">${sub}</div></div>`;
   return `<div class="stat-grid">
-    ${card('raise', 'buen ROAS sostenido y el presupuesto las frena')}
+    ${card('raise', `buen ROAS sostenido y el presupuesto las frena${raiseWarn ? ` · ⚠ ${fmtInt(raiseWarn)} en cuentas por arriba del ritmo del mes` : ''}`)}
     ${card('keep', 'sin una razón clara para mover dinero')}
     ${card('reduce', 'ROAS flojo o gasto sin conversiones')}
     ${card('nodata', 'muy pocas conversiones para decidir')}
@@ -14294,7 +14350,7 @@ const INVEST_GROUP = 'border-left:2px solid var(--color-border,#e5e7eb)';
 function investTableHtml(list, plain) {
   const e = escapeHtml;
   const head = `<thead><tr>
-    <th style="min-width:260px">Campaña</th><th style="min-width:230px">Veredicto</th><th>Gasto 30 d</th>
+    <th style="min-width:260px">Campaña</th><th style="min-width:230px">Veredicto</th><th title="Cómo va el mes de la cuenta frente a su objetivo de Billing (mismo criterio que Ritmo de consumo)">Ritmo del mes (cuenta)</th><th>Gasto 30 d</th>
     <th style="${INVEST_GROUP}">Conv. 7 d</th><th>Conv. 14 d</th><th>Conv. 30 d</th>
     <th style="${INVEST_GROUP}">ROAS 7 d</th><th>ROAS 14 d</th><th>ROAS 30 d</th>
     <th style="${INVEST_GROUP}" title="Gasto ÷ valor de conversión: lo inverso del ROAS; menor es mejor">CPA % 7 d</th><th>CPA % 14 d</th><th>CPA % 30 d</th>
@@ -14305,24 +14361,26 @@ function investTableHtml(list, plain) {
   const body = list.map((x) => {
     const r = x.row;
     const nameTd = `<td ${plain ? '' : `data-camp-open="${e(r.key)}" style="cursor:pointer" title="Ver las gráficas de esta campaña"`}><strong>${e(r.campaign_name)}</strong><div class="field-hint">${e(campanasHotelOf(r))} · ${e(campanasTypeLabel(r.channel_type))}</div></td>`;
-    if (!x.ready) return `<tr>${nameTd}<td colspan="13" class="footnote">Sin calcular: ${e(r.account_name)}${state.campanas.invest.errors[r.customer_id] ? ` — ${e(state.campanas.invest.errors[r.customer_id])}` : ''}</td></tr>`;
+    if (!x.ready) return `<tr>${nameTd}<td colspan="14" class="footnote">Sin calcular: ${e(r.account_name)}${state.campanas.invest.errors[r.customer_id] ? ` — ${e(state.campanas.invest.errors[r.customer_id])}` : ''}</td></tr>`;
     const v = INVEST_VERDICTS[x.verdict.key];
+    const pacingNote = x.verdict.key === 'raise' ? investPacingNote(r.customer_id, 'raise') : null;
     const roasCell = (m, first) => `<td style="${first ? `${INVEST_GROUP};` : ''}${m.roas != null && x.bench ? investTone(m.roas / x.bench) : ''}">${m.roas == null ? '—' : `${m.roas.toFixed(2)}×`}</td>`;
     const cpaCell = (m, first) => `<td style="${first ? `${INVEST_GROUP};` : ''}${m.roas != null && x.bench ? investTone(m.roas / x.bench) : ''}">${m.cpa_pct == null ? '—' : `${m.cpa_pct.toFixed(1)} %`}</td>`;
     const w = x.w;
     return `<tr>${nameTd}
-      <td><span class="delta-badge ${v.cls}">${v.label}</span><div class="field-hint" style="margin-top:4px;max-width:300px;white-space:normal">${e(x.verdict.reason)}</div></td>
+      <td><span class="delta-badge ${v.cls}">${v.label}</span><div class="field-hint" style="margin-top:4px;max-width:300px;white-space:normal">${e(x.verdict.reason)}</div>${pacingNote ? `<div style="margin-top:4px;max-width:300px;white-space:normal;font-size:12px;font-weight:600;color:${pacingNote.kind === 'warn' ? 'var(--danger,#b91c1c)' : 'var(--ok-text,#15803d)'}">${pacingNote.kind === 'warn' ? '⚠ ' : ''}${e(pacingNote.text)}</div>` : ''}</td>
+      ${investPacingCellHtml(r.customer_id)}
       <td>${campanasMoney(w[30].cost, r.currency)}</td>
       <td style="${INVEST_GROUP}">${w[7].conversions ? w[7].conversions.toFixed(w[7].conversions % 1 ? 1 : 0) : '0'}</td>${conv(w[14])}${conv(w[30])}
       ${roasCell(w[7], true)}${roasCell(w[14])}${roasCell(w[30])}
       ${cpaCell(w[7], true)}${cpaCell(w[14])}${cpaCell(w[30])}
       <td style="${INVEST_GROUP}">${w[30].lost_is_budget == null ? 'N/D' : `${(w[30].lost_is_budget * 100).toFixed(0)} %`}</td>
-      ${investBudgetCell(x, plain).replace('<td>', `<td style="${INVEST_GROUP}">`)}</tr>${!plain && adjKey === r.key && r.budget > 0 ? investBudgetPanelHtml(x, 14) : ''}`;
-  }).join('') || '<tr><td colspan="14" class="footnote">Ninguna campaña coincide con los filtros.</td></tr>';
+      ${investBudgetCell(x, plain).replace('<td>', `<td style="${INVEST_GROUP}">`)}</tr>${!plain && adjKey === r.key && r.budget > 0 ? investBudgetPanelHtml(x, 15) : ''}`;
+  }).join('') || '<tr><td colspan="15" class="footnote">Ninguna campaña coincide con los filtros.</td></tr>';
   return `<div class="table-scroll sticky-head"><table>${head}<tbody>${body}</tbody></table></div>`;
 }
 
-const INVEST_NOTE = `Cómo se decide: el ROAS de cada campaña (valor de conversión ÷ gasto) se compara con el de su cuenta en los últimos 30 días, sumando todas las campañas activas de esa cuenta; por eso solo se comparan campañas de la misma cuenta. El CPA % es gasto ÷ valor de conversión (lo inverso del ROAS: menor es mejor). Los colores de ROAS y CPA % van en verde si igualan o superan el de la cuenta, en ámbar hasta el 70 % y en rojo por debajo. <strong>Subir presupuesto:</strong> ${INVEST_MIN_CONV} o más conversiones en 30 días, ROAS igual o mayor que el de la cuenta a 30 días y al menos el 90 % a 7 y a 14 días, y el presupuesto frena a la campaña (pierde el 10 % o más de las impresiones por presupuesto, o gasta el 90 % o más de su presupuesto diario). <strong>Revisar o bajar:</strong> ROAS por debajo del 70 % del de la cuenta, o 30 días sin conversiones gastando el 5 % o más de la cuenta. <strong>Pocos datos:</strong> menos de ${INVEST_MIN_CONV} conversiones en 30 días, sin gasto, o conversiones sin valor. Las campañas de marca están incluidas. Las ventanas terminan ayer. Es una guía para decidir. El botón <strong>Ajustar</strong> de cada fila cambia el presupuesto diario de esa campaña en Google Ads, solo después de una vista previa y de tu confirmación, hasta ±30 % por vez; las campañas con presupuesto compartido no se pueden ajustar desde aquí.`;
+const INVEST_NOTE = `Cómo se decide: el ROAS de cada campaña (valor de conversión ÷ gasto) se compara con el de su cuenta en los últimos 30 días, sumando todas las campañas activas de esa cuenta; por eso solo se comparan campañas de la misma cuenta. El CPA % es gasto ÷ valor de conversión (lo inverso del ROAS: menor es mejor). Los colores de ROAS y CPA % van en verde si igualan o superan el de la cuenta, en ámbar hasta el 70 % y en rojo por debajo. <strong>Subir presupuesto:</strong> ${INVEST_MIN_CONV} o más conversiones en 30 días, ROAS igual o mayor que el de la cuenta a 30 días y al menos el 90 % a 7 y a 14 días, y el presupuesto frena a la campaña (pierde el 10 % o más de las impresiones por presupuesto, o gasta el 90 % o más de su presupuesto diario). <strong>Revisar o bajar:</strong> ROAS por debajo del 70 % del de la cuenta, o 30 días sin conversiones gastando el 5 % o más de la cuenta. <strong>Pocos datos:</strong> menos de ${INVEST_MIN_CONV} conversiones en 30 días, sin gasto, o conversiones sin valor. El ritmo del mes de la cuenta (el mismo de Ritmo de consumo) se muestra aparte y avisa cuando un "Subir presupuesto" cae en una cuenta que ya va por arriba del ritmo; no cambia el veredicto. Las campañas de marca están incluidas. Las ventanas terminan ayer. Es una guía para decidir. El botón <strong>Ajustar</strong> de cada fila cambia el presupuesto diario de esa campaña en Google Ads, solo después de una vista previa y de tu confirmación, hasta ±30 % por vez; las campañas con presupuesto compartido no se pueden ajustar desde aquí.`;
 
 function investFilterSummary() {
   const c = state.campanas;
@@ -14352,12 +14410,13 @@ function downloadInvestCsv() {
   const f1 = (v) => (v == null ? '' : v.toFixed(1));
   const f2 = (v) => (v == null ? '' : v.toFixed(2));
   const data = [['Campaña', 'Cuenta', 'ID cuenta', 'ID campaña', 'Tipo', 'Moneda', 'Veredicto', 'Motivo', 'Gasto 30 d',
-    'Conv. 7 d', 'Conv. 14 d', 'Conv. 30 d', 'ROAS 7 d', 'ROAS 14 d', 'ROAS 30 d', 'CPA % 7 d', 'CPA % 14 d', 'CPA % 30 d', 'Pérdida por presupuesto 30 d (%)', 'ROAS de la cuenta 30 d', 'Presupuesto diario']];
+    'Conv. 7 d', 'Conv. 14 d', 'Conv. 30 d', 'ROAS 7 d', 'ROAS 14 d', 'ROAS 30 d', 'CPA % 7 d', 'CPA % 14 d', 'CPA % 30 d', 'Pérdida por presupuesto 30 d (%)', 'ROAS de la cuenta 30 d', 'Presupuesto diario', 'Ritmo del mes de la cuenta', '% del objetivo mensual consumido', '% esperado hasta ayer']];
   rows.forEach((x) => {
     const r = x.row; const w = x.w;
     data.push([r.campaign_name, r.account_name, r.customer_id, r.campaign_id, campanasTypeLabel(r.channel_type), r.currency, INVEST_VERDICTS[x.verdict.key].label, x.verdict.reason, f2(w[30].cost),
       f1(w[7].conversions), f1(w[14].conversions), f1(w[30].conversions), f2(w[7].roas), f2(w[14].roas), f2(w[30].roas), f1(w[7].cpa_pct), f1(w[14].cpa_pct), f1(w[30].cpa_pct),
-      w[30].lost_is_budget == null ? '' : (w[30].lost_is_budget * 100).toFixed(0), f2(x.bench), r.budget == null ? '' : f2(r.budget)]);
+      w[30].lost_is_budget == null ? '' : (w[30].lost_is_budget * 100).toFixed(0), f2(x.bench), r.budget == null ? '' : f2(r.budget),
+      ...(() => { const c = investPacing(r.customer_id); if (!c) return ['N/D', '', '']; if (!c.hasTarget) return ['Sin objetivo en Billing', '', '']; return [c.deviationPct > PACING_TOLERANCE ? 'Por arriba del ritmo' : (c.deviationPct < -PACING_TOLERANCE ? 'Por abajo del ritmo' : 'En ritmo'), (c.consumedPct * 100).toFixed(0), (c.expectedPct * 100).toFixed(0)]; })()]);
   });
   engine.downloadCsv(`campanas_donde-invertir_${new Date().toISOString().slice(0, 10)}.csv`, data);
 }
@@ -14375,6 +14434,7 @@ async function downloadInvestHtml() {
     <p class="meta">${investFilterSummary().map(escapeHtml).join(' · ')}</p>
     ${c.simulated ? '<p class="meta"><strong>Datos de ejemplo (modo simulado).</strong></p>' : ''}
     <div style="margin-top:14px">${investCardsHtml(list)}</div>
+    <div style="margin-top:16px">${investPacingCardHtml([...new Set(list.map((x) => x.row.customer_id))], (id) => (list.find((x) => x.row.customer_id === id) || { row: {} }).row.account_name || id, (id) => (list.find((x) => x.row.customer_id === id) || { row: {} }).row.currency || '')}</div>
     <div class="card table-panel" style="margin-top:16px">${investTableHtml(list, true)}<p class="footnote" style="margin-top:10px">${INVEST_NOTE}</p></div>`;
   downloadTextFile(await campanasHtmlDocument('Campañas · Dónde invertir', campanasStaticHtml(body), true), `campanas_donde-invertir_${today}.html`, 'text/html');
 }
@@ -14421,7 +14481,9 @@ function renderCampanasInvest() {
       <div class="field"><label>Ordenar por</label><select id="camp-invest-sort" style="width:280px">${Object.entries(INVEST_SORT_LABELS).map(([k, l]) => opt(k, l, inv.sortBy)).join('')}</select></div>
       <div class="field"><label>Orden</label><select id="camp-invest-dir" style="width:170px">${opt('asc', 'De menor a mayor', inv.dir)}${opt('desc', 'De mayor a menor', inv.dir)}</select></div>
     </div>`;
+  const currencyOf = (id) => { const r = base.find((x) => x.customer_id === id); return r ? r.currency : ''; };
   return `${controls}${stop}${errHtml}${sortBar}${investCardsHtml(all)}
+    ${investPacingCardHtml(accounts, nameOf, currencyOf)}
     <div class="card table-panel">
       <div class="table-panel-head"><h3>Dónde invertir (${fmtInt(list.length)} campañas activas) <span class="field-hint" style="font-weight:400">· haz clic en una campaña para ver sus gráficas</span></h3>
         <span style="display:inline-flex;gap:8px"><button class="btn-outline xs" data-action="camp-invest-csv" ${list.some((x) => x.ready) ? '' : 'disabled'}>Descargar CSV</button><button class="btn-outline xs" data-action="camp-invest-html" ${list.some((x) => x.ready) ? '' : 'disabled'}>Descargar HTML</button></span></div>

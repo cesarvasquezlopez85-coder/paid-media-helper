@@ -1435,6 +1435,30 @@ def _audience_ref(crit):
     return None
 
 
+def fetch_account_pacing_light(customer_id):
+    """Ritmo del mes en curso de una cuenta, con las mismas cifras que Ritmo de consumo (gasto del mes de las campañas no
+    eliminadas y objetivo de Billing > Presupuestos de cuenta), pero en dos consultas livianas: sin traer las filas completas
+    de campañas. Devuelve la misma forma que fetch_account_pacing para un solo mes."""
+    today = datetime.date.today()
+    month_start = today.replace(day=1)
+    end_of_today = f"{today.isoformat()} 23:59:59"
+    spend = 0.0
+    for r in _search(customer_id, f"""
+        SELECT campaign.id, metrics.cost_micros
+        FROM campaign
+        WHERE segments.date BETWEEN '{month_start.isoformat()}' AND '{today.isoformat()}'
+          AND campaign.status != 'REMOVED'
+    """):
+        spend += _micros_to_units(_int_or_none(r.get("metrics", {}).get("costMicros"))) or 0
+    return {
+        "spend_mtd": spend,
+        "monthly_target": _account_budget_target(_account_budget_rows(customer_id, end_of_today, None), end_of_today),
+        "days_elapsed": today.day,
+        "days_in_month": calendar.monthrange(today.year, today.month)[1],
+        "is_complete": False,
+    }
+
+
 def fetch_campaign_windows(customer_id, windows=(7, 14, 30)):
     """Para la vista «Dónde invertir» de Campañas: las métricas de todas las campañas de la cuenta en las ventanas de
     7, 14 y 30 días que terminan ayer (días completos). Por ventana son dos consultas, como en fetch_campaigns_overview:
