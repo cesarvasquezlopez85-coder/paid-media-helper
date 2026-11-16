@@ -199,6 +199,9 @@ AUDIT_RATE_LIMIT = (10, 3600)
 # navegador las pide una por una, así que el tope por hora es mayor, pero sigue siendo por usuario.
 _audit_batch_limiter = RateLimiter()
 AUDIT_BATCH_RATE_LIMIT = (40, 3600)
+# Campañas > Dónde invertir: una petición de solo lectura por cuenta (seis consultas a Google), hasta 200 cuentas por hora y usuario.
+_invest_limiter = RateLimiter()
+INVEST_RATE_LIMIT = (200, 3600)
 # Ranking de precio de Hoteles: una consulta de solo lectura por cuenta, hasta 150 cuentas por hora y usuario.
 _hotel_rank_limiter = RateLimiter()
 HOTEL_RANK_RATE_LIMIT = (150, 3600)
@@ -443,6 +446,20 @@ def init_db():
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS campaign_budget_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at REAL NOT NULL,
+                user_id INTEGER,
+                customer_id TEXT NOT NULL,
+                campaign_id TEXT NOT NULL,
+                campaign_name TEXT,
+                old_budget REAL,
+                new_budget REAL NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS campaign_status_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 created_at REAL NOT NULL,
@@ -602,6 +619,19 @@ def store_neg_upload(user_id, customer_id, origen, created_items):
         )
         conn.commit()
         return upload_id
+    finally:
+        conn.close()
+
+
+def store_campaign_budget_change(user_id, customer_id, campaign_id, campaign_name, old_budget, new_budget):
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO campaign_budget_log (created_at, user_id, customer_id, campaign_id, campaign_name, old_budget, new_budget) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (time.time(), user_id, str(customer_id), str(campaign_id), (campaign_name or "")[:200], old_budget, new_budget),
+        )
+        conn.commit()
     finally:
         conn.close()
 
@@ -783,6 +813,12 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_super_admin_json():
                 return
             self._handle_google_ads_campaigns_overview(parse_qs(parsed.query))
+            return
+
+        if path == "/api/google-ads/campaigns-windows":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_campaigns_windows(parse_qs(parsed.query))
             return
 
         if path == "/api/google-ads/campaign-daily":
@@ -990,6 +1026,10 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_super_admin_json():
                 return
             self._handle_google_ads_campaign_status(payload)
+        elif path == "/api/google-ads/campaign-budget":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_campaign_budget(payload)
         elif path == "/api/google-ads/recommendation-subscriptions":
             # Pausar o reactivar recomendaciones automáticas desde la Auditoría: para todos los usuarios con sesión
             # (cada cuenta valida el acceso del usuario).
@@ -2356,6 +2396,30 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)
 
+    def _handle_google_ads_campaigns_windows(self, query):
+        # Campañas > Dónde invertir: las ventanas de 7, 14 y 30 días de todas las campañas de una cuenta (solo lectura).
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not _invest_limiter.allow(f"user:{user['id']}", *INVEST_RATE_LIMIT):
+            self._send_json(429, {"error": f"Alcanzaste el límite de {INVEST_RATE_LIMIT[0]} cuentas por hora en «Dónde invertir»."})
+            return
+        if not google_ads_client.is_configured():
+            self._send_json(200, {**google_ads_client.simulated_campaign_windows(customer_id or "0"), "simulated": True})
+            return
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+        try:
+            self._send_json(200, {**google_ads_client.fetch_campaign_windows(customer_id), "simulated": False})
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+
     def _handle_google_ads_campaign_daily(self, query):
         # Detalle de una campaña en Campañas: la serie día a día para sus gráficas.
         customer_id = (query.get("customer_id") or [""])[0].strip()
@@ -2571,6 +2635,62 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(200, {**data, "simulated": False, "currency": google_ads_client.fetch_customer_currency(customer_id)})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             self._send_google_ads_error(e)
+
+    def _handle_google_ads_campaign_budget(self, payload):
+        # Sube o baja el presupuesto diario de UNA campaña desde Campañas > Dónde invertir. Escribe de verdad en Google Ads cuando
+        # validate_only es false. El servidor relee el presupuesto actual, rechaza los compartidos y limita el cambio a ±30 %.
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not _write_limiter.allow(f"user:{user['id']}", *WRITE_RATE_LIMIT):
+            self._send_json(429, {"error": "Demasiadas escrituras seguidas. Espera un minuto y vuelve a intentar."})
+            return
+        customer_id = str(payload.get("customer_id") or "").strip()
+        campaign_id = str(payload.get("campaign_id") or "").strip()
+        validate_only = payload.get("validate_only", True) is not False
+        try:
+            new_budget = float(payload.get("new_daily_budget"))
+        except (TypeError, ValueError):
+            self._send_json(400, {"error": "new_daily_budget debe ser un número."})
+            return
+        expected = payload.get("expected_current_budget")
+        try:
+            expected = float(expected) if expected is not None else None
+        except (TypeError, ValueError):
+            expected = None
+        if not campaign_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido campaign_id."})
+            return
+
+        if not google_ads_client.is_configured():
+            try:
+                self._send_json(200, google_ads_client.simulated_adjust_campaign_budget(campaign_id, new_budget, validate_only, expected))
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+            return
+
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+
+        try:
+            result = google_ads_client.adjust_campaign_budget(customer_id, campaign_id, new_budget, validate_only, expected)
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+            return
+        if not validate_only:
+            try:
+                store_campaign_budget_change(user["id"], customer_id, campaign_id, result.get("campaign_name"), result.get("old_daily_budget"), new_budget)
+            except Exception as e:  # noqa: BLE001 — el cambio ya quedó en Google Ads; un fallo del registro no debe ocultarlo
+                print(f"[campaign-budget-log] {e}", flush=True)
+        self._send_json(200, result)
 
     def _handle_google_ads_campaign_status(self, payload):
         # Pausa o activa una campaña. Escribe de verdad en Google Ads cuando validate_only es false.

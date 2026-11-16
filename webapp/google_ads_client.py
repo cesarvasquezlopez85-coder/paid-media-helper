@@ -638,6 +638,74 @@ def update_campaign_daily_budget(customer_id, budget_resource_name, new_daily_bu
     return {"validate_only": validate_only, "applied": not validate_only, "new_daily_budget": new_daily_budget}
 
 
+BUDGET_MAX_CHANGE = 0.30  # el ajuste de presupuesto desde Campañas no mueve más del 30 % por vez
+
+
+def fetch_campaign_budget(customer_id, campaign_id):
+    """Presupuesto diario ACTUAL de una campaña, leído de Google en este momento: recurso, monto y si lo usan otras campañas."""
+    if not str(campaign_id).isdigit():
+        raise ValueError("campaign_id inválido.")
+    query = f"""
+        SELECT
+          campaign.id,
+          campaign.name,
+          campaign_budget.resource_name,
+          campaign_budget.amount_micros,
+          campaign_budget.explicitly_shared,
+          campaign_budget.reference_count
+        FROM campaign
+        WHERE campaign.id = {int(campaign_id)}
+    """
+    results = _search(customer_id, query)
+    if not results:
+        raise ValueError("No se encontró la campaña en esta cuenta.")
+    r = results[0]
+    b = r.get("campaignBudget", {})
+    return {
+        "campaign_name": r.get("campaign", {}).get("name") or "",
+        "budget_resource_name": b.get("resourceName"),
+        "amount": _micros_to_units(_int_or_none(b.get("amountMicros"))),
+        "shared": bool(b.get("explicitlyShared")) or (_int_or_none(b.get("referenceCount")) or 1) > 1,
+    }
+
+
+def check_budget_change(current, new_budget, expected_current=None, shared=False):
+    """Reglas de seguridad del ajuste: presupuesto propio de la campaña, mayor que cero, cambio de hasta ±30 % y sin que haya
+    cambiado desde que se calculó la propuesta. Lanza ValueError con el motivo."""
+    if shared:
+        raise ValueError("Esta campaña usa un presupuesto compartido con otras campañas: cambiarlo afectaría a todas. Ajústalo desde Google Ads.")
+    if not current or current <= 0:
+        raise ValueError("No se pudo leer el presupuesto actual de la campaña.")
+    if not new_budget or new_budget <= 0:
+        raise ValueError("El presupuesto diario debe ser un número mayor que cero.")
+    if expected_current is not None and abs(current - expected_current) > max(0.01, current * 0.005):
+        raise ValueError(f"El presupuesto de la campaña cambió mientras tanto (ahora es {current:.2f}). Vuelve a calcular la propuesta.")
+    change = new_budget / current - 1
+    if abs(change) > BUDGET_MAX_CHANGE + 1e-9:
+        raise ValueError(f"El cambio es de {change * 100:+.0f} %. Desde aquí el máximo es ±{BUDGET_MAX_CHANGE * 100:.0f} % por vez; si hace falta más, hazlo en dos pasos.")
+    return change
+
+
+def adjust_campaign_budget(customer_id, campaign_id, new_budget, validate_only=True, expected_current=None):
+    """Cambia el presupuesto diario de UNA campaña desde Campañas > Dónde invertir. Relee el presupuesto en Google, comprueba las
+    reglas de seguridad y delega la escritura en update_campaign_daily_budget (que con validate_only=True solo hace la vista previa)."""
+    cur = fetch_campaign_budget(customer_id, campaign_id)
+    change = check_budget_change(cur["amount"], new_budget, expected_current, cur["shared"])
+    result = update_campaign_daily_budget(customer_id, cur["budget_resource_name"], new_budget, validate_only)
+    result.update({"old_daily_budget": cur["amount"], "change_pct": round(change * 100, 1), "campaign_name": cur["campaign_name"],
+                   "budget_resource_name": cur["budget_resource_name"]})
+    return result
+
+
+def simulated_adjust_campaign_budget(campaign_id, new_budget, validate_only=True, expected_current=None):
+    row = next((c for c in simulated_campaigns_overview() if str(c["campaign_id"]) == str(campaign_id)), None)
+    if not row:
+        raise ValueError("No se encontró la campaña en esta cuenta.")
+    change = check_budget_change(row["budget"], new_budget, expected_current, row.get("budget_shared", False))
+    return {"validate_only": validate_only, "applied": not validate_only, "new_daily_budget": new_budget, "old_daily_budget": row["budget"],
+            "change_pct": round(change * 100, 1), "campaign_name": row["campaign_name"], "simulated": True}
+
+
 # ---------------------------------------------------------------------------
 # Negativización (Función 2) — leer términos de búsqueda con su campaña, y
 # escribir palabras clave negativas de vuelta a la cuenta real. A diferencia
@@ -825,13 +893,15 @@ def fetch_campaigns_overview(customer_id, date_from, date_to):
           campaign.maximize_conversion_value.target_roas,
           campaign.target_cpa.target_cpa_micros,
           campaign.maximize_conversions.target_cpa_micros,
-          campaign_budget.amount_micros
+          campaign_budget.amount_micros,
+          campaign_budget.resource_name,
+          campaign_budget.explicitly_shared
         FROM campaign
         WHERE campaign.status != 'REMOVED'
     """
     # Con los dos campos extra se dejan fuera los experimentos terminados; si Google los rechazara, se
     # vuelve a la consulta de siempre para no tumbar la sección.
-    list_query_exp = list_query.replace("campaign_budget.amount_micros", "campaign_budget.amount_micros,\n          campaign.experiment_type,\n          campaign.serving_status")
+    list_query_exp = list_query.replace("campaign_budget.explicitly_shared", "campaign_budget.explicitly_shared,\n          campaign.experiment_type,\n          campaign.serving_status")
     metrics_query = f"""
         SELECT
           campaign.id,
@@ -904,10 +974,17 @@ def fetch_campaigns_overview(customer_id, date_from, date_to):
             "target_roas": _float_or_none(target_roas),
             "target_cpa": _micros_to_units(_int_or_none(target_cpa)),
             "budget": _micros_to_units(_int_or_none(r.get("campaignBudget", {}).get("amountMicros"))),
+            "budget_resource_name": r.get("campaignBudget", {}).get("resourceName"),
+            "budget_shared": bool(r.get("campaignBudget", {}).get("explicitlyShared")),
         }
         row.update(metrics_by_id.get(cid, empty))
         row.update(share_by_id.get(cid, no_share))
         out.append(row)
+    # Un presupuesto que usan varias campañas (aunque Google no lo marque como compartido) se trata como compartido.
+    counts = Counter(r["budget_resource_name"] for r in out if r["budget_resource_name"])
+    for r in out:
+        if r["budget_resource_name"] and counts[r["budget_resource_name"]] > 1:
+            r["budget_shared"] = True
     return out
 
 
@@ -1356,6 +1433,50 @@ def _audience_ref(crit):
     if t == "COMBINED_AUDIENCE":
         return crit.get("combinedAudience", {}).get("combinedAudience")
     return None
+
+
+def fetch_campaign_windows(customer_id, windows=(7, 14, 30)):
+    """Para la vista «Dónde invertir» de Campañas: las métricas de todas las campañas de la cuenta en las ventanas de
+    7, 14 y 30 días que terminan ayer (días completos). Por ventana son dos consultas, como en fetch_campaigns_overview:
+    las métricas y, aparte, la cuota de impresiones (pedirlas juntas deja fuera lo que no es Search). Las ventanas son
+    independientes y salen a la vez. Devuelve {"ranges": {"7": {from, to}, ...}, "windows": {"7": {campaign_id: {...}}, ...}}."""
+    end = datetime.date.today() - datetime.timedelta(days=1)
+    ranges = {str(n): {"from": (end - datetime.timedelta(days=n - 1)).isoformat(), "to": end.isoformat()} for n in windows}
+
+    def one(n):
+        d_from, d_to = ranges[str(n)]["from"], ranges[str(n)]["to"]
+        rows = {}
+        for r in _search(customer_id, f"""
+            SELECT campaign.id, metrics.impressions, metrics.cost_micros, metrics.conversions, metrics.conversions_value
+            FROM campaign
+            WHERE segments.date BETWEEN '{d_from}' AND '{d_to}' AND campaign.status != 'REMOVED'
+        """):
+            m = r.get("metrics", {})
+            rows[str(r.get("campaign", {}).get("id"))] = {
+                "impressions": _int_or_none(m.get("impressions")) or 0,
+                "cost": _micros_to_units(_int_or_none(m.get("costMicros"))) or 0.0,
+                "conversions": _float_or_none(m.get("conversions")) or 0.0,
+                "conv_value": _float_or_none(m.get("conversionsValue")) or 0.0,
+                "lost_is_budget": None, "impr_share": None,
+            }
+        try:
+            for r in _search(customer_id, f"""
+                SELECT campaign.id, metrics.search_budget_lost_impression_share, metrics.search_impression_share
+                FROM campaign
+                WHERE segments.date BETWEEN '{d_from}' AND '{d_to}' AND campaign.status != 'REMOVED'
+            """):
+                m = r.get("metrics", {})
+                row = rows.get(str(r.get("campaign", {}).get("id")))
+                if row is not None:
+                    row["lost_is_budget"] = _float_or_none(m.get("searchBudgetLostImpressionShare"))
+                    row["impr_share"] = _float_or_none(m.get("searchImpressionShare"))
+        except RuntimeError:
+            pass  # sin cuotas la vista sirve igual: la recomendación de subir presupuesto se apoya entonces en el gasto frente al presupuesto
+        return n, rows
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        out = dict(pool.map(one, windows))
+    return {"ranges": ranges, "windows": {str(n): out[n] for n in windows}}
 
 
 def fetch_account_audiences(customer_id, date_from, date_to):
@@ -3526,6 +3647,8 @@ def simulated_campaigns_overview():
             "status": c["status"],
             "channel_type": {"performance max": "PERFORMANCE_MAX", "search": "SEARCH", "display": "DISPLAY"}.get(c["channel_type_raw"], "SEARCH"),
             "budget": c["budget"], "impressions": c["impressions"], "clicks": c["clicks"], "cost": c["cost"],
+            "budget_resource_name": f"customers/0/campaignBudgets/{_SIMULATED_CAMPAIGN_IDS_BY_NAME.get(c['campaign'], c['campaign'])}",
+            "budget_shared": "Display" in c["campaign"],  # una compartida de ejemplo para probar el bloqueo
             "conversions": c["conversions"], "conv_value": c["conv_value"],
             "bidding_strategy_type": c["bid_strategy"],
             "target_roas": 4.0 if c["bid_strategy"] == "TARGET_ROAS" else None, "target_cpa": None,
@@ -3533,6 +3656,33 @@ def simulated_campaigns_overview():
             "lost_is_budget": c["lost_is_budget"], "lost_is_rank": c["lost_is_rank"],
         })
     return out
+
+
+def simulated_campaign_windows(customer_id, windows=(7, 14, 30)):
+    """Datos de ejemplo de las ventanas de 7, 14 y 30 días: determinista por cuenta y campaña, con ROAS que varía entre
+    campañas y entre ventanas para que salgan los distintos veredictos."""
+    import zlib
+    end = datetime.date.today() - datetime.timedelta(days=1)
+    ranges = {str(n): {"from": (end - datetime.timedelta(days=n - 1)).isoformat(), "to": end.isoformat()} for n in windows}
+    base = simulated_campaigns_overview()
+    out = {}
+    for n in windows:
+        rows = {}
+        for c in base:
+            h = zlib.crc32(f"{customer_id}:{c['campaign_id']}".encode())
+            quality = 0.55 + (h % 100) / 100 * 1.0            # 0,55 a 1,55: ROAS relativo de la campaña
+            drift = {7: 0.8 + ((h >> 8) % 50) / 100, 14: 0.9 + ((h >> 8) % 25) / 100, 30: 1.0}[n]
+            cost = c["cost"] * n / 30 * (0.9 + ((h >> 4) % 20) / 100)
+            conv_base_roas = (c["conv_value"] / c["cost"]) if c["cost"] else 0
+            value = cost * conv_base_roas * quality * drift
+            conv = c["conversions"] * n / 30 * quality * drift
+            limited = ((h >> 12) % 3) == 0
+            rows[str(c["campaign_id"])] = {
+                "impressions": int(c["impressions"] * n / 30), "cost": round(cost, 2), "conversions": round(conv, 1), "conv_value": round(value, 2),
+                "lost_is_budget": (0.28 if limited else 0.02) if c["lost_is_budget"] is not None else None, "impr_share": c["impr_share"],
+            }
+        out[str(n)] = rows
+    return {"ranges": ranges, "windows": out}
 
 
 def simulated_campaign_daily(campaign_id, date_from, date_to):

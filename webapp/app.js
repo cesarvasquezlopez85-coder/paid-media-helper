@@ -256,6 +256,9 @@ const state = {
     hotelBy: 'cuenta', hotelFilter: 'all', typeFilter: [], statusFilter: 'ENABLED', sortBy: 'cost', search: '',
     mccGroups: [], mccFilter: 'all', // MCCs agregados en Ritmo de consumo: [{group_customer_id, group_name, account_ids}]
     confirm: null, busy: {}, notice: null,
+    view: 'table', // 'table' | 'invest' (Dónde invertir)
+    invest: { byAccount: {}, errors: {}, running: false, cancel: false, token: 0, stopMsg: '', runDone: 0, runTotal: 0, sortBy: 'priority', dir: 'desc', verdict: 'all',
+      adjust: { key: null, newBudget: '', status: 'idle', preview: null, result: null, error: null } },
     loadedFrom: '', loadedTo: '', // rango con el que se trajo la tabla; el detalle de cada campaña usa el mismo
     detail: emptyCampanaDetail(0),
   },
@@ -13884,6 +13887,7 @@ function loadCampanas() {
   const token = ++c.loadToken;
   c.loadedFrom = c.dateFrom; c.loadedTo = c.dateTo;
   c.detail = emptyCampanaDetail(c.detail.token + 1);
+  Object.assign(c.invest, { byAccount: {}, errors: {}, running: false, cancel: false, token: c.invest.token + 1, stopMsg: '', adjust: { key: null, newBudget: '', status: 'idle', preview: null, result: null, error: null } });
   c.watchlistStatus = 'loading'; c.status = 'loading'; c.error = null; c.partial = []; c.confirm = null; c.notice = null;
   render();
   fetch('/api/google-ads/pacing/watchlist')
@@ -13957,11 +13961,12 @@ function campanasMccRows() {
   return c.rows.filter((r) => ids.has(r.customer_id));
 }
 
-function campanasFilteredRows() {
+function campanasFilteredRows(opts) {
   const c = state.campanas;
+  const enabledOnly = !!(opts && opts.enabledOnly);
   const q = (c.search || '').trim().toLowerCase();
   let rows = campanasMccRows().filter((r) => {
-    if (c.statusFilter !== 'all' && r.status !== c.statusFilter) return false;
+    if (enabledOnly ? r.status !== 'ENABLED' : (c.statusFilter !== 'all' && r.status !== c.statusFilter)) return false;
     if (c.hotelFilter !== 'all' && campanasHotelOf(r) !== c.hotelFilter) return false;
     if (c.typeFilter.length && !c.typeFilter.includes(r.channel_type)) return false;
     if (q && !r.campaign_name.toLowerCase().includes(q) && !r.account_name.toLowerCase().includes(q)) return false;
@@ -14037,6 +14042,395 @@ function renderCampanasRow(r, plain) {
     </tr>`;
 }
 
+// ---- Campañas: Dónde invertir ----
+// Compara cada campaña activa con el promedio de su propia cuenta en las ventanas de 7, 14 y 30 días (que terminan ayer) y
+// dice dónde conviene invertir más, qué mantener y qué revisar. Solo lectura: el presupuesto se cambia en Ritmo de consumo.
+// Entran todas las campañas, también las de marca. Pide una petición por cuenta (de a tres) a /api/google-ads/campaigns-windows.
+const INVEST_WINDOWS = [7, 14, 30];
+const INVEST_MIN_CONV = 5;          // conversiones en 30 días para opinar
+const INVEST_BUDGET_LOST = 0.10;    // cuota perdida por presupuesto desde la que se considera limitada
+const INVEST_NEAR_BUDGET = 0.9;     // gasto diario de la última semana ≥ 90 % del presupuesto
+const INVEST_OK_RATIO = 1.0;        // ROAS a 30 días ≥ el de la cuenta
+const INVEST_STEADY_RATIO = 0.9;    // ROAS a 7 y 14 días ≥ 90 % del de la cuenta
+const INVEST_BAD_RATIO = 0.7;       // ROAS a 30 días por debajo del 70 % del de la cuenta
+const INVEST_ZERO_SHARE = 0.05;     // sin conversiones y con ≥ 5 % del gasto de la cuenta
+const INVEST_VERDICTS = {
+  raise: { label: 'Subir presupuesto', cls: 'good', rank: 4 },
+  reduce: { label: 'Revisar o bajar', cls: 'bad', rank: 3 },
+  keep: { label: 'Mantener', cls: 'neutral', rank: 2 },
+  nodata: { label: 'Pocos datos', cls: 'warn', rank: 1 },
+};
+const INVEST_SORT_DEFAULT_DIR = { priority: 'desc', roas: 'desc', conversions: 'desc', cost: 'desc', cpa_pct: 'asc', lost_budget: 'desc' };
+const INVEST_SORT_LABELS = { priority: 'Veredicto (primero lo que conviene subir)', roas: 'ROAS a 30 días', conversions: 'Conversiones a 30 días', cost: 'Gasto a 30 días', cpa_pct: 'CPA % a 30 días', lost_budget: 'Pérdida por presupuesto' };
+
+function investAccountData(customerId) {
+  const a = state.campanas.invest.byAccount[customerId];
+  return a && a.status === 'ready' ? a.data : null;
+}
+
+// Métricas de una campaña en una ventana; la campaña que Google no devuelve en esa ventana no tuvo actividad.
+function investMetrics(row, n) {
+  const d = investAccountData(row.customer_id);
+  const w = d && d.windows[String(n)] ? d.windows[String(n)][row.campaign_id] : null;
+  const m = w || { impressions: 0, cost: 0, conversions: 0, conv_value: 0, lost_is_budget: null, impr_share: null };
+  return { ...m, roas: m.cost > 0 ? m.conv_value / m.cost : null, cpa_pct: m.conv_value > 0 ? (m.cost / m.conv_value) * 100 : null };
+}
+
+function investVerdict(row, w, bench, accountCost) {
+  const w7 = w[7]; const w14 = w[14]; const w30 = w[30];
+  const fx = (v) => `${v.toFixed(2)}×`;
+  const conv30 = w30.conversions.toFixed(w30.conversions % 1 ? 1 : 0);
+  if (!(w30.cost > 0)) return { key: 'nodata', reason: 'Sin gasto en los últimos 30 días.' };
+  if (bench == null) return { key: 'nodata', reason: 'La cuenta no tiene valor de conversión para compararla.' };
+  const share = accountCost > 0 ? w30.cost / accountCost : 0;
+  if (w30.conversions < INVEST_MIN_CONV) {
+    if (w30.conversions === 0 && share >= INVEST_ZERO_SHARE) return { key: 'reduce', reason: `Gasta el ${(share * 100).toFixed(0)} % de la cuenta y no convirtió en 30 días.` };
+    return { key: 'nodata', reason: `Solo ${conv30} conversion${conv30 === '1' ? '' : 'es'} en 30 días (se piden ${INVEST_MIN_CONV}): pocos datos para decidir.` };
+  }
+  if (!(w30.conv_value > 0)) return { key: 'nodata', reason: 'Las conversiones no traen valor, así que no se puede calcular el ROAS.' };
+  const ratioTxt = `ROAS ${fx(w30.roas)} frente a ${fx(bench)} de la cuenta`;
+  const trend = w7.roas != null && w30.roas > 0 ? (w7.roas < w30.roas * 0.8 ? ' Bajó en la última semana.' : (w7.roas > w30.roas * 1.2 ? ' Mejora en la última semana.' : '')) : '';
+  if (w30.roas < bench * INVEST_BAD_RATIO) return { key: 'reduce', reason: `${ratioTxt}.${trend}` };
+  const ok = (m, ratio) => m.roas != null && m.roas >= bench * ratio;
+  const steady = ok(w30, INVEST_OK_RATIO) && ok(w14, INVEST_STEADY_RATIO) && ok(w7, INVEST_STEADY_RATIO);
+  const lostIs = w30.lost_is_budget != null && w30.lost_is_budget >= INVEST_BUDGET_LOST;
+  const nearBudget = row.budget > 0 && w7.cost / 7 >= row.budget * INVEST_NEAR_BUDGET;
+  if (steady && (lostIs || nearBudget)) {
+    return { key: 'raise', reason: `${ratioTxt}, sostenido en 7, 14 y 30 días, y ${lostIs ? `pierde el ${(w30.lost_is_budget * 100).toFixed(0)} % de las impresiones por presupuesto` : 'gasta casi todo su presupuesto diario'}.` };
+  }
+  if (steady) return { key: 'keep', reason: `${ratioTxt}, sostenido, pero el presupuesto no la frena: más dinero no compra más impresiones.` };
+  if (ok(w30, INVEST_OK_RATIO)) return { key: 'keep', reason: `${ratioTxt}, pero no se sostiene en los últimos 7 o 14 días: conviene esperar antes de subir.` };
+  return { key: 'keep', reason: `${ratioTxt}: cerca del promedio de la cuenta.${trend}` };
+}
+
+// Campañas activas que pasan los filtros de la página, con sus ventanas y veredicto (las de cuentas sin calcular salen con ready:false).
+function investRows() {
+  const c = state.campanas;
+  const bench = new Map();
+  c.rows.forEach((r) => {
+    if (r.status !== 'ENABLED' || !investAccountData(r.customer_id)) return;
+    const m = investMetrics(r, 30);
+    const b = bench.get(r.customer_id) || { cost: 0, value: 0 };
+    b.cost += m.cost; b.value += m.conv_value;
+    bench.set(r.customer_id, b);
+  });
+  return campanasFilteredRows({ enabledOnly: true }).map((r) => {
+    if (!investAccountData(r.customer_id)) return { row: r, ready: false };
+    const w = { 7: investMetrics(r, 7), 14: investMetrics(r, 14), 30: investMetrics(r, 30) };
+    const b = bench.get(r.customer_id) || { cost: 0, value: 0 };
+    const benchRoas = b.cost > 0 && b.value > 0 ? b.value / b.cost : null;
+    return { row: r, ready: true, w, bench: benchRoas, verdict: investVerdict(r, w, benchRoas, b.cost) };
+  });
+}
+
+function investSortedRows(list) {
+  const inv = state.campanas.invest;
+  const f = {
+    priority: (x) => INVEST_VERDICTS[x.verdict.key].rank * 1000 + Math.min(999, x.w[30].roas || 0),
+    roas: (x) => x.w[30].roas,
+    conversions: (x) => x.w[30].conversions,
+    cost: (x) => x.w[30].cost,
+    cpa_pct: (x) => x.w[30].cpa_pct,
+    lost_budget: (x) => x.w[30].lost_is_budget,
+  }[inv.sortBy] || ((x) => x.w[30].roas);
+  const ready = list.filter((x) => x.ready);
+  return [...hotelSortByValue(ready, f, inv.dir), ...list.filter((x) => !x.ready)];
+}
+
+async function runCampanasInvest(onlyPending) {
+  const c = state.campanas;
+  const inv = c.invest;
+  if (inv.running) return;
+  const accounts = [...new Set(campanasFilteredRows({ enabledOnly: true }).map((r) => r.customer_id))];
+  const todo = accounts.filter((id) => !onlyPending || !investAccountData(id));
+  if (!todo.length) return;
+  inv.running = true; inv.cancel = false; inv.stopMsg = ''; inv.runDone = 0; inv.runTotal = todo.length;
+  const token = ++inv.token;
+  render();
+  let next = 0;
+  const worker = async () => {
+    while (!inv.cancel && inv.token === token) {
+      const id = todo[next]; next += 1;
+      if (!id) return;
+      try {
+        const res = await fetch(`/api/google-ads/campaigns-windows?${new URLSearchParams({ customer_id: id }).toString()}`);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { const err = new Error(data.error || 'Error desconocido.'); err.status = res.status; throw err; }
+        if (inv.token !== token) return;
+        inv.byAccount[id] = { status: 'ready', data, error: null };
+        delete inv.errors[id];
+        if (data.simulated) c.simulated = true;
+      } catch (err) {
+        if (inv.token !== token) return;
+        inv.errors[id] = err.message || String(err);
+        if (err.status === 429) { inv.cancel = true; inv.stopMsg = inv.errors[id]; }
+      }
+      inv.runDone += 1;
+      render();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(HOTEL_RANK_CONCURRENCY, todo.length) }, worker));
+  if (inv.token !== token) return;
+  inv.running = false;
+  render();
+}
+
+// ---- Ajuste de presupuesto desde la fila (escribe de verdad en Google Ads, con vista previa y confirmación) ----
+const INVEST_BUDGET_MAX = 0.30;   // igual que BUDGET_MAX_CHANGE del servidor: ±30 % por vez
+const INVEST_BUDGET_SUGGEST = 0.15;
+const INVEST_BUDGET_STEPS = [-0.30, -0.15, -0.10, 0.10, 0.15, 0.30];
+
+function investBudgetBounds(cur) {
+  return { min: Math.ceil(cur * (1 - INVEST_BUDGET_MAX) * 100 - 1e-6) / 100, max: Math.floor(cur * (1 + INVEST_BUDGET_MAX) * 100 + 1e-6) / 100 };
+}
+function investBudgetStep(cur, pct) {
+  const b = investBudgetBounds(cur);
+  return Math.min(b.max, Math.max(b.min, Math.round(cur * (1 + pct) * 100) / 100));
+}
+const investAdjustEmpty = () => ({ key: null, newBudget: '', status: 'idle', preview: null, result: null, error: null });
+
+function investFindRow(key) {
+  return state.campanas.rows.find((r) => r.key === key) || null;
+}
+
+function startInvestBudgetEdit(key) {
+  const inv = state.campanas.invest;
+  const row = investFindRow(key);
+  const x = investRows().find((y) => y.row.key === key);
+  const pct = x && x.ready ? (x.verdict.key === 'raise' ? INVEST_BUDGET_SUGGEST : (x.verdict.key === 'reduce' ? -INVEST_BUDGET_SUGGEST : null)) : null;
+  inv.adjust = { ...investAdjustEmpty(), key, newBudget: row && row.budget > 0 && pct != null ? String(investBudgetStep(row.budget, pct)) : '' };
+  render();
+}
+
+function adjustInvestBudget(preview) {
+  const inv = state.campanas.invest;
+  const adj = inv.adjust;
+  const row = investFindRow(adj.key);
+  if (!row) { adj.error = 'No se encontró la campaña.'; render(); return; }
+  const newBudget = Math.round(parseFloat(String(adj.newBudget).replace(',', '.')) * 100) / 100;
+  if (Number.isNaN(newBudget) || newBudget <= 0) { adj.error = 'Escribe un presupuesto diario válido, mayor que cero.'; adj.status = 'error'; render(); return; }
+  const b = investBudgetBounds(row.budget);
+  if (newBudget < b.min || newBudget > b.max) { adj.error = `Desde aquí se puede mover hasta ±30 % por vez: entre ${campanasMoney(b.min, row.currency)} y ${campanasMoney(b.max, row.currency)}.`; adj.status = 'error'; render(); return; }
+  adj.status = preview ? 'previewing' : 'applying'; adj.error = null;
+  render();
+  fetch('/api/google-ads/campaign-budget', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ customer_id: row.customer_id, campaign_id: row.campaign_id, new_daily_budget: newBudget, expected_current_budget: row.budget, validate_only: preview }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (adj.key !== row.key) return; // se abrió otra campaña mientras tanto
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      const info = { oldBudget: row.budget, newBudget, pct: data.change_pct, simulated: !!data.simulated };
+      if (preview) { adj.status = 'preview_ready'; adj.preview = info; } else { adj.status = 'done'; adj.result = info; row.budget = newBudget; }
+      render();
+    })
+    .catch((err) => {
+      if (adj.key !== row.key) return;
+      adj.status = 'error'; adj.error = err.message || String(err);
+      render();
+    });
+}
+
+function investBudgetCell(x, plain) {
+  const r = x.row;
+  if (r.budget == null) return '<td>N/D</td>';
+  const money = campanasMoney(r.budget, r.currency);
+  if (plain) return `<td>${money}</td>`;
+  if (r.budget_shared) return `<td>${money}<div class="footnote" title="Esta campaña usa un presupuesto compartido con otras: cambiarlo afectaría a todas. Ajústalo desde Google Ads.">Compartido: solo lectura</div></td>`;
+  return `<td>${money}<div style="margin-top:4px"><button class="btn-outline xs" data-camp-budget-open="${escapeHtml(r.key)}">Ajustar</button></div></td>`;
+}
+
+function investBudgetPanelHtml(x, cols) {
+  const adj = state.campanas.invest.adjust;
+  const r = x.row;
+  const e = escapeHtml;
+  const b = investBudgetBounds(r.budget);
+  const busy = adj.status === 'previewing' || adj.status === 'applying';
+  let inner;
+  if (adj.status === 'done' && adj.result) {
+    inner = `<div class="ok-panel" style="margin:0"><strong>Listo.</strong> El presupuesto diario de "${e(r.campaign_name)}" pasó de ${campanasMoney(adj.result.oldBudget, r.currency)} a ${campanasMoney(adj.result.newBudget, r.currency)} (${adj.result.pct > 0 ? '+' : ''}${adj.result.pct} %)${adj.result.simulated ? ' <em>(modo simulado: no se escribió en ninguna cuenta)</em>' : ''}. Google lo aplica de inmediato.
+      <div style="margin-top:8px"><button class="btn-outline xs" data-action="camp-budget-cancel">Cerrar</button></div></div>`;
+  } else if (adj.status === 'preview_ready' && adj.preview) {
+    inner = `<div class="ok-panel" style="margin:0"><strong>Vista previa lista.</strong> Presupuesto diario de "${e(r.campaign_name)}": ${campanasMoney(adj.preview.oldBudget, r.currency)} → <strong>${campanasMoney(adj.preview.newBudget, r.currency)}</strong> (${adj.preview.pct > 0 ? '+' : ''}${adj.preview.pct} %). Al confirmar cambia el gasto real en producción.
+      <div style="margin-top:8px;display:flex;gap:8px"><button class="btn-accent xs" data-action="camp-budget-confirm">Confirmar y aplicar</button><button class="btn-outline xs" data-action="camp-budget-cancel">Cancelar</button></div></div>`;
+  } else {
+    const steps = INVEST_BUDGET_STEPS.map((p) => `<button type="button" class="btn-outline xs" data-camp-budget-pct="${p}" ${busy ? 'disabled' : ''}>${p > 0 ? '+' : ''}${Math.round(p * 100)} %</button>`).join('');
+    inner = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <span>Presupuesto diario actual: <strong>${campanasMoney(r.budget, r.currency)}</strong></span>
+        <span class="field-hint">Nuevo:</span>
+        <input type="text" id="camp-budget-input" value="${e(adj.newBudget)}" placeholder="ej. ${e(String(investBudgetStep(r.budget, INVEST_BUDGET_SUGGEST)))}" style="width:90px" ${busy ? 'disabled' : ''} />
+        ${steps}
+        <button class="btn-accent xs" data-action="camp-budget-preview" ${busy ? 'disabled' : ''}>${adj.status === 'previewing' ? 'Validando…' : 'Vista previa'}</button>
+        <button class="btn-outline xs" data-action="camp-budget-cancel" ${busy ? 'disabled' : ''}>Cancelar</button>
+      </div>
+      <p class="field-hint" style="margin:6px 0 0">Entre ${campanasMoney(b.min, r.currency)} y ${campanasMoney(b.max, r.currency)} (±30 % por vez). No se escribe nada hasta que confirmes la vista previa.</p>
+      ${adj.error ? `<div class="error-panel" style="margin-top:8px;font-size:12px">${e(adj.error)}</div>` : ''}`;
+    if (adj.status === 'applying') inner = '<p class="footnote" style="margin:0">Aplicando…</p>';
+  }
+  return `<tr><td colspan="${cols}" style="background:var(--gray-50,#f6f7f9)">${inner}</td></tr>`;
+}
+
+function investTone(ratio) {
+  if (ratio == null) return '';
+  return ratio >= INVEST_OK_RATIO ? 'background:#dcfce7' : (ratio >= INVEST_BAD_RATIO ? 'background:#fef3c7' : 'background:#fee2e2');
+}
+
+function investCardsHtml(list) {
+  const ready = list.filter((x) => x.ready);
+  const n = (k) => ready.filter((x) => x.verdict.key === k).length;
+  const card = (k, sub) => `<div class="card stat-card"><div class="stat-label">${INVEST_VERDICTS[k].label}</div><div class="stat-value">${fmtInt(n(k))}</div><div class="stat-sub">${sub}</div></div>`;
+  return `<div class="stat-grid">
+    ${card('raise', 'buen ROAS sostenido y el presupuesto las frena')}
+    ${card('keep', 'sin una razón clara para mover dinero')}
+    ${card('reduce', 'ROAS flojo o gasto sin conversiones')}
+    ${card('nodata', 'muy pocas conversiones para decidir')}
+  </div>`;
+}
+
+const INVEST_GROUP = 'border-left:2px solid var(--color-border,#e5e7eb)';
+
+function investTableHtml(list, plain) {
+  const e = escapeHtml;
+  const head = `<thead><tr>
+    <th style="min-width:260px">Campaña</th><th style="min-width:230px">Veredicto</th><th>Gasto 30 d</th>
+    <th style="${INVEST_GROUP}">Conv. 7 d</th><th>Conv. 14 d</th><th>Conv. 30 d</th>
+    <th style="${INVEST_GROUP}">ROAS 7 d</th><th>ROAS 14 d</th><th>ROAS 30 d</th>
+    <th style="${INVEST_GROUP}" title="Gasto ÷ valor de conversión: lo inverso del ROAS; menor es mejor">CPA % 7 d</th><th>CPA % 14 d</th><th>CPA % 30 d</th>
+    <th style="${INVEST_GROUP}" title="Parte de las impresiones de búsqueda que se perdió porque el presupuesto se agotó (solo Search y Performance Max)">Pérdida por presupuesto 30 d</th>
+    <th style="${INVEST_GROUP}">Presupuesto diario</th></tr></thead>`;
+  const adjKey = state.campanas.invest.adjust.key;
+  const conv = (m) => `<td>${m.conversions ? m.conversions.toFixed(m.conversions % 1 ? 1 : 0) : '0'}</td>`;
+  const body = list.map((x) => {
+    const r = x.row;
+    const nameTd = `<td ${plain ? '' : `data-camp-open="${e(r.key)}" style="cursor:pointer" title="Ver las gráficas de esta campaña"`}><strong>${e(r.campaign_name)}</strong><div class="field-hint">${e(campanasHotelOf(r))} · ${e(campanasTypeLabel(r.channel_type))}</div></td>`;
+    if (!x.ready) return `<tr>${nameTd}<td colspan="13" class="footnote">Sin calcular: ${e(r.account_name)}${state.campanas.invest.errors[r.customer_id] ? ` — ${e(state.campanas.invest.errors[r.customer_id])}` : ''}</td></tr>`;
+    const v = INVEST_VERDICTS[x.verdict.key];
+    const roasCell = (m, first) => `<td style="${first ? `${INVEST_GROUP};` : ''}${m.roas != null && x.bench ? investTone(m.roas / x.bench) : ''}">${m.roas == null ? '—' : `${m.roas.toFixed(2)}×`}</td>`;
+    const cpaCell = (m, first) => `<td style="${first ? `${INVEST_GROUP};` : ''}${m.roas != null && x.bench ? investTone(m.roas / x.bench) : ''}">${m.cpa_pct == null ? '—' : `${m.cpa_pct.toFixed(1)} %`}</td>`;
+    const w = x.w;
+    return `<tr>${nameTd}
+      <td><span class="delta-badge ${v.cls}">${v.label}</span><div class="field-hint" style="margin-top:4px;max-width:300px;white-space:normal">${e(x.verdict.reason)}</div></td>
+      <td>${campanasMoney(w[30].cost, r.currency)}</td>
+      <td style="${INVEST_GROUP}">${w[7].conversions ? w[7].conversions.toFixed(w[7].conversions % 1 ? 1 : 0) : '0'}</td>${conv(w[14])}${conv(w[30])}
+      ${roasCell(w[7], true)}${roasCell(w[14])}${roasCell(w[30])}
+      ${cpaCell(w[7], true)}${cpaCell(w[14])}${cpaCell(w[30])}
+      <td style="${INVEST_GROUP}">${w[30].lost_is_budget == null ? 'N/D' : `${(w[30].lost_is_budget * 100).toFixed(0)} %`}</td>
+      ${investBudgetCell(x, plain).replace('<td>', `<td style="${INVEST_GROUP}">`)}</tr>${!plain && adjKey === r.key && r.budget > 0 ? investBudgetPanelHtml(x, 14) : ''}`;
+  }).join('') || '<tr><td colspan="14" class="footnote">Ninguna campaña coincide con los filtros.</td></tr>';
+  return `<div class="table-scroll sticky-head"><table>${head}<tbody>${body}</tbody></table></div>`;
+}
+
+const INVEST_NOTE = `Cómo se decide: el ROAS de cada campaña (valor de conversión ÷ gasto) se compara con el de su cuenta en los últimos 30 días, sumando todas las campañas activas de esa cuenta; por eso solo se comparan campañas de la misma cuenta. El CPA % es gasto ÷ valor de conversión (lo inverso del ROAS: menor es mejor). Los colores de ROAS y CPA % van en verde si igualan o superan el de la cuenta, en ámbar hasta el 70 % y en rojo por debajo. <strong>Subir presupuesto:</strong> ${INVEST_MIN_CONV} o más conversiones en 30 días, ROAS igual o mayor que el de la cuenta a 30 días y al menos el 90 % a 7 y a 14 días, y el presupuesto frena a la campaña (pierde el 10 % o más de las impresiones por presupuesto, o gasta el 90 % o más de su presupuesto diario). <strong>Revisar o bajar:</strong> ROAS por debajo del 70 % del de la cuenta, o 30 días sin conversiones gastando el 5 % o más de la cuenta. <strong>Pocos datos:</strong> menos de ${INVEST_MIN_CONV} conversiones en 30 días, sin gasto, o conversiones sin valor. Las campañas de marca están incluidas. Las ventanas terminan ayer. Es una guía para decidir. El botón <strong>Ajustar</strong> de cada fila cambia el presupuesto diario de esa campaña en Google Ads, solo después de una vista previa y de tu confirmación, hasta ±30 % por vez; las campañas con presupuesto compartido no se pueden ajustar desde aquí.`;
+
+function investFilterSummary() {
+  const c = state.campanas;
+  const inv = c.invest;
+  const out = ['Solo campañas activas'];
+  if (c.mccFilter !== 'all') {
+    const g = c.mccGroups.find((x) => x.group_customer_id === c.mccFilter);
+    out.push(`MCC: ${g ? (g.group_name || g.group_customer_id) : c.mccFilter}`);
+  }
+  if (c.hotelFilter !== 'all') out.push(`Hotel (según ${c.hotelBy === 'nombre' ? 'el nombre de la campaña' : 'la cuenta'}): ${c.hotelFilter}`);
+  if (c.typeFilter.length) out.push(`Tipo: ${c.typeFilter.map(campanasTypeLabel).join(' + ')}`);
+  if ((c.search || '').trim()) out.push(`Búsqueda: "${c.search.trim()}"`);
+  if (inv.verdict !== 'all') out.push(`Veredicto: ${INVEST_VERDICTS[inv.verdict].label}`);
+  out.push(`Orden: ${INVEST_SORT_LABELS[inv.sortBy] || inv.sortBy} (${inv.dir === 'asc' ? 'de menor a mayor' : 'de mayor a menor'})`);
+  return out;
+}
+
+function investVisibleRows() {
+  const inv = state.campanas.invest;
+  let list = investRows();
+  if (inv.verdict !== 'all') list = list.filter((x) => x.ready && x.verdict.key === inv.verdict);
+  return investSortedRows(list);
+}
+
+function downloadInvestCsv() {
+  const rows = investVisibleRows().filter((x) => x.ready);
+  const f1 = (v) => (v == null ? '' : v.toFixed(1));
+  const f2 = (v) => (v == null ? '' : v.toFixed(2));
+  const data = [['Campaña', 'Cuenta', 'ID cuenta', 'ID campaña', 'Tipo', 'Moneda', 'Veredicto', 'Motivo', 'Gasto 30 d',
+    'Conv. 7 d', 'Conv. 14 d', 'Conv. 30 d', 'ROAS 7 d', 'ROAS 14 d', 'ROAS 30 d', 'CPA % 7 d', 'CPA % 14 d', 'CPA % 30 d', 'Pérdida por presupuesto 30 d (%)', 'ROAS de la cuenta 30 d', 'Presupuesto diario']];
+  rows.forEach((x) => {
+    const r = x.row; const w = x.w;
+    data.push([r.campaign_name, r.account_name, r.customer_id, r.campaign_id, campanasTypeLabel(r.channel_type), r.currency, INVEST_VERDICTS[x.verdict.key].label, x.verdict.reason, f2(w[30].cost),
+      f1(w[7].conversions), f1(w[14].conversions), f1(w[30].conversions), f2(w[7].roas), f2(w[14].roas), f2(w[30].roas), f1(w[7].cpa_pct), f1(w[14].cpa_pct), f1(w[30].cpa_pct),
+      w[30].lost_is_budget == null ? '' : (w[30].lost_is_budget * 100).toFixed(0), f2(x.bench), r.budget == null ? '' : f2(r.budget)]);
+  });
+  engine.downloadCsv(`campanas_donde-invertir_${new Date().toISOString().slice(0, 10)}.csv`, data);
+}
+
+async function downloadInvestHtml() {
+  const c = state.campanas;
+  const list = investVisibleRows();
+  if (!list.some((x) => x.ready)) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const firstData = Object.values(c.invest.byAccount).find((a) => a.status === 'ready');
+  const ranges = firstData ? firstData.data.ranges : null;
+  const body = `
+    <h1>Campañas · Dónde invertir</h1>
+    <p class="meta">${fmtInt(list.length)} campaña${list.length === 1 ? '' : 's'} activas${ranges ? ` · ventanas de 7, 14 y 30 días hasta el ${escapeHtml(ranges['30'].to)} (la de 30 días empieza el ${escapeHtml(ranges['30'].from)})` : ''} · generado el ${today}</p>
+    <p class="meta">${investFilterSummary().map(escapeHtml).join(' · ')}</p>
+    ${c.simulated ? '<p class="meta"><strong>Datos de ejemplo (modo simulado).</strong></p>' : ''}
+    <div style="margin-top:14px">${investCardsHtml(list)}</div>
+    <div class="card table-panel" style="margin-top:16px">${investTableHtml(list, true)}<p class="footnote" style="margin-top:10px">${INVEST_NOTE}</p></div>`;
+  downloadTextFile(await campanasHtmlDocument('Campañas · Dónde invertir', campanasStaticHtml(body), true), `campanas_donde-invertir_${today}.html`, 'text/html');
+}
+
+function renderCampanasInvest() {
+  const c = state.campanas;
+  const inv = c.invest;
+  const e = escapeHtml;
+  const base = campanasFilteredRows({ enabledOnly: true });
+  const accounts = [...new Set(base.map((r) => r.customer_id))];
+  const missing = accounts.filter((id) => !investAccountData(id));
+  const nameOf = (id) => { const r = base.find((x) => x.customer_id === id); return r ? r.account_name : id; };
+  const anyReady = accounts.some((id) => investAccountData(id));
+  const errs = accounts.filter((id) => inv.errors[id]).map((id) => `${nameOf(id)}: ${inv.errors[id]}`);
+
+  let runHtml;
+  if (!base.length) {
+    runHtml = '<p class="field-hint" style="margin:0">No hay campañas activas con estos filtros.</p>';
+  } else if (inv.running) {
+    runHtml = `<div style="flex:1;min-width:260px"><div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px"><span>Consultando… ${fmtInt(inv.runDone)} de ${fmtInt(inv.runTotal)} cuentas</span><span class="footnote">${inv.cancel ? 'Terminando las que están en curso…' : ''}</span></div>
+      <div style="height:8px;border-radius:6px;background:var(--color-border,#e5e7eb);overflow:hidden"><div style="height:100%;width:${Math.round((inv.runDone / Math.max(1, inv.runTotal)) * 100)}%;background:var(--color-accent,#03a694);transition:width .3s"></div></div></div>
+      <button class="btn-outline" data-action="camp-invest-cancel" ${inv.cancel ? 'disabled' : ''}>${inv.cancel ? 'Cancelando…' : 'Cancelar'}</button>`;
+  } else if (!anyReady) {
+    runHtml = `<p class="field-hint" style="margin:0;max-width:520px">Calcula la recomendación para las <strong>${fmtInt(base.length)} campañas activas</strong> de <strong>${fmtInt(accounts.length)} cuentas</strong>. Son consultas de solo lectura (una por cuenta, de a tres); deja esta pestaña abierta mientras corre. Si quieres acotar, usa antes los filtros de arriba.</p>
+      <button class="btn-accent" data-action="camp-invest-run">Calcular para ${fmtInt(accounts.length)} cuenta${accounts.length === 1 ? '' : 's'}</button>`;
+  } else {
+    runHtml = `${missing.length ? `<p class="field-hint" style="margin:0">Faltan por calcular <strong>${fmtInt(missing.length)}</strong> cuenta${missing.length === 1 ? '' : 's'} de las que muestran estos filtros.</p><button class="btn-accent" data-action="camp-invest-retry">Calcular las que faltan</button>` : ''}
+      <button class="btn-outline" data-action="camp-invest-run">Calcular de nuevo (${fmtInt(accounts.length)})</button>`;
+  }
+
+  const stop = inv.stopMsg ? `<div class="error-panel" style="margin-bottom:14px"><strong>No se pudo continuar.</strong> ${e(inv.stopMsg)}</div>` : '';
+  const errHtml = errs.length && !inv.running ? `<div class="error-panel" style="margin-bottom:14px"><strong>No se pudieron leer ${errs.length} cuenta(s):</strong><br>${errs.map(e).join('<br>')}</div>` : '';
+  const opt = (v, l, cur) => `<option value="${e(v)}" ${cur === v ? 'selected' : ''}>${e(l)}</option>`;
+
+  const controls = `
+    <div class="card control-panel align-end" style="flex-wrap:wrap;gap:12px 20px">${runHtml}</div>`;
+  if (!anyReady) return `${controls}${stop}${errHtml}`;
+
+  const all = investRows();
+  const list = investVisibleRows();
+  const sortBar = `
+    <div class="card control-panel align-end" style="flex-wrap:wrap;gap:12px 20px">
+      <div class="field"><label>Veredicto</label><select id="camp-invest-verdict" style="width:200px">${opt('all', 'Todos', inv.verdict)}${Object.entries(INVEST_VERDICTS).map(([k, v]) => opt(k, v.label, inv.verdict)).join('')}</select></div>
+      <div class="field"><label>Ordenar por</label><select id="camp-invest-sort" style="width:280px">${Object.entries(INVEST_SORT_LABELS).map(([k, l]) => opt(k, l, inv.sortBy)).join('')}</select></div>
+      <div class="field"><label>Orden</label><select id="camp-invest-dir" style="width:170px">${opt('asc', 'De menor a mayor', inv.dir)}${opt('desc', 'De mayor a menor', inv.dir)}</select></div>
+    </div>`;
+  return `${controls}${stop}${errHtml}${sortBar}${investCardsHtml(all)}
+    <div class="card table-panel">
+      <div class="table-panel-head"><h3>Dónde invertir (${fmtInt(list.length)} campañas activas) <span class="field-hint" style="font-weight:400">· haz clic en una campaña para ver sus gráficas</span></h3>
+        <span style="display:inline-flex;gap:8px"><button class="btn-outline xs" data-action="camp-invest-csv" ${list.some((x) => x.ready) ? '' : 'disabled'}>Descargar CSV</button><button class="btn-outline xs" data-action="camp-invest-html" ${list.some((x) => x.ready) ? '' : 'disabled'}>Descargar HTML</button></span></div>
+      ${investTableHtml(list.slice(0, CAMPANAS_RENDER_LIMIT), false)}
+      <p class="footnote" style="margin-top:10px">${INVEST_NOTE}</p>
+      ${list.length > CAMPANAS_RENDER_LIMIT ? `<p class="footnote" style="margin-top:10px">Mostrando ${CAMPANAS_RENDER_LIMIT} de ${fmtInt(list.length)}. Usa los filtros para acotar; la descarga trae todas.</p>` : ''}
+    </div>`;
+}
+
 function renderCampanasPage() {
   const c = state.campanas;
   if (!currentUser.isSuperAdmin) {
@@ -14044,7 +14438,17 @@ function renderCampanasPage() {
   }
   ensureCampanasLoaded();
 
-  const controls = `
+  const invView = c.view === 'invest';
+  const viewToggle = `
+    <div class="seg-control" style="margin-bottom:14px">
+      <button type="button" class="seg-btn ${invView ? '' : 'active'}" data-camp-view="table">Tabla</button>
+      <button type="button" class="seg-btn ${invView ? 'active' : ''}" data-camp-view="invest">Dónde invertir</button>
+    </div>`;
+  const controls = invView ? `${viewToggle}
+    <div class="card control-panel align-end">
+      <button class="btn-outline" data-action="camp-refresh">Actualizar las campañas</button>
+      <p class="field-hint" style="max-width:520px">Dónde invertir mira solo las campañas <strong>activas</strong> de las cuentas de tu lista de <strong>Ritmo de consumo</strong>, con ventanas de 7, 14 y 30 días que terminan ayer (no usan el rango de fechas de la tabla). Desde cada fila puedes ajustar el presupuesto diario, con vista previa y confirmación.</p>
+    </div>` : `${viewToggle}
     <div class="card control-panel align-end">
       <div class="field"><label>Desde</label><input type="date" id="camp-date-from" value="${escapeHtml(c.dateFrom)}" /></div>
       <div class="field"><label>Hasta</label><input type="date" id="camp-date-to" value="${escapeHtml(c.dateTo)}" /></div>
@@ -14092,17 +14496,19 @@ function renderCampanasPage() {
           ${types.map((t) => typeChip(c.typeFilter.includes(t), `data-camp-type="${escapeHtml(t)}"`, campanasTypeLabel(t))).join('')}
         </div>
       </div>
-      <div class="field"><label>Estado</label>
+      ${invView ? '' : `<div class="field"><label>Estado</label>
         <select id="camp-status-filter" style="width:150px">${opt('ENABLED', 'Activas', c.statusFilter)}${opt('PAUSED', 'Pausadas', c.statusFilter)}${opt('all', 'Todas', c.statusFilter)}</select>
       </div>
       <div class="field"><label>Ordenar por</label>
         <select id="camp-sort" style="width:150px">${opt('cost', 'Gasto', c.sortBy)}${opt('conversions', 'Conversiones', c.sortBy)}${opt('clicks', 'Clics', c.sortBy)}${opt('hotel', 'Hotel', c.sortBy)}${opt('name', 'Nombre', c.sortBy)}</select>
-      </div>
+      </div>`}
       <div class="field"><label>Buscar</label><input type="text" id="camp-search" placeholder="Campaña u hotel…" value="${escapeHtml(c.search)}" style="width:220px" /></div>
     </div>`;
 
   const partial = c.partial.length ? `<div class="error-panel" style="margin-bottom:16px"><strong>No se pudieron leer ${c.partial.length} cuenta(s):</strong><br>${c.partial.map(escapeHtml).join('<br>')}</div>` : '';
   const sim = c.simulated ? `<div class="ok-panel" style="margin:10px 0"><strong>Modo simulado.</strong> La API de Google Ads no está configurada en el servidor: son datos de ejemplo y pausar o activar no escribe en ninguna cuenta.</div>` : '';
+
+  if (invView) return `${controls}${sim}${partial}${notice}${filters}${renderCampanasInvest()}${renderCampanaDetailModal()}`;
 
   const rows = campanasFilteredRows();
   const shown = rows.slice(0, CAMPANAS_RENDER_LIMIT);
@@ -16184,6 +16590,17 @@ function bindEvents() {
   });
   campOn('camp-status-filter', 'change', (e) => { state.campanas.statusFilter = e.target.value; render(); });
   campOn('camp-sort', 'change', (e) => { state.campanas.sortBy = e.target.value; render(); });
+  document.querySelectorAll('[data-camp-view]').forEach((btn) => btn.addEventListener('click', () => { state.campanas.view = btn.dataset.campView; render(); }));
+  document.querySelectorAll('[data-camp-budget-open]').forEach((btn) => btn.addEventListener('click', () => startInvestBudgetEdit(btn.dataset.campBudgetOpen)));
+  document.querySelectorAll('[data-camp-budget-pct]').forEach((btn) => btn.addEventListener('click', () => {
+    const adj = state.campanas.invest.adjust; const row = investFindRow(adj.key);
+    if (!row || !(row.budget > 0)) return;
+    adj.newBudget = String(investBudgetStep(row.budget, Number(btn.dataset.campBudgetPct))); adj.error = null; adj.status = 'idle'; render();
+  }));
+  campOn('camp-budget-input', 'input', (e) => { const adj = state.campanas.invest.adjust; adj.newBudget = e.target.value; });
+  campOn('camp-invest-verdict', 'change', (e) => { state.campanas.invest.verdict = e.target.value; render(); });
+  campOn('camp-invest-sort', 'change', (e) => { const inv = state.campanas.invest; inv.sortBy = e.target.value; inv.dir = INVEST_SORT_DEFAULT_DIR[inv.sortBy] || 'desc'; render(); });
+  campOn('camp-invest-dir', 'change', (e) => { state.campanas.invest.dir = e.target.value; render(); });
   campOn('camp-search', 'input', (e) => { state.campanas.search = e.target.value; render(); hotelRefocus('camp-search'); });
   document.querySelectorAll('[data-camp-ask]').forEach((btn) => btn.addEventListener('click', () => { state.campanas.confirm = btn.dataset.campAsk; render(); }));
   document.querySelectorAll('[data-camp-cancel]').forEach((btn) => btn.addEventListener('click', () => { state.campanas.confirm = null; render(); }));
@@ -17237,6 +17654,14 @@ function handleAction(action) {
     }
 
     case 'camp-refresh': loadCampanas(); break;
+    case 'camp-invest-run': runCampanasInvest(false); break;
+    case 'camp-invest-retry': runCampanasInvest(true); break;
+    case 'camp-invest-cancel': state.campanas.invest.cancel = true; render(); break;
+    case 'camp-budget-preview': adjustInvestBudget(true); break;
+    case 'camp-budget-confirm': adjustInvestBudget(false); break;
+    case 'camp-budget-cancel': state.campanas.invest.adjust = investAdjustEmpty(); render(); break;
+    case 'camp-invest-csv': downloadInvestCsv(); break;
+    case 'camp-invest-html': downloadInvestHtml(); break;
     case 'camp-detail-close': closeCampanaDetail(); break;
     case 'camp-html': downloadCampanasHtml(); break;
     case 'camp-detail-html': downloadCampanaDetailHtml(); break;
