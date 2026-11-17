@@ -5661,6 +5661,44 @@ def fetch_hotel_share_monthly(customer_id, month_from, month_to):
     return {"customer_id": customer_id, "months": months}
 
 
+def simulated_hotel_itinerary(customer_id, date_from=None, date_to=None):
+    """Datos de ejemplo de la vista de anticipación y estadía: las dos campañas de ejemplo repartidas por tramo, con una forma
+    reconocible (muchas reservas con poca anticipación, mejor ROAS con estadías largas y entre semana) y totales que coinciden
+    con los de cada campaña."""
+    import zlib
+    shapes = {
+        "window": [0.10, 0.22, 0.20, 0.17, 0.13, 0.09, 0.05, 0.03, 0.01], "stay": [0.34, 0.26, 0.17, 0.09, 0.05, 0.03, 0.03, 0.02, 0.01],
+        "dow": [0.13, 0.17, 0.15, 0.14, 0.16, 0.15, 0.10],
+    }
+    quality = {  # peso relativo de conversiones por tramo (el gasto sigue la forma de arriba)
+        "window": [0.6, 1.3, 1.5, 1.3, 1.0, 0.8, 0.4, 0.2, 0.1], "stay": [0.6, 1.0, 1.3, 1.5, 1.6, 1.8, 1.4, 0.8, 0.2],
+        "dow": [1.1, 1.2, 1.1, 1.0, 0.8, 0.7, 0.9],
+    }
+    camps = [c for c in _SIM_HOTEL_CAMPAIGNS]
+    out = {"customer_id": str(customer_id), "currency": "USD", "campaigns": [{"id": c["campaign_id"], "name": c["campaign_name"], "status": c["status"]} for c in camps],
+           "buckets": {d: _hotel_itin_bucket_list(d) for d in HOTEL_ITIN_DIMS}, "titles": {d: v["title"] for d, v in HOTEL_ITIN_DIMS.items()}, "data": {}, "errors": []}
+    for dim in HOTEL_ITIN_DIMS:
+        keys = [b["key"] for b in out["buckets"][dim]][:-1]
+        agg = {}
+        for c in camps:
+            h = zlib.crc32(f"{customer_id}:{c['campaign_id']}:{dim}".encode())
+            w = [shapes[dim][i] * (0.85 + ((h >> i) % 31) / 100) for i in range(len(keys))]
+            q = [quality[dim][i] * w[i] for i in range(len(keys))]
+            sw, sq = sum(w), sum(q)
+            rows = {}
+            for i, k in enumerate(keys):
+                share, qshare = w[i] / sw, q[i] / sq
+                conv = c["conversions"] * qshare
+                rows[k] = {"impressions": int(round(c["impressions"] * share)), "clicks": int(round(c["clicks"] * share)), "cost": round(c["cost"] * share, 2),
+                           "conversions": round(conv, 1), "conv_value": round(c["conv_value"] * qshare, 2)}
+            rows["na"] = {"impressions": 40, "clicks": 1, "cost": 0.6, "conversions": 0.0, "conv_value": 0.0} if dim == "window" else None
+            if rows["na"] is None:
+                del rows["na"]
+            agg[c["campaign_id"]] = rows
+        out["data"][dim] = agg
+    return out
+
+
 def simulated_hotel_share_monthly(customer_id, month_from, month_to):
     """Cuota mensual de ejemplo: cada cuenta simulada tiene un nivel y una caída reciente distintos; una llega a más de 100 %."""
     d_from, d_to = _hotel_month_bounds(month_from, month_to)
@@ -5680,6 +5718,109 @@ def simulated_hotel_share_monthly(customer_id, month_from, month_to):
         if m == 13:
             y, m = y + 1, 1
     return {"customer_id": str(customer_id), "months": months}
+
+
+# ---- Hoteles: anticipación de la reserva, duración de la estadía y día de entrada --------------------------------------------------
+# Rendimiento de las campañas de hotel por tramos fijos, de hotel_performance_view. No depende de los modificadores de puja: sirve
+# también para campañas que no tienen ninguno. (Los segmentos nuevos de v25.2/v26.2 para estas mismas dimensiones no devuelven datos
+# en campañas de tipo Hotel; esta vista usa los segmentos hotel_* de siempre, comprobados con datos reales.)
+HOTEL_ITIN_WINDOW = [("0", "Mismo día", 0, 0), ("1-3", "1 a 3 días", 1, 3), ("4-7", "4 a 7 días", 4, 7), ("8-14", "8 a 14 días", 8, 14),
+                     ("15-30", "15 a 30 días", 15, 30), ("31-60", "31 a 60 días", 31, 60), ("61-90", "61 a 90 días", 61, 90),
+                     ("91-180", "91 a 180 días", 91, 180), ("181+", "Más de 180 días", 181, None)]
+HOTEL_ITIN_STAY = [("1", "1 noche", 1, 1), ("2", "2 noches", 2, 2), ("3", "3 noches", 3, 3), ("4", "4 noches", 4, 4), ("5", "5 noches", 5, 5),
+                   ("6", "6 noches", 6, 6), ("7", "7 noches", 7, 7), ("8-14", "8 a 14 noches", 8, 14), ("15+", "15 noches o más", 15, None)]
+HOTEL_ITIN_NA = ("na", "Sin dato")
+HOTEL_ITIN_DIMS = {
+    "window": {"seg": "segments.hotel_booking_window_days", "json": "hotelBookingWindowDays", "title": "Anticipación de la reserva", "ranges": HOTEL_ITIN_WINDOW},
+    "stay": {"seg": "segments.hotel_length_of_stay", "json": "hotelLengthOfStay", "title": "Duración de la estadía", "ranges": HOTEL_ITIN_STAY},
+    "dow": {"seg": "segments.hotel_check_in_day_of_week", "json": "hotelCheckInDayOfWeek", "title": "Día de entrada", "ranges": None},
+}
+
+
+def _hotel_itin_bucket(dim, raw):
+    """Clave del tramo en que cae el valor `raw` que devuelve Google (días o noches como número; día de la semana como texto)."""
+    if dim == "dow":
+        return raw if raw in HOTEL_DAY_ORDER else HOTEL_ITIN_NA[0]
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return HOTEL_ITIN_NA[0]
+    if n < 0 or (dim == "stay" and n < 1):
+        return HOTEL_ITIN_NA[0]  # Google usa -1 cuando no tiene el dato
+    for key, _label, lo, hi in HOTEL_ITIN_DIMS[dim]["ranges"]:
+        if n >= lo and (hi is None or n <= hi):
+            return key
+    return HOTEL_ITIN_NA[0]
+
+
+def _hotel_itin_bucket_list(dim):
+    if dim == "dow":
+        out = [{"key": d, "label": HOTEL_DAY_LABELS_ES[d]} for d in HOTEL_DAY_ORDER]
+    else:
+        out = [{"key": k, "label": label} for k, label, _lo, _hi in HOTEL_ITIN_DIMS[dim]["ranges"]]
+    out.append({"key": HOTEL_ITIN_NA[0], "label": HOTEL_ITIN_NA[1]})
+    return out
+
+
+def fetch_hotel_itinerary(customer_id, date_from, date_to):
+    """Para cada campaña de hotel con actividad en el rango: impresiones, clics, gasto, conversiones y valor por tramo de anticipación
+    de la reserva, de duración de la estadía y de día de entrada. Cada dimensión es una consulta a hotel_performance_view (las tres salen
+    a la vez). Si una falla, esa dimensión queda en None y las otras siguen. Solo lectura."""
+    customer_id = _hotel_valid_id(customer_id)
+    names = {}
+    for r in _search(customer_id, """
+        SELECT campaign.id, campaign.name, campaign.status
+        FROM campaign WHERE campaign.advertising_channel_type = 'HOTEL' AND campaign.status != 'REMOVED'
+    """):
+        c = r.get("campaign", {})
+        names[str(c.get("id"))] = {"id": str(c.get("id")), "name": c.get("name") or "(sin nombre)", "status": c.get("status")}
+    out = {"customer_id": customer_id, "currency": "", "campaigns": [], "buckets": {d: _hotel_itin_bucket_list(d) for d in HOTEL_ITIN_DIMS},
+           "titles": {d: v["title"] for d, v in HOTEL_ITIN_DIMS.items()}, "data": {}, "errors": []}
+    if not names:
+        out["data"] = {d: {} for d in HOTEL_ITIN_DIMS}
+        return out
+    try:
+        cur = _search(customer_id, "SELECT customer.currency_code FROM customer LIMIT 1")
+        if cur:
+            out["currency"] = cur[0].get("customer", {}).get("currencyCode", "")
+    except RuntimeError:
+        pass
+
+    def one(dim):
+        spec = HOTEL_ITIN_DIMS[dim]
+        try:
+            rows = _search(customer_id, f"""
+                SELECT campaign.id, {spec['seg']}, metrics.impressions, metrics.clicks, metrics.cost_micros,
+                       metrics.conversions, metrics.conversions_value
+                FROM hotel_performance_view
+                WHERE segments.date BETWEEN '{date_from}' AND '{date_to}' AND metrics.impressions > 0
+            """)
+        except RuntimeError as e:
+            return dim, None, " ".join(str(e).split())[:200]
+        agg = {}
+        for r in rows:
+            cid = str(r.get("campaign", {}).get("id"))
+            key = _hotel_itin_bucket(dim, r.get("segments", {}).get(spec["json"]))
+            m = r.get("metrics", {})
+            a = agg.setdefault(cid, {}).setdefault(key, {"impressions": 0, "clicks": 0, "cost": 0.0, "conversions": 0.0, "conv_value": 0.0})
+            a["impressions"] += int(m.get("impressions", 0) or 0)
+            a["clicks"] += int(m.get("clicks", 0) or 0)
+            a["cost"] += (int(m.get("costMicros", 0) or 0)) / MICROS
+            a["conversions"] += float(m.get("conversions", 0) or 0)
+            a["conv_value"] += float(m.get("conversionsValue", 0) or 0)
+        return dim, agg, None
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        results = list(pool.map(one, HOTEL_ITIN_DIMS.keys()))
+    seen = set()
+    for dim, agg, err in results:
+        out["data"][dim] = agg
+        if err:
+            out["errors"].append(f"{HOTEL_ITIN_DIMS[dim]['title']}: {err}")
+        else:
+            seen.update(agg.keys())
+    out["campaigns"] = sorted((names[c] for c in seen if c in names), key=lambda c: c["name"].lower())
+    return out
 
 
 def _hotel_validate_changes(changes):

@@ -204,7 +204,9 @@ _invest_limiter = RateLimiter()
 INVEST_RATE_LIMIT = (200, 3600)
 # Ranking de precio de Hoteles: una consulta de solo lectura por cuenta, hasta 150 cuentas por hora y usuario.
 _hotel_rank_limiter = RateLimiter()
+_hotel_itin_limiter = RateLimiter()
 HOTEL_RANK_RATE_LIMIT = (150, 3600)
+HOTEL_ITIN_RATE_LIMIT = (120, 3600)
 
 # /api/change-password verifica una contraseña actual, igual que el login —
 # por usuario ya autenticado (no por IP), para frenar fuerza bruta contra la
@@ -855,6 +857,12 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_super_admin_json():
                 return
             self._handle_google_ads_hotel_campaigns(parse_qs(parsed.query))
+            return
+
+        if path == "/api/google-ads/hotel-itinerary":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_hotel_itinerary(parse_qs(parsed.query))
             return
 
         if path == "/api/google-ads/hotel-price-account":
@@ -3622,6 +3630,38 @@ class Handler(SimpleHTTPRequestHandler):
             return
         try:
             self._send_json(200, {**google_ads_client.fetch_hotel_price(customer_id, campaign_id, *dates), "simulated": False})
+        except Exception as e:  # noqa: BLE001
+            self._send_google_ads_error(e)
+
+    def _handle_google_ads_hotel_itinerary(self, query):
+        """Hoteles > Anticipación y estadía: el rendimiento de las campañas de hotel de una cuenta por tramo de anticipación de la
+        reserva, duración de la estadía y día de entrada. Solo lectura."""
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        dates = self._hotel_dates(query)
+        if not dates:
+            return
+        try:
+            span = (datetime.date.fromisoformat(dates[1]) - datetime.date.fromisoformat(dates[0])).days
+        except ValueError:
+            self._send_json(400, {"error": "Fechas inválidas."})
+            return
+        if span < 0 or span > 366:
+            self._send_json(400, {"error": "El rango debe ir de 1 a 366 días."})
+            return
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if not _hotel_itin_limiter.allow(f"user:{user['id']}", *HOTEL_ITIN_RATE_LIMIT):
+            self._send_json(429, {"error": f"Alcanzaste el límite de {HOTEL_ITIN_RATE_LIMIT[0]} consultas por hora en Anticipación y estadía."})
+            return
+        if not google_ads_client.is_configured():
+            self._send_json(200, {**google_ads_client.simulated_hotel_itinerary(customer_id or "0", *dates), "simulated": True})
+            return
+        if not self._hotel_account_access(customer_id):
+            return
+        try:
+            self._send_json(200, {**google_ads_client.fetch_hotel_itinerary(customer_id, *dates), "simulated": False})
         except Exception as e:  # noqa: BLE001
             self._send_google_ads_error(e)
 

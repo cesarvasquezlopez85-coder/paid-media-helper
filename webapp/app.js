@@ -229,7 +229,8 @@ const state = {
   // Se elige cuenta + rango, se listan las campañas de hotel y se edita una
   // campaña a la vez. Misma regla que ROAS/IA Max: vista previa antes de escribir.
   hotel: {
-    mode: 'single', // 'single' (una cuenta: modificadores) | 'ranking' (precio frente a la competencia en varias cuentas)
+    mode: 'single', // 'single' (una cuenta: modificadores) | 'ranking' (precio frente a la competencia en varias cuentas) | 'itinerary' (anticipación y estadía)
+    itin: { status: 'idle', error: null, data: null, campaignId: '', loaded: null, token: 0 },
     rank: { items: [], search: '', view: 'price', sortBy: 'price_diff', sortVis: 'share', sortMonthly: 'name', dir: { price: 'desc', visibility: 'asc', monthly: 'asc' }, monthFrom: '', monthTo: '', compareYear: true, expanded: [], running: false, cancel: false, token: 0, stopMsg: '', notice: '', loadedFrom: '', loadedTo: '' },
     api: {
       statusChecked: false, configured: false,
@@ -552,7 +553,7 @@ const PAGE_META = {
   },
   hoteles: {
     title: 'Hoteles',
-    caption: 'Modificadores de oferta de las campañas de hotel: ventana de reserva, duración de la estancia, día de entrada y fechas elegidas. Ve cómo rinde cada tramo y ajústalos campaña por campaña, o compara el precio de varias cuentas frente a la competencia.',
+    caption: 'Modificadores de oferta de las campañas de hotel: ventana de reserva, duración de la estancia, día de entrada y fechas elegidas. Ve cómo rinde cada tramo y ajústalos campaña por campaña, compara el precio de varias cuentas frente a la competencia, o mira cómo rinde una cuenta según la anticipación de la reserva, la estadía y el día de entrada.',
   },
   iamax: {
     title: 'IA Max',
@@ -613,6 +614,12 @@ function fmtInt(n) {
   return Math.round(n).toLocaleString('en-US');
 }
 // n como fracción 0-1 (puede pasar de 1, ej. 1.37 = 137% ya consumido).
+// Conversiones con un decimal solo si hace falta (Google las devuelve como decimales y 11 puede llegar como 10.999999).
+function fmtConv(x) {
+  const n = Math.round((Number(x) || 0) * 10) / 10;
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+
 function fmtPct0(n) {
   if (n === null || n === undefined || Number.isNaN(n)) return 'N/D';
   return Math.round(n * 100) + '%';
@@ -8295,6 +8302,7 @@ function hotelDefaultDates() {
 
 function resetHotelAccountData() {
   const s = state.hotel;
+  if (s.itin) s.itin = { status: 'idle', error: null, data: null, campaignId: '', loaded: null, token: (s.itin.token || 0) + 1 };
   s.list = { status: 'idle', error: null, campaigns: [], currency: '', templateLocked: false, filter: s.list ? s.list.filter : '' };
   s.detail = { status: 'idle', error: null, data: null, campaignId: null, edits: {}, flow: { status: 'idle', preview: null, result: null, error: null } };
 }
@@ -8674,7 +8682,7 @@ function hotelPerfCells(t, totals, currency) {
   return `
     <td>${fmtInt(p.clicks)}</td>
     <td>${cpc !== null ? hotelMoney(cpc, currency) : 'N/D'}</td>
-    <td>${p.conversions ? p.conversions.toFixed(p.conversions % 1 ? 1 : 0) : '0'}</td>
+    <td>${p.conversions ? fmtConv(p.conversions) : '0'}</td>
     <td>${cpa !== null ? hotelMoney(cpa, currency) : 'N/D'}${convRate !== null && p.conversions ? `<div style="margin:2px 0 0;font-size:11.5px;color:var(--color-text-muted)">${convRate.toFixed(1)}% conv/clic</div>` : ''}</td>
     <td>${vsAvg}</td>`;
 }
@@ -8818,7 +8826,7 @@ function renderHotelCampaignList(forExport) {
       <td>${escapeHtml(BID_STRATEGY_LABELS_ES[c.bidding_strategy_type] || c.bidding_strategy_type || '')}</td>
       <td>${fmtInt(c.clicks)}</td>
       <td>${hotelMoney(c.cost, currency)}</td>
-      <td>${c.conversions ? c.conversions.toFixed(c.conversions % 1 ? 1 : 0) : '0'}</td>
+      <td>${c.conversions ? fmtConv(c.conversions) : '0'}</td>
       <td>${c.conversions ? hotelMoney(c.cost / c.conversions, currency) : 'N/D'}</td>
       <td><button class="btn-outline sm" data-hotel-open="${escapeHtml(c.campaign_id)}">${l.templateLocked ? 'Ver' : 'Ver y editar'}</button></td>
     </tr>`).join('');
@@ -8844,8 +8852,9 @@ function renderHotelCampaignList(forExport) {
     </div>`;
 }
 
-function renderHotelApiPanel() {
+function renderHotelApiPanel(opts) {
   const a = state.hotel.api;
+  const itin = !!(opts && opts.itin);
 
   if (!a.statusChecked) {
     return `<div class="field"><p class="footnote">Consultando la conexión con Google Ads…</p></div>`;
@@ -8900,9 +8909,229 @@ function renderHotelApiPanel() {
           <input type="date" id="hotel-api-date-to" value="${escapeHtml(a.dateTo)}" />
         </div>
       </div>
-      <button class="btn-accent" data-action="hotel-api-fetch">Traer campañas de hotel</button>
-      ${a.error ? `<div class="error-panel" style="margin-top:10px"><strong>No se pudo traer los datos.</strong> ${escapeHtml(a.error)}</div>` : ''}
+      ${itin ? '<button class="btn-accent" data-action="hotel-itin-load">Ver anticipación y estadía</button>' : '<button class="btn-accent" data-action="hotel-api-fetch">Traer campañas de hotel</button>'}
+      ${!itin && a.error ? `<div class="error-panel" style="margin-top:10px"><strong>No se pudo traer los datos.</strong> ${escapeHtml(a.error)}</div>` : ''}
     </div>`;
+}
+
+// ---- Hoteles: anticipación de la reserva, duración de la estadía y día de entrada ---------------------------------------------------
+// Cómo rinden las campañas de hotel de una cuenta según con cuántos días de anticipación se reserva, cuántas noches y qué día de la
+// semana es la entrada. Solo lectura. Los tramos son fijos (no dependen de los modificadores de puja de cada campaña).
+const HOTEL_ITIN_DIMS = ['window', 'stay', 'dow'];
+const HOTEL_ITIN_MIN_CONV = 5;      // conversiones del tramo para opinar sobre su ROAS
+const HOTEL_ITIN_TONE_MIN_CONV = 3; // desde aquí se pinta el color; por debajo se marca "pocos datos"
+const HOTEL_ITIN_WASTE_SHARE = 0.05; // un tramo sin conversiones con ≥ 5 % del gasto se pinta en rojo
+
+function loadHotelItinerary() {
+  const s = state.hotel;
+  const a = s.api;
+  const it = s.itin;
+  const customerId = hotelCustomerId();
+  if (!customerId && !a.simulated) { it.error = 'Elige una cuenta o escribe su ID primero.'; it.status = 'error'; render(); return; }
+  if (customerId && !a.simulated && a.accountsStatus === 'ready' && !a.accounts.some((acc) => acc.id === customerId)) {
+    it.error = 'Esta sección solo trabaja con cuentas de hoteles (nombre que empieza por GHA-CPC). Ese ID no está entre ellas.'; it.status = 'error'; render(); return;
+  }
+  if (!a.dateFrom || !a.dateTo || a.dateFrom > a.dateTo) { it.error = 'Elige un rango de fechas válido.'; it.status = 'error'; render(); return; }
+  const token = ++it.token;
+  it.status = 'loading'; it.error = null; it.data = null; it.campaignId = '';
+  render();
+  const params = new URLSearchParams({ customer_id: customerId || '', date_from: a.dateFrom, date_to: a.dateTo });
+  fetch(`/api/google-ads/hotel-itinerary?${params.toString()}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (it.token !== token) return;
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      a.simulated = !!data.simulated;
+      it.data = data; it.status = 'ready'; it.loaded = { customerId: customerId || '', from: a.dateFrom, to: a.dateTo };
+      render();
+    })
+    .catch((err) => {
+      if (it.token !== token) return;
+      it.status = 'error'; it.error = err.message || String(err);
+      render();
+    });
+}
+
+function setHotelItinDays(days) {
+  const a = state.hotel.api;
+  const pad = (n) => String(n).padStart(2, '0');
+  const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const to = new Date(); to.setDate(to.getDate() - 1);
+  const from = new Date(to); from.setDate(from.getDate() - (days - 1));
+  a.dateFrom = iso(from); a.dateTo = iso(to);
+  if (state.hotel.itin.status === 'ready') loadHotelItinerary(); else render();
+}
+
+// Suma de las campañas elegidas (o de todas) por tramo, en el orden de los tramos; los tramos sin actividad no salen.
+function hotelItinRows(dim) {
+  const it = state.hotel.itin;
+  const d = it.data;
+  const byCamp = d.data[dim];
+  if (!byCamp) return null;
+  const ids = it.campaignId ? [it.campaignId] : Object.keys(byCamp);
+  const rows = [];
+  const total = { impressions: 0, clicks: 0, cost: 0, conversions: 0, conv_value: 0 };
+  d.buckets[dim].forEach((b) => {
+    const m = { impressions: 0, clicks: 0, cost: 0, conversions: 0, conv_value: 0 };
+    ids.forEach((id) => {
+      const x = byCamp[id] && byCamp[id][b.key];
+      if (x) Object.keys(m).forEach((k) => { m[k] += x[k]; });
+    });
+    if (m.impressions > 0 || m.cost > 0) {
+      rows.push({ key: b.key, label: b.label, ...m });
+      Object.keys(total).forEach((k) => { total[k] += m[k]; });
+    }
+  });
+  const roas = total.cost > 0 ? total.conv_value / total.cost : null;
+  rows.forEach((r) => {
+    r.roas = r.cost > 0 ? r.conv_value / r.cost : null;
+    r.cpa_pct = r.conv_value > 0 ? (r.cost / r.conv_value) * 100 : null;
+    r.cost_share = total.cost > 0 ? r.cost / total.cost : 0;
+    r.conv_share = total.conversions > 0 ? r.conversions / total.conversions : 0;
+  });
+  return { rows, total: { ...total, roas, cpa_pct: total.conv_value > 0 ? (total.cost / total.conv_value) * 100 : null } };
+}
+
+function hotelItinTone(r, totalRoas) {
+  if (r.conversions === 0) return r.cost_share >= HOTEL_ITIN_WASTE_SHARE ? 'background:#fee2e2' : '';
+  if (r.conversions < HOTEL_ITIN_TONE_MIN_CONV || r.roas == null || !totalRoas) return '';
+  const ratio = r.roas / totalRoas;
+  return ratio >= 1 ? 'background:#dcfce7' : (ratio >= 0.7 ? 'background:#fef3c7' : 'background:#fee2e2');
+}
+
+function hotelItinBar(share, color) {
+  return `<div style="display:flex;align-items:center;gap:6px;min-width:110px"><span style="width:38px;font-variant-numeric:tabular-nums">${(share * 100).toFixed(0)} %</span><div style="flex:1;height:7px;border-radius:4px;background:#eceef2"><div style="width:${Math.min(100, share * 100).toFixed(1)}%;height:100%;border-radius:4px;background:${color}"></div></div></div>`;
+}
+
+function hotelItinInsights(rows, total) {
+  const out = [];
+  if (!rows.length || !(total.cost > 0)) return out;
+  const fx = (v) => `${v.toFixed(1)}×`;
+  const pct = (v) => `${(v * 100).toFixed(0)} %`;
+  if (total.conversions < 20) out.push(`Solo hay ${fmtConv(total.conversions)} conversiones en el periodo: con tan pocos datos los tramos no son concluyentes. Prueba un rango más largo.`);
+  const eligible = rows.filter((r) => r.conversions >= HOTEL_ITIN_MIN_CONV && r.roas != null);
+  const best = eligible.slice().sort((a, b) => b.roas - a.roas)[0];
+  if (best && total.roas) out.push(`Mejor ROAS (con ${HOTEL_ITIN_MIN_CONV} o más conversiones): <strong>${escapeHtml(best.label)}</strong>, ${fx(best.roas)} frente a ${fx(total.roas)} del conjunto.`);
+  const top = rows.slice().sort((a, b) => b.conv_share - a.conv_share)[0];
+  if (top && top.conv_share > 0 && (!best || top.key !== best.key)) out.push(`<strong>${escapeHtml(top.label)}</strong> concentra el ${pct(top.conv_share)} de las conversiones con el ${pct(top.cost_share)} del gasto.`);
+  rows.filter((r) => r.cost_share >= 0.10 && (r.conversions === 0 || (r.conversions >= HOTEL_ITIN_MIN_CONV && total.roas && r.roas < total.roas * 0.7)))
+    .forEach((r) => out.push(`<strong>${escapeHtml(r.label)}</strong> se lleva el ${pct(r.cost_share)} del gasto y ${r.conversions === 0 ? 'no convierte' : `rinde ${fx(r.roas)} frente a ${fx(total.roas)}`}: conviene revisarlo.`));
+  return out;
+}
+
+function hotelItinPanelHtml(dim) {
+  const it = state.hotel.itin;
+  const d = it.data;
+  const cur = d.currency;
+  const e = escapeHtml;
+  const title = d.titles[dim];
+  const res = hotelItinRows(dim);
+  if (!res) return `<div class="card table-panel"><div class="table-panel-head"><h3>${e(title)}</h3></div><p class="footnote">No se pudo leer este desglose (${e((d.errors || []).find((x) => x.startsWith(title)) || 'error de Google Ads')}).</p></div>`;
+  const { rows, total } = res;
+  if (!rows.length) return `<div class="card table-panel"><div class="table-panel-head"><h3>${e(title)}</h3></div><p class="footnote">Sin actividad en el periodo.</p></div>`;
+  const money = (v) => hotelMoney(v, cur);
+  const body = rows.map((r) => {
+    const tone = hotelItinTone(r, total.roas);
+    const few = r.conversions > 0 && r.conversions < HOTEL_ITIN_TONE_MIN_CONV;
+    return `<tr><td><strong>${e(r.label)}</strong></td><td>${fmtInt(r.impressions)}</td><td>${fmtInt(r.clicks)}</td><td>${money(r.cost)}</td>
+      <td>${r.conversions ? fmtConv(r.conversions) : '0'}</td>
+      <td style="${tone}" ${few ? 'title="Menos de 3 conversiones: no es concluyente"' : ''}>${r.roas == null ? '—' : `${r.roas.toFixed(2)}×`}${few ? ' <span class="footnote">pocos datos</span>' : ''}</td>
+      <td style="${tone}">${r.cpa_pct == null ? '—' : `${r.cpa_pct.toFixed(1)} %`}</td>
+      <td>${hotelItinBar(r.cost_share, '#7c8db5')}</td><td>${hotelItinBar(r.conv_share, '#2f9e6e')}</td></tr>`;
+  }).join('');
+  const foot = `<tr style="font-weight:700;border-top:2px solid var(--color-text-heading)"><td>Total</td><td>${fmtInt(total.impressions)}</td><td>${fmtInt(total.clicks)}</td><td>${money(total.cost)}</td>
+      <td>${fmtConv(total.conversions)}</td><td>${total.roas == null ? '—' : `${total.roas.toFixed(2)}×`}</td><td>${total.cpa_pct == null ? '—' : `${total.cpa_pct.toFixed(1)} %`}</td><td></td><td></td></tr>`;
+  const ins = hotelItinInsights(rows, total);
+  return `<div class="card table-panel">
+    <div class="table-panel-head"><h3>${e(title)}</h3></div>
+    <div class="table-scroll"><table><thead><tr><th>Tramo</th><th>Impresiones</th><th>Clics</th><th>Gasto</th><th>Conv.</th><th title="Valor de conversión ÷ gasto">ROAS</th><th title="Gasto ÷ valor de conversión; menor es mejor">CPA %</th><th>% del gasto</th><th>% de las conversiones</th></tr></thead><tbody>${body}${foot}</tbody></table></div>
+    ${ins.length ? `<ul style="margin:12px 0 0 18px;padding:0;font-size:13px;line-height:1.55">${ins.map((x) => `<li>${x}</li>`).join('')}</ul>` : ''}
+  </div>`;
+}
+
+const HOTEL_ITIN_NOTE = `Los tramos son fijos y salen de hotel_performance_view, que solo incluye campañas de tipo Hotel (no Performance Max ni Búsqueda para viajes). El ROAS es valor de conversión ÷ gasto y el CPA % es gasto ÷ valor de conversión; los colores comparan cada tramo con el total del conjunto: verde si lo iguala o supera, ámbar hasta el 70 % y rojo por debajo, o por no convertir con el 5 % o más del gasto. Los tramos con menos de 3 conversiones no se colorean. "Sin dato" son búsquedas donde Google no informa ese valor. En la anticipación, la suma puede quedar un poco por debajo del gasto de las campañas porque Google no reporta ese segmento en una pequeña parte del gasto. Las conversiones y su valor se atribuyen a la fecha del clic, no a la de la estadía.`;
+
+function hotelItinSummaryHtml() {
+  const res = hotelItinRows('stay') || hotelItinRows('window') || hotelItinRows('dow');
+  if (!res) return '';
+  const t = res.total;
+  const cur = state.hotel.itin.data.currency;
+  const card = (label, value, sub) => `<div class="card stat-card"><div class="stat-label">${label}</div><div class="stat-value">${value}</div><div class="stat-sub">${sub}</div></div>`;
+  return `<div class="stat-grid">
+    ${card('Gasto', hotelMoney(t.cost, cur), `${fmtInt(t.clicks)} clics · ${fmtInt(t.impressions)} impresiones`)}
+    ${card('Conversiones', fmtConv(t.conversions), t.conversions ? `${hotelMoney(t.cost / t.conversions, cur)} por conversión` : 'sin conversiones')}
+    ${card('ROAS', t.roas == null ? '—' : `${t.roas.toFixed(2)}×`, `valor ${hotelMoney(t.conv_value, cur)}`)}
+    ${card('CPA %', t.cpa_pct == null ? '—' : `${t.cpa_pct.toFixed(1)} %`, 'gasto ÷ valor de conversión')}
+  </div>`;
+}
+
+function hotelItinCampaignLabel() {
+  const it = state.hotel.itin;
+  if (!it.campaignId) return `Todas las campañas de hotel (${it.data.campaigns.length})`;
+  const c = it.data.campaigns.find((x) => x.id === it.campaignId);
+  return c ? c.name : it.campaignId;
+}
+
+function hotelItinBodyHtml() {
+  return `${hotelItinSummaryHtml()}${HOTEL_ITIN_DIMS.map(hotelItinPanelHtml).join('')}
+    <p class="footnote" style="margin-top:12px">${HOTEL_ITIN_NOTE}</p>`;
+}
+
+function renderHotelItinerary() {
+  const s = state.hotel;
+  const it = s.itin;
+  const a = s.api;
+  const e = escapeHtml;
+  const days = (n) => `<button type="button" class="btn-outline xs" data-hotel-itin-days="${n}">${n} días</button>`;
+  const quick = `<div class="field-hint" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0 0 12px"><span>Rango rápido (hasta ayer):</span>${[30, 60, 90, 180].map(days).join('')}<span>· con pocas conversiones, un rango más largo da tramos más confiables.</span></div>`;
+  const panel = renderHotelApiPanel({ itin: true });
+  let body;
+  if (it.status === 'idle') {
+    body = `<div class="card state-panel idle">${icon('bed-double', 30)}<p>Elige una cuenta de hoteles y un rango de fechas para ver cómo rinden sus campañas según la anticipación de la reserva, la duración de la estadía y el día de entrada.</p></div>`;
+  } else if (it.status === 'loading') {
+    body = `<div class="card state-panel loading"><div class="spinner"></div><p>Trayendo el rendimiento por tramos…</p></div>`;
+  } else if (it.status === 'error') {
+    body = `<div class="error-panel"><strong>No se pudo traer los datos.</strong> ${e(it.error || '')}</div>`;
+  } else if (!it.data.campaigns.length) {
+    body = `<div class="error-panel">Esta cuenta no tiene campañas de hotel (tipo "Hotel") con actividad en el rango. Si usa Performance Max o IA Max para viajes, esos tipos no entran en este desglose.</div>`;
+  } else {
+    const opts = it.data.campaigns.map((c) => `<option value="${e(c.id)}" ${it.campaignId === c.id ? 'selected' : ''}>${e(c.name)}${c.status === 'ENABLED' ? '' : ' (pausada)'}</option>`).join('');
+    const errs = (it.data.errors || []).length ? `<div class="error-panel" style="margin-bottom:14px"><strong>Parte del desglose no se pudo leer:</strong><br>${it.data.errors.map(e).join('<br>')}</div>` : '';
+    body = `${errs}
+      <div class="card control-panel align-end" style="gap:12px 20px;flex-wrap:wrap">
+        <div class="field"><label>Campaña</label><select id="hotel-itin-campaign" style="width:360px"><option value="" ${it.campaignId ? '' : 'selected'}>Todas las campañas de hotel (${fmtInt(it.data.campaigns.length)})</option>${opts}</select></div>
+        <span style="display:inline-flex;gap:8px"><button class="btn-outline xs" data-action="hotel-itin-csv">Descargar CSV</button><button class="btn-outline xs" data-action="hotel-itin-html">Descargar HTML</button></span>
+      </div>
+      ${hotelItinBodyHtml()}`;
+  }
+  return `${panel}${quick}${body}`;
+}
+
+function downloadHotelItinCsv() {
+  const it = state.hotel.itin;
+  if (it.status !== 'ready') return;
+  const f1 = (v) => (v == null ? '' : v.toFixed(1));
+  const f2 = (v) => (v == null ? '' : v.toFixed(2));
+  const data = [['Campaña', 'Dimensión', 'Tramo', 'Impresiones', 'Clics', 'Gasto', 'Conversiones', 'Valor de conversión', 'ROAS', 'CPA %', '% del gasto', '% de las conversiones']];
+  HOTEL_ITIN_DIMS.forEach((dim) => {
+    const res = hotelItinRows(dim);
+    if (!res) return;
+    res.rows.forEach((r) => data.push([hotelItinCampaignLabel(), it.data.titles[dim], r.label, r.impressions, r.clicks, f2(r.cost), f1(r.conversions), f2(r.conv_value), f2(r.roas), f1(r.cpa_pct), (r.cost_share * 100).toFixed(1), (r.conv_share * 100).toFixed(1)]));
+  });
+  engine.downloadCsv(`hoteles_anticipacion-estadia_${new Date().toISOString().slice(0, 10)}.csv`, data);
+}
+
+async function downloadHotelItinHtml() {
+  const s = state.hotel;
+  const it = s.itin;
+  if (it.status !== 'ready' || !it.data.campaigns.length) return;
+  const a = s.api;
+  const id = it.loaded ? it.loaded.customerId : hotelCustomerId();
+  const acc = (a.accounts || []).find((x) => x.id === id);
+  const box = document.createElement('div');
+  box.innerHTML = hotelItinBodyHtml();
+  await hotelWriteHtml('Anticipación y estadía', `${acc ? acc.name : 'Cuenta'} (${id}) · ${it.loaded ? it.loaded.from : a.dateFrom} a ${it.loaded ? it.loaded.to : a.dateTo} · ${hotelItinCampaignLabel()}`, box.innerHTML,
+    `anticipacion-estadia-${cambiosSlug(acc ? acc.name : id)}`);
 }
 
 function renderHotelPage() {
@@ -8913,8 +9142,10 @@ function renderHotelPage() {
   ensureHotelGoogleAdsStatusLoaded();
   const modeToggle = `<div class="seg-control" style="margin-bottom:16px;width:fit-content">
     <button class="seg-btn ${s.mode === 'single' ? 'active' : ''}" data-hotel-mode="single">Una cuenta</button>
-    <button class="seg-btn ${s.mode === 'ranking' ? 'active' : ''}" data-hotel-mode="ranking">Ranking de precio (varias cuentas)</button></div>`;
+    <button class="seg-btn ${s.mode === 'ranking' ? 'active' : ''}" data-hotel-mode="ranking">Ranking de precio (varias cuentas)</button>
+    <button class="seg-btn ${s.mode === 'itinerary' ? 'active' : ''}" data-hotel-mode="itinerary">Anticipación y estadía</button></div>`;
   if (s.mode === 'ranking') return `${modeToggle}${renderHotelRanking()}`;
+  if (s.mode === 'itinerary') return `${modeToggle}${renderHotelItinerary()}`;
   const controlPanel = renderHotelApiPanel();
 
   let body = '';
@@ -9417,7 +9648,7 @@ function hotelRankAddWatched() {
     .then((res) => res.json().then((data) => ({ ok: res.ok, data })))
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
-      const hotels = (data.watchlist || []).filter((w) => pacingIsHotelAccount(w.account_name));
+      const hotels = (data.watchlist || []).filter((w) => hotelIsHotelAccount(w.account_name));
       let added = 0;
       hotels.forEach((w) => { if (hotelRankAdd({ id: w.customer_id, name: w.account_name })) added += 1; });
       r.notice = hotels.length
@@ -9537,7 +9768,7 @@ function renderHotelRanking() {
     return `<td style="text-align:right">${fmtInt(x.impressions)}</td>
       <td style="text-align:right">${x.price_diff === null || x.price_diff === undefined ? '<span class="footnote">—</span>' : `<span class="delta-badge ${v.cls}">${hotelPct(x.price_diff)}</span>`}</td>
       <td style="text-align:right">${shareCell(x)}</td><td style="text-align:right">${cheapCell(x)}</td>
-      <td style="text-align:right">${money(x.cost, cur)}</td><td style="text-align:right">${x.conversions ? x.conversions.toFixed(x.conversions % 1 ? 1 : 0) : '0'}</td>
+      <td style="text-align:right">${money(x.cost, cur)}</td><td style="text-align:right">${x.conversions ? fmtConv(x.conversions) : '0'}</td>
       <td>${x.price_diff === null || x.price_diff === undefined ? '' : `<span class="delta-badge ${v.cls}">${v.text}</span>`}</td>`;
   };
   const body = hotelRankSortedItems().map((it) => {
@@ -9658,10 +9889,10 @@ function loadHotelGoogleAdsAccounts() {
     .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
-      // Hoteles solo trabaja con las cuentas de hoteles: las que su nombre empieza por GHA-CPC (en modo simulado se dejan todas).
+      // Hoteles solo trabaja con las cuentas de hoteles: las que su nombre empieza por GHA-CPC o GHA - CPC (en modo simulado se dejan todas).
       const all = data.accounts || [];
       a.simulated = !!data.simulated;
-      a.accounts = a.simulated ? all : all.filter((acc) => pacingIsHotelAccount(acc.name));
+      a.accounts = a.simulated ? all : all.filter((acc) => hotelIsHotelAccount(acc.name));
       a.accountsStatus = 'ready';
       render();
     })
@@ -9670,6 +9901,10 @@ function loadHotelGoogleAdsAccounts() {
       render();
     });
 }
+
+// Cuentas de hoteles para la sección Hoteles: el nombre empieza por «GHA-CPC», con o sin espacios («GHA - CPC - Aqua Hotels»).
+// (Ritmo de consumo usa el mismo criterio a través de pacingIsHotelAccount.)
+function hotelIsHotelAccount(name) { return /^\s*GHA\s*-?\s*CPC/i.test(String(name || '')); }
 
 function hotelCustomerId() {
   const a = state.hotel.api;
@@ -13081,8 +13316,8 @@ const PACING_SORT_KEYS = {
   deviation_pct: (r) => { const c = pacingComputed(r); return c.hasTarget ? c.deviationPct : -Infinity; },
   recommended_daily: (r) => { const c = pacingComputed(r); return c.hasTarget && c.recommendedDaily != null ? c.recommendedDaily : -Infinity; },
 };
-// Las cuentas de hoteles se distinguen de las demás porque su nombre empieza por "GHA-CPC".
-function pacingIsHotelAccount(name) { return /^\s*GHA-CPC/i.test(String(name || '')); }
+// Las cuentas de hoteles se distinguen de las demás porque su nombre empieza por "GHA-CPC" o "GHA - CPC".
+function pacingIsHotelAccount(name) { return hotelIsHotelAccount(name); } // mismo criterio que Hoteles: «GHA-CPC» o «GHA - CPC»
 function pacingMatchesKind(name) {
   const k = state.pacing.accountKind;
   return k === 'all' || (k === 'hotel') === pacingIsHotelAccount(name);
@@ -14032,7 +14267,7 @@ function renderCampanasRow(r, plain) {
       <td>${fmtInt(r.clicks)}</td>
       <td>${r.impressions ? ((r.clicks / r.impressions) * 100).toFixed(2) + '%' : 'N/D'}</td>
       <td>${r.clicks ? campanasMoney(r.cost / r.clicks, cur) : 'N/D'}</td>
-      <td>${r.conversions ? r.conversions.toFixed(r.conversions % 1 ? 1 : 0) : '0'}</td>
+      <td>${r.conversions ? fmtConv(r.conversions) : '0'}</td>
       <td>${r.conversions ? campanasMoney(r.cost / r.conversions, cur) : 'N/D'}</td>
       <td>${r.cost > 0 && r.conv_value > 0 ? (r.conv_value / r.cost).toFixed(2) + '×' : 'N/D'}</td>
       <td>${campanasShare(r.impr_share)}</td>
@@ -14079,7 +14314,7 @@ function investMetrics(row, n) {
 function investVerdict(row, w, bench, accountCost) {
   const w7 = w[7]; const w14 = w[14]; const w30 = w[30];
   const fx = (v) => `${v.toFixed(2)}×`;
-  const conv30 = w30.conversions.toFixed(w30.conversions % 1 ? 1 : 0);
+  const conv30 = fmtConv(w30.conversions);
   if (!(w30.cost > 0)) return { key: 'nodata', reason: 'Sin gasto en los últimos 30 días.' };
   if (bench == null) return { key: 'nodata', reason: 'La cuenta no tiene valor de conversión para compararla.' };
   const share = accountCost > 0 ? w30.cost / accountCost : 0;
@@ -14357,7 +14592,7 @@ function investTableHtml(list, plain) {
     <th style="${INVEST_GROUP}" title="Parte de las impresiones de búsqueda que se perdió porque el presupuesto se agotó (solo Search y Performance Max)">Pérdida por presupuesto 30 d</th>
     <th style="${INVEST_GROUP}">Presupuesto diario</th></tr></thead>`;
   const adjKey = state.campanas.invest.adjust.key;
-  const conv = (m) => `<td>${m.conversions ? m.conversions.toFixed(m.conversions % 1 ? 1 : 0) : '0'}</td>`;
+  const conv = (m) => `<td>${m.conversions ? fmtConv(m.conversions) : '0'}</td>`;
   const body = list.map((x) => {
     const r = x.row;
     const nameTd = `<td ${plain ? '' : `data-camp-open="${e(r.key)}" style="cursor:pointer" title="Ver las gráficas de esta campaña"`}><strong>${e(r.campaign_name)}</strong><div class="field-hint">${e(campanasHotelOf(r))} · ${e(campanasTypeLabel(r.channel_type))}</div></td>`;
@@ -14371,7 +14606,7 @@ function investTableHtml(list, plain) {
       <td><span class="delta-badge ${v.cls}">${v.label}</span><div class="field-hint" style="margin-top:4px;max-width:300px;white-space:normal">${e(x.verdict.reason)}</div>${pacingNote ? `<div style="margin-top:4px;max-width:300px;white-space:normal;font-size:12px;font-weight:600;color:${pacingNote.kind === 'warn' ? 'var(--danger,#b91c1c)' : 'var(--ok-text,#15803d)'}">${pacingNote.kind === 'warn' ? '⚠ ' : ''}${e(pacingNote.text)}</div>` : ''}</td>
       ${investPacingCellHtml(r.customer_id)}
       <td>${campanasMoney(w[30].cost, r.currency)}</td>
-      <td style="${INVEST_GROUP}">${w[7].conversions ? w[7].conversions.toFixed(w[7].conversions % 1 ? 1 : 0) : '0'}</td>${conv(w[14])}${conv(w[30])}
+      <td style="${INVEST_GROUP}">${w[7].conversions ? fmtConv(w[7].conversions) : '0'}</td>${conv(w[14])}${conv(w[30])}
       ${roasCell(w[7], true)}${roasCell(w[14])}${roasCell(w[30])}
       ${cpaCell(w[7], true)}${cpaCell(w[14])}${cpaCell(w[30])}
       <td style="${INVEST_GROUP}">${w[30].lost_is_budget == null ? 'N/D' : `${(w[30].lost_is_budget * 100).toFixed(0)} %`}</td>
@@ -14815,7 +15050,7 @@ function campanaKpiCells(x, cur, prev) {
     <td>${fmtInt(x.clicks)}</td>
     <td>${x.impressions ? ((x.clicks / x.impressions) * 100).toFixed(2) + '%' : 'N/D'}</td>
     <td>${x.clicks ? campanasMoney(x.cost / x.clicks, cur) : 'N/D'}</td>
-    <td>${x.conversions ? x.conversions.toFixed(x.conversions % 1 ? 1 : 0) : '0'}${showDelta ? campanaDeltaSmall(x.conversions, p && p.conversions, 'good_up') : ''}</td>
+    <td>${x.conversions ? fmtConv(x.conversions) : '0'}${showDelta ? campanaDeltaSmall(x.conversions, p && p.conversions, 'good_up') : ''}</td>
     <td>${x.conversions ? campanasMoney(x.cost / x.conversions, cur) : 'N/D'}${showDelta ? campanaDeltaSmall(x.conversions ? x.cost / x.conversions : null, cpa(p), 'good_down') : ''}</td>
     <td>${x.cost > 0 && x.conv_value > 0 ? (x.conv_value / x.cost).toFixed(2) + '×' : 'N/D'}</td>`;
 }
@@ -15086,7 +15321,7 @@ function renderCampanaSegmentsTab(row, cur) {
         <tr>
           <td style="min-width:200px"><strong>${escapeHtml(x.name)}</strong></td>
           <td>${escapeHtml(CAMPANA_CONV_CATEGORY_ES[x.category] || campanaEnumText(x.category))}</td>
-          <td>${x.conversions ? x.conversions.toFixed(x.conversions % 1 ? 1 : 0) : '0'}</td>
+          <td>${x.conversions ? fmtConv(x.conversions) : '0'}</td>
           <td>${totalConv > 0 ? ((x.conversions / totalConv) * 100).toFixed(0) + '%' : 'N/D'}</td>
           <td>${campanasMoney(x.conv_value, cur)}</td>
           <td>${x.conversions ? campanasMoney(x.conv_value / x.conversions, cur) : 'N/D'}</td>
@@ -16935,6 +17170,9 @@ function bindEvents() {
     resetHotelAccountData();
   });
   document.querySelectorAll('[data-hotel-mode]').forEach((btn) => btn.addEventListener('click', () => { state.hotel.mode = btn.dataset.hotelMode; render(); }));
+  const hotelItinCampaign = document.getElementById('hotel-itin-campaign');
+  if (hotelItinCampaign) hotelItinCampaign.addEventListener('change', (e) => { state.hotel.itin.campaignId = e.target.value; render(); });
+  document.querySelectorAll('[data-hotel-itin-days]').forEach((btn) => btn.addEventListener('click', () => setHotelItinDays(Number(btn.dataset.hotelItinDays))));
   const hotelRankSearch = document.getElementById('hotel-rank-search');
   if (hotelRankSearch) hotelRankSearch.addEventListener('input', (e) => { state.hotel.rank.search = e.target.value; render(); hotelRefocus('hotel-rank-search'); });
   const hotelRankSort = document.getElementById('hotel-rank-sort');
@@ -17878,6 +18116,9 @@ function handleAction(action) {
     case 'hotel-mcc-load': loadHotelMccGroups(); break;
     case 'hotel-mcc-clear': clearHotelMccFilter(); break;
     case 'hotel-api-fetch': fetchHotelCampaigns(); break;
+    case 'hotel-itin-load': loadHotelItinerary(); break;
+    case 'hotel-itin-csv': downloadHotelItinCsv(); break;
+    case 'hotel-itin-html': downloadHotelItinHtml(); break;
     case 'hotel-back': {
       const d = state.hotel.detail;
       d.campaignId = null; d.status = 'idle'; d.data = null; d.edits = {}; d.ai = null;
