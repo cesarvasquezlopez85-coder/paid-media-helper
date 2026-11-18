@@ -812,31 +812,36 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/google-ads/campaigns-overview":
-            if not self._require_super_admin_json():
+            # Campañas está abierta a todos los usuarios con sesión desde 2026-11-18; cada handler valida el acceso a la cuenta.
+            if not self._require_auth_json():
                 return
             self._handle_google_ads_campaigns_overview(parse_qs(parsed.query))
             return
 
         if path == "/api/google-ads/campaigns-windows":
-            if not self._require_super_admin_json():
+            # Campañas está abierta a todos los usuarios con sesión desde 2026-11-18; cada handler valida el acceso a la cuenta.
+            if not self._require_auth_json():
                 return
             self._handle_google_ads_campaigns_windows(parse_qs(parsed.query))
             return
 
         if path == "/api/google-ads/campaign-daily":
-            if not self._require_super_admin_json():
+            # Campañas está abierta a todos los usuarios con sesión desde 2026-11-18; cada handler valida el acceso a la cuenta.
+            if not self._require_auth_json():
                 return
             self._handle_google_ads_campaign_daily(parse_qs(parsed.query))
             return
 
         if path == "/api/google-ads/campaign-breakdown":
-            if not self._require_super_admin_json():
+            # Campañas está abierta a todos los usuarios con sesión desde 2026-11-18; cada handler valida el acceso a la cuenta.
+            if not self._require_auth_json():
                 return
             self._handle_google_ads_campaign_breakdown(parse_qs(parsed.query))
             return
 
         if path == "/api/google-ads/campaign-insight":
-            if not self._require_super_admin_json():
+            # Campañas está abierta a todos los usuarios con sesión desde 2026-11-18; cada handler valida el acceso a la cuenta.
+            if not self._require_auth_json():
                 return
             self._handle_google_ads_campaign_insight(parse_qs(parsed.query))
             return
@@ -1031,11 +1036,13 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             self._handle_negative_uploads_undo(payload)
         elif path == "/api/google-ads/campaign-status":
-            if not self._require_super_admin_json():
+            # Pausar, activar y ajustar presupuesto desde Campañas: solo administradores (la sección es de lectura para el resto).
+            if not self._require_admin_json():
                 return
             self._handle_google_ads_campaign_status(payload)
         elif path == "/api/google-ads/campaign-budget":
-            if not self._require_super_admin_json():
+            # Pausar, activar y ajustar presupuesto desde Campañas: solo administradores (la sección es de lectura para el resto).
+            if not self._require_admin_json():
                 return
             self._handle_google_ads_campaign_budget(payload)
         elif path == "/api/google-ads/recommendation-subscriptions":

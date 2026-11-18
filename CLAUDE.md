@@ -29,7 +29,7 @@ Herramienta interna de una agencia de hoteles para analizar y operar cuentas de 
 
 ## Roles y secciones restringidas
 
-Hay usuarios normales, administradores (`PMH_ADMIN_USERNAMES`) y super admin (`PMH_SUPER_ADMIN_USERNAMES`). Cada usuario no administrador solo accede a las cuentas de Google Ads que un administrador le asigna. Hoteles, Campañas, Audiencias y la pestaña «Con IA» de Negativización son solo para super admin: el servidor responde 403 a cualquiera más, no solo se oculta el menú. El rol se sincroniza con las variables de entorno **solo al arrancar el servidor**.
+Hay usuarios normales, administradores (`PMH_ADMIN_USERNAMES`) y super admin (`PMH_SUPER_ADMIN_USERNAMES`). Cada usuario no administrador solo accede a las cuentas de Google Ads que un administrador le asigna. Hoteles, Audiencias y la pestaña «Con IA» de Negativización son solo para super admin: el servidor responde 403 a cualquiera más, no solo se oculta el menú. Campañas la ve todo usuario con sesión (cada consulta valida el acceso a la cuenta), pero pausar, activar y ajustar presupuesto desde ahí son solo para administradores. El rol se sincroniza con las variables de entorno **solo al arrancar el servidor**.
 
 ## Escrituras reales en cuentas de clientes
 

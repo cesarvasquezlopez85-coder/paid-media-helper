@@ -14110,7 +14110,7 @@ function campanasStrategy(r) {
 // Se llama desde el dibujado de la página: solo arranca la carga la primera vez que se entra.
 function ensureCampanasLoaded() {
   const c = state.campanas;
-  if (c.watchlistStatus !== 'idle' || !currentUser.isSuperAdmin) return;
+  if (c.watchlistStatus !== 'idle') return;
   c.watchlistStatus = 'loading';
   setTimeout(loadCampanas, 0);
 }
@@ -14243,7 +14243,7 @@ function renderCampanasRow(r, plain) {
   const busy = !!c.busy[r.key];
   const target = active ? 'PAUSED' : 'ENABLED';
   let actionCell;
-  if (plain) actionCell = '';
+  if (plain || !currentUser.isAdmin) actionCell = ''; // pausar y activar: solo administradores (el servidor también lo exige)
   else if (busy) actionCell = '<span class="field-hint">Aplicando…</span>';
   else if (c.confirm === r.key) {
     actionCell = `
@@ -14526,7 +14526,7 @@ function investBudgetCell(x, plain) {
   const r = x.row;
   if (r.budget == null) return '<td>N/D</td>';
   const money = campanasMoney(r.budget, r.currency);
-  if (plain) return `<td>${money}</td>`;
+  if (plain || !currentUser.isAdmin) return `<td>${money}</td>`; // ajustar presupuesto: solo administradores
   if (r.budget_shared) return `<td>${money}<div class="footnote" title="Esta campaña usa un presupuesto compartido con otras: cambiarlo afectaría a todas. Ajústalo desde Google Ads.">Compartido: solo lectura</div></td>`;
   return `<td>${money}<div style="margin-top:4px"><button class="btn-outline xs" data-camp-budget-open="${escapeHtml(r.key)}">Ajustar</button></div></td>`;
 }
@@ -14730,9 +14730,6 @@ function renderCampanasInvest() {
 
 function renderCampanasPage() {
   const c = state.campanas;
-  if (!currentUser.isSuperAdmin) {
-    return `<div class="card state-panel idle"><p>Esta sección todavía no está disponible para tu usuario.</p></div>`;
-  }
   ensureCampanasLoaded();
 
   const invView = c.view === 'invest';
@@ -18516,7 +18513,7 @@ fetch('/api/me').then((r) => r.json()).then((data) => {
   // que se ponga HOTEL_SECTION_VISIBLE en true; cuando se muestre, solo super admin
   // (el servidor también lo exige).
   const navCampanas = document.getElementById('nav-campanas');
-  if (navCampanas && currentUser.isSuperAdmin) navCampanas.style.display = '';
+  if (navCampanas) navCampanas.style.display = ''; // abierta a todos desde 2026-11-18
   const navAudiencias = document.getElementById('nav-audiencias');
   if (navAudiencias && currentUser.isSuperAdmin) navAudiencias.style.display = '';
   const navCambios = document.getElementById('nav-cambios');
