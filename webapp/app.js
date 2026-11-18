@@ -14243,7 +14243,7 @@ function renderCampanasRow(r, plain) {
   const busy = !!c.busy[r.key];
   const target = active ? 'PAUSED' : 'ENABLED';
   let actionCell;
-  if (plain || !currentUser.isAdmin) actionCell = ''; // pausar y activar: solo administradores (el servidor también lo exige)
+  if (plain) actionCell = '';
   else if (busy) actionCell = '<span class="field-hint">Aplicando…</span>';
   else if (c.confirm === r.key) {
     actionCell = `
@@ -14526,7 +14526,7 @@ function investBudgetCell(x, plain) {
   const r = x.row;
   if (r.budget == null) return '<td>N/D</td>';
   const money = campanasMoney(r.budget, r.currency);
-  if (plain || !currentUser.isAdmin) return `<td>${money}</td>`; // ajustar presupuesto: solo administradores
+  if (plain) return `<td>${money}</td>`;
   if (r.budget_shared) return `<td>${money}<div class="footnote" title="Esta campaña usa un presupuesto compartido con otras: cambiarlo afectaría a todas. Ajústalo desde Google Ads.">Compartido: solo lectura</div></td>`;
   return `<td>${money}<div style="margin-top:4px"><button class="btn-outline xs" data-camp-budget-open="${escapeHtml(r.key)}">Ajustar</button></div></td>`;
 }

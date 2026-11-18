@@ -1036,13 +1036,13 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             self._handle_negative_uploads_undo(payload)
         elif path == "/api/google-ads/campaign-status":
-            # Pausar, activar y ajustar presupuesto desde Campañas: solo administradores (la sección es de lectura para el resto).
-            if not self._require_admin_json():
+            # Desde 2026-11-18, para todos los usuarios con sesión: el manejador valida el acceso a la cuenta y aplica el límite de escrituras.
+            if not self._require_auth_json():
                 return
             self._handle_google_ads_campaign_status(payload)
         elif path == "/api/google-ads/campaign-budget":
-            # Pausar, activar y ajustar presupuesto desde Campañas: solo administradores (la sección es de lectura para el resto).
-            if not self._require_admin_json():
+            # Desde 2026-11-18, para todos los usuarios con sesión: el manejador valida el acceso a la cuenta y aplica el límite de escrituras.
+            if not self._require_auth_json():
                 return
             self._handle_google_ads_campaign_budget(payload)
         elif path == "/api/google-ads/recommendation-subscriptions":
