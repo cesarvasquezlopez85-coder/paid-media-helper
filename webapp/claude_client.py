@@ -40,6 +40,25 @@ SYSTEM_PROMPT = (
 )
 
 
+# --- Idioma de la respuesta ---------------------------------------------------------------------------
+# Los datos y las instrucciones van en español; si la persona usa la plataforma en inglés, se le pide a Claude que
+# escriba su respuesta en inglés. Lo que valida el código (llaves del JSON, valores fijos, ids, términos de
+# búsqueda y nombres de campañas) no cambia de idioma.
+def idioma_valido(lang):
+    return "en" if lang == "en" else "es"
+
+
+def _con_idioma(system, lang):
+    if idioma_valido(lang) != "en":
+        return system
+    return (
+        system + "\n\nIDIOMA DE LA RESPUESTA: escribe todo el texto que redactes (párrafos, razones, preguntas, nombres de "
+        "temas y de grupos) en inglés claro y profesional, aunque las instrucciones y los datos estén en español. "
+        "No traduzcas las llaves del JSON, los valores fijos (como FRASE o EXACTA), los ids, los nombres de campañas "
+        "ni los términos de búsqueda ni las palabras negativas que propongas: esos se dejan tal como están en los datos."
+    )
+
+
 # --- Consumo de tokens -------------------------------------------------------------------------------
 # Cada llamado a Claude suma sus tokens (y cuántos llamados fueron) a un contador del hilo que atiende la
 # petición: el servidor lo abre con begin_usage() y lo cierra con end_usage() para guardarlo por usuario y
@@ -90,7 +109,7 @@ def _auth_headers():
     }
 
 
-def analizar_rendimiento(resumen, recs):
+def analizar_rendimiento(resumen, recs, lang="es"):
     """resumen: dict de engine.summarize() (JS) serializado a JSON por el
     cliente. recs: lista de hallazgos de engine.generateRecommendations(),
     ya ordenada por impacto_gasto desc. Devuelve el texto de la narrativa."""
@@ -104,7 +123,7 @@ def analizar_rendimiento(resumen, recs):
         "model": MODEL,
         "max_tokens": 2000,
         "output_config": {"effort": "low"},
-        "system": SYSTEM_PROMPT,
+        "system": _con_idioma(SYSTEM_PROMPT, lang),
         "messages": [{"role": "user", "content": user_content}],
     }
     req = urllib.request.Request(
@@ -149,7 +168,7 @@ AUDIT_SYSTEM_PROMPT = (
 )
 
 
-def analizar_auditoria(resumen, findings, no_verificables, contexto):
+def analizar_auditoria(resumen, findings, no_verificables, contexto, lang="es"):
     """resumen: puntaje y totales de la auditoría. findings: hallazgos (ya
     ordenados por gravedad). Devuelve el texto de la narrativa."""
     user_content = (
@@ -162,7 +181,7 @@ def analizar_auditoria(resumen, findings, no_verificables, contexto):
         "model": MODEL,
         "max_tokens": 2000,
         "output_config": {"effort": "low"},
-        "system": AUDIT_SYSTEM_PROMPT,
+        "system": _con_idioma(AUDIT_SYSTEM_PROMPT, lang),
         "messages": [{"role": "user", "content": user_content}],
     }
     req = urllib.request.Request(
@@ -488,7 +507,7 @@ NEG_SCHEMA = {
 }
 
 
-def _neg_http(user_content):
+def _neg_http(user_content, lang="es"):
     body = {
         "model": MODEL,
         "max_tokens": NEG_MAX_TOKENS,
@@ -496,7 +515,7 @@ def _neg_http(user_content):
         # decisiones de riesgo no dependen del modelo, las valida negativos_ia.py con código.
         "thinking": {"type": "disabled"},
         "output_config": {"effort": "low", "format": {"type": "json_schema", "schema": NEG_SCHEMA}},
-        "system": NEG_SYSTEM_PROMPT,
+        "system": _con_idioma(NEG_SYSTEM_PROMPT, lang),
         "messages": [{"role": "user", "content": user_content}],
     }
     req = urllib.request.Request(
@@ -521,10 +540,10 @@ def _neg_http(user_content):
     return text
 
 
-def analizar_negativos(user_content):
+def analizar_negativos(user_content, lang="es"):
     """user_content: el JSON armado por negativos_ia.build_user_content.
     Devuelve el dict que respondió Claude (sin validar: eso lo hace negativos_ia)."""
-    text = _neg_http(user_content)
+    text = _neg_http(user_content, lang)
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end <= start:
         raise RuntimeError("La respuesta de Claude no trae un JSON válido.")
@@ -628,6 +647,6 @@ def _hotel_json_call(system, schema, user_content, max_tokens=HOTEL_MAX_TOKENS):
     return data
 
 
-def analizar_hotel(user_content):
+def analizar_hotel(user_content, lang="es"):
     """user_content: el JSON armado por hoteles_ia.build_input. Devuelve el dict de Claude (sin validar)."""
-    return _hotel_json_call(HOTEL_SYSTEM_PROMPT, HOTEL_SCHEMA, user_content)
+    return _hotel_json_call(_con_idioma(HOTEL_SYSTEM_PROMPT, lang), HOTEL_SCHEMA, user_content)

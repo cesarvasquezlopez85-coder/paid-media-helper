@@ -598,6 +598,14 @@ def store_ai_usage(user_id, feature, calls, input_tokens, output_tokens, cost_us
         conn.close()
 
 
+def _ai_language(user):
+    """Idioma en que Claude escribe sus respuestas: el que la persona eligió en la plataforma. El inglés es solo para
+    super admin (igual que el interruptor); a cualquiera más se le responde en español."""
+    if user and user.get("language") == "en" and str(user.get("username", "")).lower() in SUPER_ADMIN_USERNAMES:
+        return "en"
+    return "es"
+
+
 @contextlib.contextmanager
 def track_ai_usage(user_id, feature):
     """Anota los tokens que gaste lo que corra dentro del bloque (incluso si termina con error) en ai_usage.
@@ -3150,7 +3158,7 @@ class Handler(SimpleHTTPRequestHandler):
         contexto = payload.get("contexto") if isinstance(payload.get("contexto"), dict) else {}
         try:
             with track_ai_usage(user["id"], "auditoria"):
-                narrativa = claude_client.analizar_auditoria(resumen, findings, no_verificables, contexto)
+                narrativa = claude_client.analizar_auditoria(resumen, findings, no_verificables, contexto, lang=_ai_language(user))
             self._send_json(200, {"narrativa": narrativa})
         except Exception as e:  # noqa: BLE001
             print(f"[claude-error] {e}", flush=True)
@@ -3173,7 +3181,7 @@ class Handler(SimpleHTTPRequestHandler):
 
         try:
             with track_ai_usage(user["id"], "rendimiento"):
-                narrativa = claude_client.analizar_rendimiento(resumen, recs)
+                narrativa = claude_client.analizar_rendimiento(resumen, recs, lang=_ai_language(user))
             self._send_json(200, {"narrativa": narrativa})
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             print(f"[claude-error] {e}", flush=True)
@@ -3278,7 +3286,7 @@ class Handler(SimpleHTTPRequestHandler):
             chosen = negativos_ia.select_for_ai(terms)
             user_content = negativos_ia.build_user_content(ctx, chosen, existing.texts())
             with track_ai_usage(user["id"], "negativizacion"):
-                ai = claude_client.analizar_negativos(user_content)
+                ai = claude_client.analizar_negativos(user_content, lang=_ai_language(user))
             result = negativos_ia.build_result(ai, terms, chosen, ctx, existing, positives)
             result["negativas_existentes"] = existing.total()
             result["negativas_fuentes"] = {**existing.counts, "errores": len(neg_errors)}
@@ -3335,7 +3343,7 @@ class Handler(SimpleHTTPRequestHandler):
                 self._send_json(400, {"error": "Esta campaña no tiene modificadores editables que analizar."})
                 return
             with track_ai_usage(user["id"], "hoteles"):
-                ai = claude_client.analizar_hotel(user_content)
+                ai = claude_client.analizar_hotel(user_content, lang=_ai_language(user))
             locked = bool(modifiers.get("template_locked"))
             result = hoteles_ia.build_result(ai, modifiers, price, by_id, locked)
             result["campaign_id"] = campaign_id
