@@ -74,9 +74,13 @@ function findColumn(headers, candidates) {
   return null;
 }
 
+// Gancho opcional para traducir los textos de cada celda (idioma inglés); sin él, el CSV sale como se arma.
+let csvCellTransform = null;
+export function setCsvCellTransform(fn) { csvCellTransform = fn; }
+
 export function downloadCsv(filename, rows) {
   const csv = rows.map((r) => r.map((v) => {
-    const s = String(v ?? "");
+    const s = String(csvCellTransform && typeof v === "string" ? csvCellTransform(v) : (v ?? ""));
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   }).join(",")).join("\n");
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });

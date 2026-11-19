@@ -1,5 +1,13 @@
 import * as engine from './engine.js';
-import { initLang, onLangChange, syncServerLang, forceSpanish, t, dateLocale } from './i18n.js';
+import { initLang, onLangChange, syncServerLang, forceSpanish, t, dateLocale, getLang, translateDownload } from './i18n.js';
+// CSV: en inglés cada celda de texto se traduce (con memoria, porque un CSV grande repite mucho los mismos valores).
+const csvTrCache = new Map();
+engine.setCsvCellTransform((v) => {
+  if (getLang() !== 'en') return v;
+  let r = csvTrCache.get(v);
+  if (r === undefined) { r = t(v); csvTrCache.set(v, r); }
+  return r;
+});
 
 // Los diálogos del navegador también salen en el idioma elegido (el texto se escribe en español y se traduce al mostrarlo).
 const nativeConfirm = window.confirm.bind(window);
@@ -12022,7 +12030,7 @@ function auditFileName(ext) {
 }
 
 function downloadTextFile(content, filename, mime) {
-  const blob = new Blob([content], { type: `${mime};charset=utf-8` });
+  const blob = new Blob([translateDownload(content, mime)], { type: `${mime};charset=utf-8` });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url; link.download = filename;

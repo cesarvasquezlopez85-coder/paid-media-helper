@@ -52,7 +52,7 @@ function buildIndex(dict) {
       }).join('');
       // Texto fijo más largo del patrón: si el texto no lo contiene, ni se prueba la expresión regular (más rápido con muchos patrones).
       const needle = k.split(/\{n?\d+\}/).reduce((a, b) => (b.length > a.length ? b : a), '');
-      patterns.push({ re: new RegExp(`^${source}$`), order, tpl: value, needle });
+      patterns.push({ re: new RegExp(`^${source}$`), order, tpl: value, needle, lead: /^\{n?\d+\}/.test(k), trail: /\{n?\d+\}$/.test(k), dot: k.includes(' · ') });
     } else {
       exact.set(k, value);
     }
@@ -68,16 +68,55 @@ async function loadDict() {
   dictLoaded = true;
 }
 
+// Textos con varias piezas (separadas por « · » o varias frases seguidas): se traducen pieza por pieza.
+// Con strict, solo si TODAS las piezas tienen traducción (así un patrón general no parte mal una frase larga).
+const PART_SPLITS = [[' · ', / · /], [' ', /(?<=[.!?])\s+(?=\S)/]];
+function translateParts(n, depth, strict) {
+  for (const [sep, re] of PART_SPLITS) {
+    const parts = n.split(re);
+    if (parts.length < 2) continue;
+    let any = false;
+    let all = true;
+    const out = parts.map((part) => {
+      const sub = lookup(part, depth + 1);
+      if (sub === undefined) { all = false; return part; }
+      any = true;
+      return sub;
+    });
+    if (strict ? all : any) return out.join(sep);
+  }
+  return undefined;
+}
+
 // Busca la traducción de un texto ya normalizado (sin tocar los espacios de los extremos). Devuelve undefined si no hay.
 // Lo que capturan los marcadores también se traduce (con entradas exactas o con otros patrones), hasta 3 niveles.
 function lookup(n, depth) {
   const direct = exact.get(n);
   if (direct !== undefined) return direct;
   if (depth > 3) return undefined;
+  // Títulos de las reglas de la auditoría («A4 · Conversiones»): el código va aparte y el resto se traduce solo.
+  const rule = n.match(/^([A-Z]{1,2}\d{1,2}[a-z]?) · (.+)$/);
+  if (rule) {
+    const sub = lookup(rule[2], depth + 1);
+    if (sub !== undefined) return rule[1] + ' · ' + sub;
+  }
+  // Prefijo de viñeta «➜ »: se traduce el resto de la frase por separado (si no, un patrón genérico con coma lo parte mal).
+  if (n.startsWith('➜ ')) {
+    const sub = lookup(n.slice(2), depth + 1);
+    if (sub !== undefined) return '➜ ' + sub;
+  }
+  if (depth <= 2) {
+    const whole = translateParts(n, depth, true);
+    if (whole !== undefined) return whole;
+  }
   for (const p of patterns) {
     if (p.needle && !n.includes(p.needle)) continue;
     const m = n.match(p.re);
     if (!m) continue;
+    // Un patrón que empieza con un marcador no puede tragarse un «**etiqueta:**» ni un «etiqueta: valor» (líneas de Markdown): ahí se traduce por partes.
+    if (p.lead && /\*\*|: /.test(m[1])) continue;
+    // Un patrón sin « · » no se traga varias piezas unidas con « · »: se traducen una por una (último recurso de abajo).
+    if (!p.dot && ((p.lead && m[1].includes(' · ')) || (p.trail && m[m.length - 1].includes(' · ')))) continue;
     return p.tpl.replace(/\{(\d+)\}/g, (_, i) => {
       const j = p.order.indexOf(i);
       const cap = j >= 0 ? m[j + 1] : '';
@@ -87,6 +126,8 @@ function lookup(n, depth) {
       return sub === undefined ? cap : cap.match(/^\s*/)[0] + sub + cap.match(/\s*$/)[0];
     });
   }
+  // Último recurso: lo que se pueda traducir por piezas, aunque no todas.
+  if (depth <= 2) return translateParts(n, depth, false);
   return undefined;
 }
 
@@ -265,5 +306,64 @@ export function forceSpanish() {
   ready.then(() => { if (lang !== 'es') setLang('es', { persist: false }); });
 }
 
+// ---- Descargas (HTML, Markdown): se traducen al generarlas, con el mismo diccionario ----
+// HTML: se lee como página y se traducen los textos y los atributos, igual que en pantalla.
+function translateHtmlString(html) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const tw = doc.createTreeWalker(doc.documentElement, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+  let n = tw.currentNode;
+  while (n) {
+    if (n.nodeType === 3) {
+      if (n.parentNode && !SKIP_TAGS.has(n.parentNode.nodeName)) n.nodeValue = t(n.nodeValue);
+    } else if (n.nodeType === 1) {
+      for (const a of ATTRS) if (n.hasAttribute(a)) n.setAttribute(a, t(n.getAttribute(a)));
+    }
+    n = tw.nextNode();
+  }
+  doc.documentElement.setAttribute('lang', 'en');
+  return '<!doctype html>\n' + doc.documentElement.outerHTML;
+}
+
+// Markdown: línea por línea. Las filas de tabla, celda por celda; las demás, primero la línea completa,
+// luego sin el marcador de inicio (#, -, *), y al final por pedazos: «**etiqueta:** valor» y «etiqueta: valor».
+function translateMarkdownString(md) {
+  return md.split('\n').map((line) => {
+    const m = line.match(/^(\s*(?:#{1,6}\s+|[-*]\s+|\d+\.\s+)?)(.*)$/);
+    const prefix = m[1]; const rest = m[2];
+    if (/^\|.*\|\s*$/.test(rest)) {
+      if (/^\|[\s:|-]+\|\s*$/.test(rest)) return line; // la fila de guiones
+      return prefix + rest.split('|').map((c) => t(c)).join('|');
+    }
+    const whole = t(rest);
+    if (whole !== rest) return prefix + whole;
+    const full = t(line);
+    if (full !== line) return full;
+    return prefix + rest.split(/(\*\*[^*]+\*\*)/).map((seg) => {
+      const b = seg.match(/^\*\*([^*]+)\*\*$/);
+      if (b) {
+        const inner = b[1]; const ti = t(inner);
+        if (ti !== inner) return '**' + ti + '**';
+        const lab = inner.match(/^(.*?):$/);
+        return '**' + (lab ? t(lab[1]) + ':' : inner) + '**';
+      }
+      const kv = seg.match(/^(\s*)([^:]{1,40}):\s(.+)$/);
+      if (kv) {
+        const k2 = t(kv[2]); const v2 = t(kv[3]);
+        if (k2 !== kv[2] || v2 !== kv[3]) return kv[1] + k2 + ': ' + v2;
+      }
+      return t(seg);
+    }).join('');
+  }).join('\n');
+}
+
+export function translateDownload(content, mime) {
+  if (lang !== 'en' || typeof content !== 'string') return content;
+  try {
+    if (/html/i.test(mime)) return translateHtmlString(content);
+    if (/markdown/i.test(mime)) return translateMarkdownString(content);
+  } catch (e) { /* si algo falla, se descarga el original en español */ }
+  return content;
+}
+
 // Ayuda para completar el diccionario: con localStorage.pmh_i18n_debug = '1' guarda los textos sin traducir.
-window.__i18n = { missing: () => [...missingSet].sort(), clear: () => missingSet.clear(), lang: () => lang };
+window.__i18n = { missing: () => [...missingSet].sort(), clear: () => missingSet.clear(), lang: () => lang, t };
