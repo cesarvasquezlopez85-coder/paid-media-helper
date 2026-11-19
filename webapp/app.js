@@ -15121,7 +15121,7 @@ function renderCampanaSummaryTab(row, cur) {
       <div class="card stat-card" style="min-width:150px;padding:14px 16px">
         <div class="stat-label">${label}</div>
         <div class="stat-value" style="font-size:18px">${value}</div>
-        <div class="stat-sub">${deltaHtml}${prevText ? ` <span>antes ${prevText}</span>` : ''}</div>
+        <div class="stat-sub">${deltaHtml}${prevText ? ` <span>${t('antes')} ${prevText}</span>` : ''}</div>
       </div>`;
     const money = (v) => (v == null ? 'N/D' : campanasMoney(v, cur));
     const pctTxt = (v) => (v == null ? 'N/D' : (v * 100).toFixed(2) + '%');
@@ -15531,7 +15531,7 @@ function renderCampanaChangesTab(row, cur) {
         <tr>
           <td style="white-space:nowrap">${escapeHtml(ch.when.slice(0, 16))}</td>
           <td>${escapeHtml(ch.user || '—')}<div class="field-hint">${escapeHtml(changeClientText(ch.client))}</div></td>
-          <td>${escapeHtml(ch.operation_label)} · ${escapeHtml(ch.resource_label)}</td>
+          <td><span>${escapeHtml(ch.operation_label)}</span> · <span>${escapeHtml(ch.resource_label)}</span></td>
           <td style="min-width:240px">${detail}</td>
         </tr>`;
     }).join('');
@@ -15558,7 +15558,7 @@ function renderCampanaDetailModal() {
   const head = `
     <button class="modal-close" data-action="camp-detail-close" aria-label="Cerrar">${icon('x', 18)}</button>
     <h3 class="dense-chart-title" style="margin:0 0 4px;padding-right:28px">${escapeHtml(row.campaign_name)}</h3>
-    <p class="field-hint" style="margin:0 0 14px">${escapeHtml(campanasHotelOf(row))} · ${escapeHtml(campanasTypeLabel(row.channel_type))} · ${escapeHtml(strat.label)}${strat.target ? ` (${escapeHtml(strat.target)})` : ''} · ${row.status === 'ENABLED' ? 'Activa' : 'Pausada'} · del ${escapeHtml(c.loadedFrom)} al ${escapeHtml(c.loadedTo)}</p>
+    <p class="field-hint" style="margin:0 0 14px"><span>${escapeHtml(campanasHotelOf(row))}</span> · <span>${escapeHtml(campanasTypeLabel(row.channel_type))}</span> · <span>${escapeHtml(strat.label)}</span>${strat.target ? ` (<span>${escapeHtml(strat.target)}</span>)` : ''} · <span>${row.status === 'ENABLED' ? 'Activa' : 'Pausada'}</span> · <span>del ${escapeHtml(c.loadedFrom)} al ${escapeHtml(c.loadedTo)}</span></p>
     <div style="margin:0 0 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
       <button class="btn-outline xs" data-action="camp-detail-html" ${d.exporting ? 'disabled' : ''}>${d.exporting ? 'Preparando el HTML…' : 'Descargar HTML de esta campaña'}</button>
       <span class="field-hint" style="margin:0">Incluye todas las pestañas menos Cambios.</span>
@@ -15621,7 +15621,7 @@ function mountCampanaCharts() {
     const canvas = document.getElementById(id);
     if (canvas) chartRegistry[id] = new window.Chart(canvas.getContext('2d'), { ...config, plugins: [changeMarkers] });
   };
-  const line = (label, data, color, extra = {}) => ({ type: 'line', label, data, borderColor: color, backgroundColor: color, borderWidth: 2, pointRadius: 2, tension: 0.25, spanGaps: false, ...extra });
+  const line = (label, data, color, extra = {}) => ({ type: 'line', label: t(label), data, borderColor: color, backgroundColor: color, borderWidth: 2, pointRadius: 2, tension: 0.25, spanGaps: false, ...extra });
   const tip = (fmts) => ({ callbacks: { label: (item) => `${item.dataset.label}: ${fmts[item.datasetIndex] ? fmts[item.datasetIndex](item.parsed.y) : item.parsed.y}` } });
   const money = (v) => campanasMoney(v, cur);
   // Los ejes van sin moneda para no recargarlos; la moneda sale en el detalle al pasar el cursor.
@@ -15641,7 +15641,7 @@ function mountCampanaCharts() {
   o.scales.x.stacked = true;
   o.scales.y = { stacked: true, min: 0, max: 1, grid: { color: col.grid }, ticks: tick(pct) };
   o.plugins.tooltip = { ...o.plugins.tooltip, ...tip([pct1, pct1, pct1]) };
-  const bar = (label, data, color) => ({ type: 'bar', label, data, backgroundColor: color, borderWidth: 0, barPercentage: 0.9, categoryPercentage: 0.95 });
+  const bar = (label, data, color) => ({ type: 'bar', label: t(label), data, backgroundColor: color, borderWidth: 0, barPercentage: 0.9, categoryPercentage: 0.95 });
   mount('camp-chart-lost', { type: 'bar', data: { labels, datasets: [
     bar('Cuota obtenida', series.map((x) => x.impr_share), col.teal),
     bar('Perdida por presupuesto', series.map((x) => x.lost_is_budget), col.orange),
@@ -15653,7 +15653,7 @@ function mountCampanaCharts() {
   o.scales.y = { beginAtZero: true, grid: { color: col.grid }, ticks: tick(axisMoney) };
   o.plugins.tooltip = { ...o.plugins.tooltip, ...tip([money, money]) };
   mount('camp-chart-spend', { type: 'bar', data: { labels, datasets: [
-    { type: 'bar', label: 'Gasto', data: series.map((x) => x.cost), backgroundColor: col.navy, borderRadius: 3, order: 2 },
+    { type: 'bar', label: t('Gasto'), data: series.map((x) => x.cost), backgroundColor: col.navy, borderRadius: 3, order: 2 },
     line('Presupuesto diario actual', series.map((x) => x.budget), col.orange, { borderDash: [6, 4], pointRadius: 0, order: 1 }),
   ] }, options: o });
 
@@ -15663,7 +15663,7 @@ function mountCampanaCharts() {
   o.scales.y1 = { position: 'right', beginAtZero: true, grid: { display: false }, ticks: tick((v) => v.toFixed(1) + '%') };
   o.plugins.tooltip = { ...o.plugins.tooltip, ...tip([fmtInt, (v) => v.toFixed(2) + '%']) };
   mount('camp-chart-clicks', { type: 'bar', data: { labels, datasets: [
-    { type: 'bar', label: 'Clics', data: series.map((x) => x.clicks), backgroundColor: col.teal, borderRadius: 3, yAxisID: 'y', order: 2 },
+    { type: 'bar', label: t('Clics'), data: series.map((x) => x.clicks), backgroundColor: col.teal, borderRadius: 3, yAxisID: 'y', order: 2 },
     line('CTR', series.map((x) => (x.impressions ? (x.clicks / x.impressions) * 100 : null)), col.navy, { yAxisID: 'y1', order: 1 }),
   ] }, options: o });
 
@@ -15673,7 +15673,7 @@ function mountCampanaCharts() {
   o.scales.y1 = { position: 'right', beginAtZero: true, grid: { display: false }, ticks: tick(axisMoney) };
   o.plugins.tooltip = { ...o.plugins.tooltip, ...tip([(v) => (Number.isInteger(v) ? v : v.toFixed(1)), money]) };
   mount('camp-chart-conv', { type: 'bar', data: { labels, datasets: [
-    { type: 'bar', label: 'Conversiones', data: series.map((x) => x.conversions), backgroundColor: col.teal, borderRadius: 3, yAxisID: 'y', order: 2 },
+    { type: 'bar', label: t('Conversiones'), data: series.map((x) => x.conversions), backgroundColor: col.teal, borderRadius: 3, yAxisID: 'y', order: 2 },
     line('CPA', series.map((x) => (x.conversions > 0 ? x.cost / x.conversions : null)), col.orange, { yAxisID: 'y1', order: 1 }),
   ] }, options: o });
 
@@ -16006,7 +16006,7 @@ function downloadCambiosHtml() {
         <td class="nw">${escapeHtml(ch.when.slice(0, 16))}</td>
         <td>${escapeHtml(changeUserText(ch))}<div class="sub">${escapeHtml(changeClientText(ch.client))}</div></td>
         <td>${escapeHtml(ch.campaign_name || '—')}${ch.ad_group_name ? `<div class="sub">${escapeHtml(ch.ad_group_name)}</div>` : ''}</td>
-        <td>${escapeHtml(ch.operation_label)} · ${escapeHtml(ch.resource_label)}</td>
+        <td><span>${escapeHtml(ch.operation_label)}</span> · <span>${escapeHtml(ch.resource_label)}</span></td>
         <td>${changeDetailHtml(ch, s.currency)}</td>
       </tr>`).join('');
   const html = `<!doctype html>
@@ -16114,7 +16114,7 @@ function renderCambiosPage() {
       <td style="white-space:nowrap">${escapeHtml(ch.when.slice(0, 16))}</td>
       <td>${escapeHtml(changeUserText(ch))}<div class="field-hint">${escapeHtml(changeClientText(ch.client))}</div></td>
       <td style="min-width:200px">${escapeHtml(ch.campaign_name || '—')}${ch.ad_group_name ? `<div class="field-hint">${escapeHtml(ch.ad_group_name)}</div>` : ''}</td>
-      <td>${escapeHtml(ch.operation_label)} · ${escapeHtml(ch.resource_label)}</td>
+      <td><span>${escapeHtml(ch.operation_label)}</span> · <span>${escapeHtml(ch.resource_label)}</span></td>
       <td style="min-width:240px">${changeDetailHtml(ch, s.currency)}</td>
     </tr>`).join('');
   const table = `

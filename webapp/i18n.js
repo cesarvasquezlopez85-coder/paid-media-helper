@@ -66,27 +66,34 @@ async function loadDict() {
   dictLoaded = true;
 }
 
+// Busca la traducción de un texto ya normalizado (sin tocar los espacios de los extremos). Devuelve undefined si no hay.
+// Lo que capturan los marcadores también se traduce (con entradas exactas o con otros patrones), hasta 3 niveles.
+function lookup(n, depth) {
+  const direct = exact.get(n);
+  if (direct !== undefined) return direct;
+  if (depth > 3) return undefined;
+  for (const p of patterns) {
+    const m = n.match(p.re);
+    if (!m) continue;
+    return p.tpl.replace(/\{(\d+)\}/g, (_, i) => {
+      const j = p.order.indexOf(i);
+      const cap = j >= 0 ? m[j + 1] : '';
+      const cn = norm(cap);
+      const sub = cn ? lookup(cn, depth + 1) : undefined;
+      // Si lo capturado tiene traducción propia se usa, conservando sus espacios de los extremos.
+      return sub === undefined ? cap : cap.match(/^\s*/)[0] + sub + cap.match(/\s*$/)[0];
+    });
+  }
+  return undefined;
+}
+
 // Traduce un texto. Conserva los espacios del principio y del final. Sin traducción devuelve el mismo texto.
 export function t(text) {
   if (lang !== 'en' || text == null) return text;
   const s = String(text);
   const n = norm(s);
   if (!n) return s;
-  let hit = exact.get(n);
-  if (hit === undefined) {
-    for (const p of patterns) {
-      const m = n.match(p.re);
-      if (!m) continue;
-      hit = p.tpl.replace(/\{(\d+)\}/g, (_, i) => {
-        const j = p.order.indexOf(i);
-        const cap = j >= 0 ? m[j + 1] : '';
-        const sub = exact.get(norm(cap));
-        // Si lo capturado tiene traducción propia se usa, conservando sus espacios de los extremos.
-        return sub === undefined ? cap : cap.match(/^\s*/)[0] + sub + cap.match(/\s*$/)[0];
-      });
-      break;
-    }
-  }
+  const hit = lookup(n, 0);
   if (hit === undefined) return s;
   return s.match(/^\s*/)[0] + hit + s.match(/\s*$/)[0];
 }
