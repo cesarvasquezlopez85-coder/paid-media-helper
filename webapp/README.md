@@ -19,6 +19,7 @@ Luego abre `http://localhost:8642` — te va a pedir iniciar sesión o crear cue
 - `styles-roiback.css` — el rediseño Roiback; desde el 2026-11-01 es el diseño de todos los usuarios (`index.html` lo carga y `app.js` fija `APP_THEME = 'roiback'`). `styles.css` se conserva como el diseño anterior y lo sigue usando la pantalla de login.
 - `login.html` / `login.js` — pantalla de inicio de sesión / creación de cuenta.
 - `styles.css` — tokens de diseño (color, tipografía, espaciado) portados del design system del handoff.
+- `i18n.js` / `i18n-en.js` — idioma de la interfaz (español / inglés, interruptor ES | EN): traducción central por diccionario de lo que se dibuja; en español no hace nada. Al agregar un texto visible nuevo, súmalo a `i18n-en.js` (ver «Idioma de la interfaz» en `Resumen_Proyecto.md`).
 - `engine.js` — lógica de negocio de las funciones que procesan un archivo (CSV/Excel) en el navegador, sin dependencias de UI. Incluye el modelo de Proyección de ventas (`computeSeasonalForecast`, `computeRequiredInvestment`, `computeGrowthGoal`).
 - `app.js` — estado de todas las funciones, renderizado y manejo de eventos (un solo archivo, grande — el patrón de cada función nueva se agrega siguiendo el de la anterior).
 - `server.py` — servidor + login/registro/sesión/Administración + todos los endpoints `/api/*` (ver notas abajo).

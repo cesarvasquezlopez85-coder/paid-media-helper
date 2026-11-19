@@ -214,8 +214,10 @@ HOTEL_ITIN_RATE_LIMIT = (120, 3600)
 _change_password_limiter = RateLimiter()
 CHANGE_PASSWORD_RATE_LIMIT = (8, 300)
 
+SUPPORTED_LANGUAGES = ("es", "en")  # idiomas de la interfaz
+
 # Rutas que no requieren sesión (la pantalla de login/registro y sus llamadas).
-PUBLIC_PATHS = {"/login", "/login.html", "/login.js", "/styles.css"}
+PUBLIC_PATHS = {"/login", "/login.html", "/login.js", "/styles.css", "/i18n.js", "/i18n-en.js"}
 
 # Único listado de archivos servibles — evita que SimpleHTTPRequestHandler
 # exponga por accidente server.py, data.db (tiene los hashes de contraseña)
@@ -225,6 +227,8 @@ STATIC_FILES = {
     "/index.html": "index.html",
     "/app.js": "app.js",
     "/engine.js": "engine.js",
+    "/i18n.js": "i18n.js",
+    "/i18n-en.js": "i18n-en.js",
     "/styles.css": "styles.css",
     "/login": "login.html",
     "/login.html": "login.html",
@@ -350,6 +354,12 @@ def init_db():
         # de este campo que nunca volvieron a entrar.
         try:
             conn.execute("ALTER TABLE users ADD COLUMN last_login_at REAL")
+        except sqlite3.OperationalError:
+            pass
+        # Idioma de la interfaz que eligió la persona ('es' o 'en'). NULL = todavía no eligió: el navegador
+        # decide y, si ya había elegido ahí, se guarda en cuanto entra.
+        try:
+            conn.execute("ALTER TABLE users ADD COLUMN language TEXT")
         except sqlite3.OperationalError:
             pass
         # Qué cuenta de Google Ads (customer_id) puede tocar cada usuario que
@@ -999,6 +1009,8 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_login(payload)
         elif path == "/api/logout":
             self._handle_logout()
+        elif path == "/api/language":
+            self._handle_set_language(payload)
         elif path == "/api/google-ads/pacing/watchlist/add":
             if not self._require_auth_json():
                 return
@@ -1238,7 +1250,7 @@ class Handler(SimpleHTTPRequestHandler):
         try:
             row = conn.execute(
                 "SELECT users.id AS id, users.username AS username, users.is_admin AS is_admin, "
-                "users.must_change_password AS must_change_password, "
+                "users.must_change_password AS must_change_password, users.language AS language, "
                 "sessions.expires_at AS expires_at "
                 "FROM sessions JOIN users ON users.id = sessions.user_id "
                 "WHERE sessions.token = ?",
@@ -1251,6 +1263,7 @@ class Handler(SimpleHTTPRequestHandler):
         return {
             "id": row["id"], "username": row["username"], "is_admin": bool(row["is_admin"]),
             "must_change_password": bool(row["must_change_password"]),
+            "language": row["language"] if row["language"] in SUPPORTED_LANGUAGES else None,
         }
 
     # Un usuario admin (PMH_ADMIN_USERNAMES) puede tocar cualquier cuenta;
@@ -1348,9 +1361,33 @@ class Handler(SimpleHTTPRequestHandler):
                 "authenticated": True, "username": user["username"], "is_admin": user["is_admin"],
                 "is_super_admin": user["username"].lower() in SUPER_ADMIN_USERNAMES,
                 "must_change_password": user["must_change_password"],
+                # El interruptor de idioma es solo para super admin por ahora.
+                "language": user["language"] if user["username"].lower() in SUPER_ADMIN_USERNAMES else None,
             })
         else:
             self._send_json(200, {"authenticated": False})
+
+    def _handle_set_language(self, payload):
+        # Guarda el idioma de la interfaz de la persona (cada una elige el suyo con un clic).
+        # Por ahora solo para super admin: el resto de usuarios sigue en español.
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return
+        if user["username"].lower() not in SUPER_ADMIN_USERNAMES:
+            self._send_json(403, {"error": "El cambio de idioma aún no está disponible para tu usuario."})
+            return
+        language = str(payload.get("language") or "").strip().lower()
+        if language not in SUPPORTED_LANGUAGES:
+            self._send_json(400, {"error": "Idioma no válido."})
+            return
+        conn = get_db()
+        try:
+            conn.execute("UPDATE users SET language = ? WHERE id = ?", (language, user["id"]))
+            conn.commit()
+        finally:
+            conn.close()
+        self._send_json(200, {"ok": True, "language": language})
 
     def _handle_admin_ai_usage(self, query):
         try:

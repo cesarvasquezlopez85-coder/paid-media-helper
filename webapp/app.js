@@ -1,4 +1,11 @@
 import * as engine from './engine.js';
+import { initLang, onLangChange, syncServerLang, forceSpanish, t, dateLocale } from './i18n.js';
+
+// Los diálogos del navegador también salen en el idioma elegido (el texto se escribe en español y se traduce al mostrarlo).
+const nativeConfirm = window.confirm.bind(window);
+window.confirm = (message) => nativeConfirm(t(message));
+const nativeAlert = window.alert.bind(window);
+window.alert = (message) => nativeAlert(t(message));
 
 // ---------------------------------------------------------------------------
 // Estado de la aplicación
@@ -3040,7 +3047,7 @@ function oppReportTrendHtml(dailyRows) {
   const every = Math.max(1, Math.ceil(n / 8));
   const xl = rows.map((r, i) => ({ r, i })).filter(({ i }) => i % every === 0).map(({ r, i }) => {
     const d = new Date(`${r.date}T00:00:00`);
-    const label = Number.isNaN(d.getTime()) ? r.date : d.toLocaleDateString('es-CO', { day: 'numeric', month: 'short' });
+    const label = Number.isNaN(d.getTime()) ? r.date : d.toLocaleDateString(dateLocale(), { day: 'numeric', month: 'short' });
     return `<text x="${x(i).toFixed(1)}" y="${H - 8}" font-size="10" fill="#6b7280" text-anchor="middle">${e(label)}</text>`;
   }).join('');
   const legend = series.map((sr) => `<span style="display:inline-flex;align-items:center;gap:6px;margin-right:16px;font-size:12.5px"><span style="width:10px;height:10px;border-radius:2px;background:${sr.color};display:inline-block"></span>${e(sr.label)}</span>`).join('');
@@ -3325,14 +3332,14 @@ function renderImpressionShareTrendChart(dailyRows) {
   const labelEvery = Math.max(1, Math.ceil(n / 8));
   const xLabels = rows.map((r, i) => ({ r, i })).filter(({ i }) => i % labelEvery === 0).map(({ r, i }) => {
     const d = new Date(`${r.date}T00:00:00`);
-    const label = Number.isNaN(d.getTime()) ? r.date : d.toLocaleDateString('es-CO', { day: 'numeric', month: 'short' });
+    const label = Number.isNaN(d.getTime()) ? r.date : d.toLocaleDateString(dateLocale(), { day: 'numeric', month: 'short' });
     return `<text x="${x(i).toFixed(1)}" y="${H - 6}" font-size="10" fill="var(--color-text-muted)" text-anchor="middle">${escapeHtml(label)}</text>`;
   }).join('');
 
   const colStep = n > 1 ? plotW / (n - 1) : plotW;
   const hoverCols = rows.map((r, i) => {
     const d = new Date(`${r.date}T00:00:00`);
-    const dateLabel = Number.isNaN(d.getTime()) ? r.date : d.toLocaleDateString('es-CO', { day: 'numeric', month: 'short', year: 'numeric' });
+    const dateLabel = Number.isNaN(d.getTime()) ? r.date : d.toLocaleDateString(dateLocale(), { day: 'numeric', month: 'short', year: 'numeric' });
     const lines = [dateLabel];
     if (r.impr_share != null) lines.push(`Impr. Share: ${(r.impr_share * 100).toFixed(1)}%`);
     if (r.lost_is_rank != null) lines.push(`Perdido por ranking: ${(r.lost_is_rank * 100).toFixed(1)}%`);
@@ -11483,7 +11490,7 @@ function renderKeywordPlannerPageBody() {
 
 function fmtDateTime(epochSeconds) {
   if (!epochSeconds) return 'N/D';
-  return new Date(epochSeconds * 1000).toLocaleString('es-CO', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+  return new Date(epochSeconds * 1000).toLocaleString(dateLocale(), { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 function ensureAdminDataLoaded() {
@@ -18503,6 +18510,14 @@ fetch('/api/me').then((r) => r.json()).then((data) => {
   const el = document.getElementById('sidebar-username');
   if (el) el.textContent = data.username;
   currentUser.username = data.username;
+  // Interruptor de idioma: por ahora solo super admin (el servidor también lo exige).
+  if (data.is_super_admin) {
+    const langSwitch = document.getElementById('lang-switch');
+    if (langSwitch) langSwitch.style.display = '';
+    syncServerLang(data.language); // el idioma que esta persona eligió, en cualquier computador
+  } else {
+    forceSpanish();
+  }
   currentUser.isAdmin = !!data.is_admin;
   currentUser.isSuperAdmin = !!data.is_super_admin;
   const navAdmin = document.getElementById('nav-admin');
@@ -18567,4 +18582,7 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// Idioma elegido antes del primer dibujo; después, cada cambio de idioma vuelve a dibujar la página.
+await initLang();
+onLangChange(() => render());
 render();
