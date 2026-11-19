@@ -12464,7 +12464,7 @@ function auditReportBodyHtml() {
       <div class="ar-title">${e(auditReportTitle())}</div>
       <div class="ar-sub">Cuenta ${e(m.customer_id || 'N/D')}${m.account_name ? ` (${e(m.account_name)})` : ''} · ${e(m.date_from)} a ${e(m.date_to)} (${sm.days} días) · Generada ${e(m.generated_at.slice(0, 10))}</div>
       ${s.api.simulated ? '<div class="ar-note"><strong>Datos de ejemplo (modo simulado).</strong> No son de una cuenta real.</div>' : ''}
-      ${(m.excluded_experiments || []).length ? `<div class="ar-note">Se dejaron fuera ${m.excluded_experiments.length} campaña${m.excluded_experiments.length === 1 ? '' : 's'} de experimento ya finalizada${m.excluded_experiments.length === 1 ? '' : 's'} (no cuentan en el puntaje ni en las cifras): ${e(m.excluded_experiments.slice(0, 6).map((x) => x.name).join('; '))}${m.excluded_experiments.length > 6 ? ` y ${m.excluded_experiments.length - 6} más` : ''}.</div>` : ''}
+      ${(m.excluded_experiments || []).length ? `<div class="ar-note">Se dejaron fuera ${m.excluded_experiments.length} campaña${m.excluded_experiments.length === 1 ? '' : 's'} de experimento ya finalizada${m.excluded_experiments.length === 1 ? '' : 's'} (no cuentan en el puntaje ni en las cifras): <span>${e(m.excluded_experiments.slice(0, 6).map((x) => x.name).join('; '))}</span>${m.excluded_experiments.length > 6 ? ` <span>y ${m.excluded_experiments.length - 6} más</span>` : ''}.</div>` : ''}
       <div class="ar-card">
         <div class="ar-score">
           ${donut}
