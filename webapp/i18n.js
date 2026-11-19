@@ -50,7 +50,9 @@ function buildIndex(dict) {
         if (m) { order.push(m[2]); return m[1] ? '(\\d[\\d.,]*)' : '(.*?)'; } // {n0}: solo un número
         return part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       }).join('');
-      patterns.push({ re: new RegExp(`^${source}$`), order, tpl: value });
+      // Texto fijo más largo del patrón: si el texto no lo contiene, ni se prueba la expresión regular (más rápido con muchos patrones).
+      const needle = k.split(/\{n?\d+\}/).reduce((a, b) => (b.length > a.length ? b : a), '');
+      patterns.push({ re: new RegExp(`^${source}$`), order, tpl: value, needle });
     } else {
       exact.set(k, value);
     }
@@ -73,6 +75,7 @@ function lookup(n, depth) {
   if (direct !== undefined) return direct;
   if (depth > 3) return undefined;
   for (const p of patterns) {
+    if (p.needle && !n.includes(p.needle)) continue;
     const m = n.match(p.re);
     if (!m) continue;
     return p.tpl.replace(/\{(\d+)\}/g, (_, i) => {
