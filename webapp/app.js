@@ -299,6 +299,7 @@ const state = {
     targetsStatus: 'idle', rows: {}, check: null, run: { status: 'idle', error: null, results: {}, applied: false },
     simulated: false,
     ai: { brief: '', lang: 'es', status: 'idle', error: '', result: null },
+    pacingHotels: { status: 'idle', msgs: [] }, // «Marcar los hoteles de Ritmo de consumo»
     mode: 'simple', tpl: null, lab: null, // 'simple' | 'plantilla' | 'etiqueta'; tpl y lab se crean al entrar a cada modo (nutState, nulState)
   },
   // IA Max (AI Max for Search) — a diferencia de "Ask Advisor", sí tiene
@@ -16271,7 +16272,7 @@ function nuaLoadMccGroups(fromRender) {
 function nuaPickMcc(groupId, groupName) {
   const s = state.nuevosAnuncios;
   s.mcc.selectedId = groupId; s.mcc.selectedName = groupName; s.mcc.error = null;
-  s.accountsStatus = 'loading'; s.accounts = []; s.selected = []; s.rows = {}; s.targetsStatus = 'idle'; s.check = null;
+  s.accountsStatus = 'loading'; s.accounts = []; s.selected = []; s.rows = {}; s.targetsStatus = 'idle'; s.check = null; s.pacingHotels = { status: 'idle', msgs: [] };
   s.run = { status: 'idle', error: null, results: {}, applied: false };
   nutResetTargets();
   render();
@@ -16290,10 +16291,41 @@ function nuaPickMcc(groupId, groupName) {
 function nuaClearMcc() {
   const s = state.nuevosAnuncios;
   s.mcc.selectedId = ''; s.mcc.selectedName = ''; s.mcc.filter = '';
-  s.accountsStatus = 'idle'; s.accounts = []; s.selected = []; s.rows = {}; s.targetsStatus = 'idle'; s.check = null;
+  s.accountsStatus = 'idle'; s.accounts = []; s.selected = []; s.rows = {}; s.targetsStatus = 'idle'; s.check = null; s.pacingHotels = { status: 'idle', msgs: [] };
   s.run = { status: 'idle', error: null, results: {}, applied: false };
   nutResetTargets();
   render();
+}
+
+// Marca, entre las cuentas de este MCC, los hoteles (GHA-CPC) que la persona vigila en Ritmo de consumo (su lista guardada).
+function nuaMarkPacingHotels() {
+  const s = state.nuevosAnuncios, ph = s.pacingHotels;
+  if (ph.status === 'loading') return;
+  ph.status = 'loading'; ph.msgs = [];
+  render();
+  fetch('/api/google-ads/pacing/watchlist')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      const watched = data.watchlist || [];
+      const nameOf = new Map(s.accounts.map((a) => [a.id, a.name]));
+      const hotels = watched.filter((w) => s.simulated || hotelIsHotelAccount(nameOf.get(w.customer_id) || w.account_name));
+      const inMcc = hotels.filter((w) => nameOf.has(w.customer_id)).map((w) => w.customer_id);
+      const room = Math.max(0, NUA_MAX_ACCOUNTS - s.selected.filter((id) => !inMcc.includes(id)).length);
+      const picked = inMcc.slice(0, room);
+      s.selected = [...new Set([...s.selected, ...picked])];
+      s.targetsStatus = 'idle'; s.rows = {}; s.check = null; nutResetTargets();
+      ph.msgs = [];
+      if (!watched.length) ph.msgs.push('Todavía no tienes hoteles vigilados en Ritmo de consumo.');
+      else if (!hotels.length) ph.msgs.push('Ninguna de las cuentas que vigilas en Ritmo de consumo es un hotel (GHA-CPC).');
+      else if (!inMcc.length) ph.msgs.push('Ninguno de los hoteles de Ritmo de consumo está en este MCC.');
+      else if (picked.length === inMcc.length) ph.msgs.push(`Hoteles de Ritmo de consumo marcados: ${picked.length}.`);
+      else ph.msgs.push(`Hoteles de Ritmo de consumo marcados: ${picked.length} de ${inMcc.length} (el máximo por tanda es ${NUA_MAX_ACCOUNTS}).`);
+      if (inMcc.length && hotels.length > inMcc.length) ph.msgs.push(`Hoteles de Ritmo de consumo que no están en este MCC: ${hotels.length - inMcc.length}.`);
+      ph.status = 'ready';
+      render();
+    })
+    .catch((err) => { ph.status = 'error'; ph.msgs = [err.message || String(err)]; render(); });
 }
 
 function nuaSelectAccounts(all) {
@@ -16581,8 +16613,10 @@ function renderNuaStepAccounts() {
       <input type="text" id="nua-acc-filter" placeholder="Filtrar cuentas (${s.accounts.length})…" value="${escapeHtml(s.accountFilter)}" style="width:260px" autocomplete="off" />
       <button class="btn-outline sm" data-action="nua-acc-all">Marcar las visibles</button>
       <button class="btn-outline sm" data-action="nua-acc-none">Quitar las visibles</button>
+      <button class="btn-outline sm" data-action="nua-acc-pacing" ${s.pacingHotels.status === 'loading' ? 'disabled' : ''}>Marcar los hoteles de Ritmo de consumo</button>
       <span class="field-hint">${s.selected.length} de máximo 40 marcadas</span>
     </div>
+    ${s.pacingHotels.msgs.length ? `<div style="margin:0 0 8px">${s.pacingHotels.msgs.map((m) => `<p class="field-hint" style="margin:2px 0;${s.pacingHotels.status === 'error' ? 'color:var(--color-danger,#b3261e)' : ''}">${escapeHtml(m)}</p>`).join('')}</div>` : ''}
     <div class="table-scroll" style="max-height:280px"><table><tbody>
       ${visible.map((a) => `<tr><td style="width:30px"><input type="checkbox" data-nua-acc="${escapeHtml(a.id)}" ${s.selected.includes(a.id) ? 'checked' : ''} /></td><td>${escapeHtml(a.name)}</td><td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(a.id)}</td></tr>`).join('') || '<tr><td>Sin cuentas que coincidan.</td></tr>'}
     </tbody></table></div>`);
@@ -19560,6 +19594,7 @@ function handleAction(action) {
     case 'nua-mcc-load': nuaLoadMccGroups(); break;
     case 'nua-mcc-clear': nuaClearMcc(); break;
     case 'nua-acc-all': nuaSelectAccounts(true); break;
+    case 'nua-acc-pacing': nuaMarkPacingHotels(); break;
     case 'nua-acc-none': nuaSelectAccounts(false); break;
     case 'nua-add-head': nuaAddText('headlines'); break;
     case 'nua-add-desc': nuaAddText('descriptions'); break;

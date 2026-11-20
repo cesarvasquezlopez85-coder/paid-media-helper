@@ -3151,4 +3151,12 @@ export const EN = {
   [`Escribe las indicaciones: qué debe tener en cuenta el anuncio (hotel o destino, oferta, fechas, servicios, público…).`]: `Write the instructions: what the ad should take into account (hotel or destination, offer, dates, services, audience…).`,
   [`Las indicaciones pasan de {n0} caracteres.`]: `The instructions exceed {0} characters.`,
   [`No se pudo generar los textos con IA. Intenta de nuevo en unos minutos.`]: `The texts could not be generated with AI. Try again in a few minutes.`,
+  // ---- Anuncios nuevos: hoteles de Ritmo de consumo ----
+  [`Marcar los hoteles de Ritmo de consumo`]: `Select the hotels from Spend pacing`,
+  [`Todavía no tienes hoteles vigilados en Ritmo de consumo.`]: `You do not have any hotels watched in Spend pacing yet.`,
+  [`Ninguna de las cuentas que vigilas en Ritmo de consumo es un hotel (GHA-CPC).`]: `None of the accounts you watch in Spend pacing is a hotel (GHA-CPC).`,
+  [`Ninguno de los hoteles de Ritmo de consumo está en este MCC.`]: `None of the hotels from Spend pacing is in this MCC.`,
+  [`Hoteles de Ritmo de consumo marcados: {n0}.`]: `Spend pacing hotels selected: {0}.`,
+  [`Hoteles de Ritmo de consumo marcados: {n0} de {n1} (el máximo por tanda es {n2}).`]: `Spend pacing hotels selected: {0} of {1} (the maximum per batch is {2}).`,
+  [`Hoteles de Ritmo de consumo que no están en este MCC: {n0}.`]: `Spend pacing hotels that are not in this MCC: {0}.`,
 };
