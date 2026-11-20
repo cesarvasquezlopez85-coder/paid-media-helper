@@ -210,6 +210,8 @@ AI_RATE_LIMIT = (10, 3600)
 # Generador de copys con IA: su propio tope por usuario (hasta 2 llamadas a Claude por generación).
 _copy_limiter = RateLimiter()
 COPY_RATE_LIMIT = (10, 3600)
+# Textos de Anuncios nuevos con IA (solo super admin): hasta 2 llamadas a Claude por generación.
+AD_TEXT_AI_RATE_LIMIT = (20, 3600)
 # Cada auditoría hace ~12 consultas a Google Ads, que comparten la cuota del
 # developer token de todo el equipo — por eso su propio tope por usuario.
 _audit_limiter = RateLimiter()
@@ -680,7 +682,7 @@ def init_db():
 
 
 _COLOMBIA_TZ = datetime.timezone(datetime.timedelta(hours=-5))
-AI_USAGE_FEATURES = ("negativizacion", "auditoria", "rendimiento", "copys", "hoteles")
+AI_USAGE_FEATURES = ("negativizacion", "auditoria", "rendimiento", "copys", "hoteles", "anuncios")
 
 
 def store_ai_usage(user_id, feature, calls, input_tokens, output_tokens, cost_usd):
@@ -1634,6 +1636,10 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_super_admin_json():
                 return
             self._handle_negativos_palabras(payload)
+        elif path == "/api/ai/anuncios-textos":
+            if not self._require_super_admin_json():
+                return
+            self._handle_ai_anuncios_textos(payload)
         elif path == "/api/ai/generar-copys":
             # Solo administradores mientras se afinan los textos (2026-11-01); luego se abre con _require_auth_json.
             if not self._require_admin_json():
@@ -4332,6 +4338,42 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
             print(f"[claude-error] hotel-ia: {' '.join(str(e).split())[:300]}", flush=True)
             self._send_json(502, {"error": "No se pudo generar el análisis con IA. Intenta de nuevo en unos minutos."})
+
+    def _handle_ai_anuncios_textos(self, payload):
+        # Títulos y descripciones de Anuncios nuevos redactados por IA a partir de las indicaciones de la persona.
+        user = self._get_current_user()
+        if not claude_client.is_configured():
+            self._send_json(503, {"error": "La integración con Claude no está configurada en el servidor (falta ANTHROPIC_API_KEY)."})
+            return
+        mode = "plantilla" if payload.get("mode") == "plantilla" else "simple"
+        idioma = str(payload.get("idioma") or "es").lower()
+        if not re.fullmatch(r"[a-z]{2}", idioma):
+            idioma = "es"
+        brief = " ".join(str(payload.get("indicaciones") or "").split())
+        if len(brief) < 15:
+            self._send_json(400, {"error": "Escribe las indicaciones: qué debe tener en cuenta el anuncio (hotel o destino, oferta, fechas, servicios, público…)."})
+            return
+        if len(brief) > claude_client.ADTEXT_BRIEF_MAX:
+            self._send_json(400, {"error": f"Las indicaciones pasan de {claude_client.ADTEXT_BRIEF_MAX} caracteres."})
+            return
+        variables = {}
+        if mode == "plantilla" and isinstance(payload.get("variables"), dict):
+            for k, v in list(payload["variables"].items())[:20]:
+                key = re.sub(r"[^A-Za-z0-9_]", "", str(k or ""))[:20].upper()
+                if key:
+                    variables[key] = str(v or "")[:60]
+        if not _copy_limiter.allow(f"user:{user['id']}:ads-ia", *AD_TEXT_AI_RATE_LIMIT):
+            self._send_json(429, {"error": "Alcanzaste el límite de generaciones con IA por esta hora. Intenta más tarde."})
+            return
+        try:
+            with track_ai_usage(user["id"], "anuncios"):
+                result = claude_client.generar_textos_anuncio(brief, idioma, mode, variables)
+            self._send_json(200, result)
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+        except Exception as e:  # noqa: BLE001
+            print(f"[claude-error] anuncios-textos: {' '.join(str(e).split())[:300]}", flush=True)
+            self._send_json(502, {"error": "No se pudo generar los textos con IA. Intenta de nuevo en unos minutos."})
 
     def _handle_ai_generar_copys(self, payload):
         user = self._get_current_user()

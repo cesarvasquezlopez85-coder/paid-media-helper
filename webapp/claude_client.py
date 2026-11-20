@@ -431,6 +431,153 @@ def generar_copys(formato, signals, idioma="es", keywords=""):
 
 
 # ---------------------------------------------------------------------------
+# Textos de «Anuncios nuevos» con IA: la persona escribe solo las indicaciones (qué debe tener en cuenta) y Claude redacta
+# los títulos (hasta 30 caracteres) y las descripciones (hasta 90) de un anuncio de búsqueda adaptable. La IA propone y el
+# código valida: largo, duplicados, emojis, mayúsculas, exclamaciones, cifras y afirmaciones que no estén en las
+# indicaciones, y que solo se usen las variables permitidas.
+# ---------------------------------------------------------------------------
+ADTEXT_LANGUAGES = {"es": "español", "en": "inglés", "pt": "portugués", "de": "alemán", "fr": "francés", "it": "italiano", "nl": "neerlandés"}
+ADTEXT_BRIEF_MAX = 2000
+ADTEXT_HEAD_MAX = 30
+ADTEXT_DESC_MAX = 90
+ADTEXT_HOTEL_SAMPLE = "Hotel Estelar Mar"  # largo típico de un nombre de hotel (17): sirve solo para medir los textos con {HOTEL}
+
+ADTEXT_SYSTEM_PROMPT = (
+    "Eres un redactor publicitario senior de Google Ads especializado en hoteles. Escribes los títulos y las "
+    "descripciones de un anuncio de búsqueda adaptable a partir de las indicaciones del equipo.\n\n"
+    "REGLAS ESTRICTAS:\n"
+    "1. Usa SOLO hechos que estén en las indicaciones (hotel, destino, servicios, ofertas, fechas, públicos). No inventes "
+    "precios, descuentos, estrellas, premios, cercanías, políticas ni servicios. Si un dato no está, no lo menciones. "
+    "Si las indicaciones traen una condición (fechas, mínimo de noches, código), respétala tal cual.\n"
+    "2. Prohibido: superlativos y promesas absolutas (mejor, número 1, garantizado, único, líder) salvo que las "
+    "indicaciones los pidan literalmente. Nada de emojis, nada de TODO EN MAYÚSCULAS, sin signos de exclamación en "
+    "los títulos y como máximo uno en una descripción. No nombres a otras marcas.\n"
+    "3. Respeta el límite de caracteres de cada grupo contando espacios. Cada texto debe ser distinto de los demás y "
+    "aportar un ángulo diferente (destino, servicio, oferta, motivo para reservar, llamada a la acción). Los títulos "
+    "deben tener sentido solos y también combinados entre sí en cualquier orden; no repitas la misma idea con otras "
+    "palabras.\n"
+    "4. Escribe en el idioma pedido, sin mezclar idiomas (salvo nombres propios), con ortografía y tildes correctas, en "
+    "un tono cálido y directo.\n"
+    "5. Responde SOLO con un objeto JSON válido, sin texto antes ni después ni bloques de código, con esta forma: "
+    "{\"grupos\": {\"titulares\": [\"texto\", ...], \"descripciones\": [\"texto\", ...]}}."
+)
+
+ADTEXT_MAX_TOKENS = 4000
+ADTEXT_SCHEMA = {
+    "type": "object",
+    "properties": {"grupos": {"type": "object", "properties": {
+        "titulares": {"type": "array", "items": {"type": "string"}},
+        "descripciones": {"type": "array", "items": {"type": "string"}}},
+        "required": ["titulares", "descripciones"], "additionalProperties": False}},
+    "required": ["grupos"], "additionalProperties": False,
+}
+
+_ADTEXT_VAR_RE = None
+
+
+def _adtext_vars_ok(text, variables, mode):
+    """Valida las llaves del texto: en el modo simple no se permiten; en el de plantilla solo las variables dadas.
+    Devuelve el texto medido (con las variables sustituidas) o None si no es válido."""
+    import re as _re
+    global _ADTEXT_VAR_RE
+    if _ADTEXT_VAR_RE is None:
+        _ADTEXT_VAR_RE = _re.compile(r"\{([^{}]*)\}")
+    if mode != "plantilla":
+        return None if ("{" in text or "}" in text) else text
+    measured = text
+    for name in _ADTEXT_VAR_RE.findall(text):
+        key = name.strip().upper()
+        if key not in variables:
+            return None
+        measured = measured.replace("{" + name + "}", variables[key])
+    if "{" in measured or "}" in measured:
+        return None
+    return measured
+
+
+def generar_textos_anuncio(indicaciones, idioma="es", mode="simple", variables=None):
+    """Devuelve {"titulares": [...], "descripciones": [...], "faltan": {"titulares": n, "descripciones": n}}.
+    `mode`: «simple» (15 títulos y 4 descripciones, sin variables) o «plantilla» (20 títulos y 6 descripciones; pueden
+    usar {HOTEL} y las variables dadas, que el servidor sustituye por cada hotel). Pide de más, valida y, si falta, repite
+    una vez solo lo que falta."""
+    brief = " ".join(str(indicaciones or "").split())[:ADTEXT_BRIEF_MAX]
+    if len(brief) < 15:
+        raise ValueError("Escribe las indicaciones: qué debe tener en cuenta el anuncio (hotel o destino, oferta, fechas, servicios, público…).")
+    idioma_txt = ADTEXT_LANGUAGES.get(idioma) or f"el idioma con código ISO «{idioma}»"
+    plantilla = mode == "plantilla"
+    # Variables permitidas (en mayúsculas) y el valor con el que se mide el largo de los textos que las usan.
+    vars_ok = {}
+    if plantilla:
+        vars_ok["HOTEL"] = ADTEXT_HOTEL_SAMPLE
+        for key, value in (variables or {}).items():
+            k = str(key or "").strip().upper()
+            if k and k != "HOTEL":
+                vars_ok[k] = str(value or "").strip() or "Valor"
+    groups = [
+        {"key": "titulares", "label": "títulos", "count": 20 if plantilla else 15, "limit": ADTEXT_HEAD_MAX, "kind": "headline"},
+        {"key": "descripciones", "label": "descripciones", "count": 6 if plantilla else 4, "limit": ADTEXT_DESC_MAX, "kind": "description"},
+    ]
+    corpus = brief.lower() + " " + " ".join(str(v).lower() for v in (variables or {}).values())
+    accepted = {g["key"]: [] for g in groups}
+    var_rule = ""
+    if plantilla:
+        names = ", ".join("{" + k + "}" for k in vars_ok)
+        var_rule = (
+            f"\nEste texto es una PLANTILLA que se aplica a muchos hoteles: donde haga falta el nombre del hotel escribe {{HOTEL}} "
+            f"(se sustituye por el nombre de cada hotel; no escribas ningún nombre de hotel concreto). Variables permitidas: {names}. "
+            "No uses ninguna otra llave. Pon primero los textos que usan variables y deja varios genéricos, sin variables, de "
+            "reserva (hay hoteles con nombres largos y el texto con {HOTEL} puede no caber). Cuenta {HOTEL} como unos 17 caracteres.\n"
+            + (f"Valores por defecto de las variables personalizadas: {json.dumps({k: v for k, v in vars_ok.items() if k != 'HOTEL'}, ensure_ascii=False)}\n" if len(vars_ok) > 1 else "")
+        )
+    else:
+        var_rule = "\nEl mismo texto se usará en muchas cuentas: no uses llaves ni variables.\n"
+
+    def ask(needed):
+        lines = []
+        for g, n in needed:
+            have = accepted[g["key"]]
+            avoid = f" Ya existen (no los repitas): {json.dumps(have, ensure_ascii=False)}." if have else ""
+            lines.append(f"- clave \"{g['key']}\" ({g['label']}): {n} textos de máximo {g['limit']} caracteres.{avoid}")
+        user_content = (
+            f"Idioma de los textos: {idioma_txt}.\n{var_rule}\n"
+            f"Indicaciones del equipo (lo único que puedes afirmar):\n\"\"\"\n{brief}\n\"\"\"\n\n"
+            "Escribe estos grupos:\n" + "\n".join(lines)
+        )
+        data = _hotel_json_call(ADTEXT_SYSTEM_PROMPT, ADTEXT_SCHEMA, user_content, max_tokens=ADTEXT_MAX_TOKENS)
+        grupos = data.get("grupos")
+        if not isinstance(grupos, dict):
+            raise RuntimeError("La respuesta de Claude no trae el campo 'grupos'.")
+        return grupos
+
+    for attempt in range(2):
+        needed = []
+        for g in groups:
+            missing = g["count"] - len(accepted[g["key"]])
+            if missing > 0:
+                needed.append((g, missing + (4 if attempt == 0 else 3)))
+        if not needed:
+            break
+        grupos = ask(needed)
+        for g, _n in needed:
+            seen = {t.lower() for t in accepted[g["key"]]}
+            for raw in grupos.get(g["key"], []) or []:
+                text = " ".join(str(raw).split()).strip().strip('"').strip()
+                if not text or text.lower() in seen:
+                    continue
+                measured = _adtext_vars_ok(text, vars_ok, mode)
+                if measured is None:
+                    continue
+                # Las llaves no cuentan como cifras ni como palabras: se valida el texto con las variables ya sustituidas.
+                if not _copy_item_ok(measured, g, corpus + " " + ADTEXT_HOTEL_SAMPLE.lower()):
+                    continue
+                seen.add(text.lower())
+                accepted[g["key"]].append(text)
+    out = {g["key"]: accepted[g["key"]][:g["count"]] for g in groups}
+    out["faltan"] = {g["key"]: max(0, g["count"] - len(out[g["key"]])) for g in groups}
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Negativización con IA — Claude decide qué negativizar, qué dejar y qué
 # revisar; negativos_ia.py valida con código lo que devuelve (choques con
 # términos que convierten, marca, palabras genéricas) antes de mostrarlo.

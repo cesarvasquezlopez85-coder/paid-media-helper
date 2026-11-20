@@ -298,6 +298,7 @@ const state = {
     headlines: ['', '', ''], descriptions: ['', ''], path1: '', path2: '', matchText: '',
     targetsStatus: 'idle', rows: {}, check: null, run: { status: 'idle', error: null, results: {}, applied: false },
     simulated: false,
+    ai: { brief: '', lang: 'es', status: 'idle', error: '', result: null },
     mode: 'simple', tpl: null, lab: null, // 'simple' | 'plantilla' | 'etiqueta'; tpl y lab se crean al entrar a cada modo (nutState, nulState)
   },
   // IA Max (AI Max for Search) — a diferencia de "Ask Advisor", sí tiene
@@ -11535,7 +11536,7 @@ function loadAdminAiUsage() {
     .catch((err) => { u.status = 'error'; u.error = err.message || String(err); render(); });
 }
 
-const AI_FEATURE_LABELS = { negativizacion: 'Negativización', auditoria: 'Auditoría', rendimiento: 'Rendimiento', copys: 'Copys', hoteles: 'Hoteles' };
+const AI_FEATURE_LABELS = { negativizacion: 'Negativización', auditoria: 'Auditoría', rendimiento: 'Rendimiento', copys: 'Copys', hoteles: 'Hoteles', anuncios: 'Anuncios nuevos' };
 
 // Consumo de la IA por día, por usuario y por función. El costo es una estimación con los precios de lista
 // del modelo (el servidor manda los precios), no lo que factura Anthropic.
@@ -16456,6 +16457,81 @@ function nuaTextRows(kind, max, cap, minRows, label) {
     </div>`;
 }
 
+// Redactar títulos y descripciones con IA (modos «Un anuncio, un grupo por cuenta» y «Por plantilla»): la persona escribe solo
+// las indicaciones y la IA propone los textos (el servidor valida largo, duplicados y afirmaciones que no estén en las
+// indicaciones); los textos quedan editables y, como siempre, el anuncio se valida con Google antes de crearse.
+const AD_AI_LANGS = { es: 'Español', en: 'Inglés', pt: 'Portugués', de: 'Alemán', fr: 'Francés', it: 'Italiano', nl: 'Neerlandés' };
+const AD_AI_BRIEF_MIN = 15;
+
+function renderAdAiBox(prefix, ai, withLang, langLabel) {
+  const loading = ai.status === 'loading';
+  const r = ai.result;
+  return `
+      <div style="border:1px dashed var(--color-border,#bbb);border-radius:8px;padding:12px;margin:0 0 12px">
+        <strong style="font-size:13px">Redactar con IA</strong>
+        <p class="field-hint" style="margin:4px 0 8px">Escribe solo las indicaciones: la IA redacta los títulos y las descripciones usando únicamente lo que digas aquí (no inventa precios, ofertas ni servicios). Luego puedes editarlos.</p>
+        <textarea id="${prefix}-ai-brief" rows="4" maxlength="2000" style="width:100%;font-family:inherit" placeholder="ej. Hotel boutique en el centro de Cartagena, desayuno incluido, cancelación gratis hasta 48 horas antes, tono cálido y para parejas." ${loading ? 'disabled' : ''}>${escapeHtml(ai.brief)}</textarea>
+        <div style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin-top:8px">
+          ${withLang ? `<div class="field"><label>Idioma de los textos</label><select id="${prefix}-ai-lang" ${loading ? 'disabled' : ''}>${Object.keys(AD_AI_LANGS).map((l) => `<option value="${l}" ${ai.lang === l ? 'selected' : ''}>${escapeHtml(AD_AI_LANGS[l])}</option>`).join('')}</select></div>` : `<span class="field-hint">${langLabel || ''}</span>`}
+          <button class="btn-accent" id="${prefix}-ai-btn" data-action="${prefix}-ai-generate" ${loading || String(ai.brief).trim().length < AD_AI_BRIEF_MIN ? 'disabled' : ''}>Generar títulos y descripciones con IA</button>
+          ${loading ? '<span class="field-hint">Redactando…</span>' : ''}
+        </div>
+        ${ai.error ? `<p class="field-hint" style="margin:8px 0 0;color:var(--color-danger,#b3261e)">${escapeHtml(ai.error)}</p>` : ''}
+        ${r ? `<p class="field-hint" style="margin:8px 0 0;color:var(--color-success,#1d6b41)">Se generaron ${r.h} títulos y ${r.d} descripciones. Revísalos y edítalos antes de crear.</p>` : ''}
+        ${r && (r.missH || r.missD) ? `<p class="field-hint" style="margin:4px 0 0;color:var(--color-danger,#b3261e)">La IA no logró completar todos: faltan ${r.missH} títulos y ${r.missD} descripciones. Puedes generar de nuevo o escribirlos a mano.</p>` : ''}
+      </div>`;
+}
+
+function bindAdAiBox(prefix, ai) {
+  const brief = document.getElementById(`${prefix}-ai-brief`);
+  if (brief) brief.addEventListener('input', (e) => {
+    ai.brief = e.target.value;
+    const b = document.getElementById(`${prefix}-ai-btn`);
+    if (b) b.disabled = ai.status === 'loading' || ai.brief.trim().length < AD_AI_BRIEF_MIN;
+  });
+  const lang = document.getElementById(`${prefix}-ai-lang`);
+  if (lang) lang.addEventListener('change', (e) => { ai.lang = e.target.value; });
+}
+
+function adAiGenerate(mode) {
+  const s = state.nuevosAnuncios;
+  const t = mode === 'plantilla' ? nutState() : null;
+  const ai = t ? t.ai : s.ai;
+  if (ai.status === 'loading' || ai.brief.trim().length < AD_AI_BRIEF_MIN) return;
+  const idioma = t ? t.activeLang : ai.lang;
+  const hasText = t
+    ? (nutLines(t.langs[t.activeLang].headlines).length || nutLines(t.langs[t.activeLang].descriptions).length)
+    : (nuaTexts().heads.length || nuaTexts().descs.length);
+  if (hasText && !window.confirm('Los títulos y las descripciones que ya escribiste se reemplazarán por los que genere la IA. ¿Continuar?')) return;
+  const variables = {};
+  if (t) t.variables.forEach((v) => { const k = nutVarKey(v.key); if (k) variables[k] = v.value || ''; });
+  ai.status = 'loading'; ai.error = ''; ai.result = null;
+  render();
+  fetch('/api/ai/anuncios-textos', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode, idioma, indicaciones: ai.brief, variables }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      const heads = data.titulares || [], descs = data.descripciones || [];
+      if (!heads.length && !descs.length) throw new Error('La IA no devolvió textos válidos. Ajusta las indicaciones e intenta de nuevo.');
+      if (t) {
+        t.langs[t.activeLang].headlines = heads.join('\n');
+        t.langs[t.activeLang].descriptions = descs.join('\n');
+        nutResetRun();
+      } else {
+        s.headlines = heads.slice(); s.descriptions = descs.slice();
+        while (s.headlines.length < NUA_LIMITS.headMin) s.headlines.push('');
+        while (s.descriptions.length < NUA_LIMITS.descMin) s.descriptions.push('');
+        s.check = null; s.run = { status: 'idle', error: null, results: {}, applied: false };
+      }
+      ai.status = 'ready'; ai.result = { h: heads.length, d: descs.length, missH: (data.faltan || {}).titulares || 0, missD: (data.faltan || {}).descripciones || 0 };
+      render();
+    })
+    .catch((err) => { ai.status = 'error'; ai.error = err.message || String(err); render(); });
+}
+
 function renderNuevosAnunciosPage() {
   const s = state.nuevosAnuncios;
   if (s.mcc.status === 'idle') nuaLoadMccGroups(true);
@@ -16519,6 +16595,7 @@ function renderNuaStepTexts() {
   return `
     <div class="card" style="margin-bottom:16px">
       <h3 style="margin:0 0 10px;font-size:14px">2. Títulos y descripciones</h3>
+      ${renderAdAiBox('nua', s.ai, true)}
       <div style="display:flex;gap:24px;flex-wrap:wrap">
         ${nuaTextRows('headlines', L.headMax, L.headCap, L.headMin, `Títulos (${L.headMin} a ${L.headCap}, hasta ${L.headMax} caracteres)`)}
         ${nuaTextRows('descriptions', L.descMax, L.descCap, L.descMin, `Descripciones (${L.descMin} a ${L.descCap}, hasta ${L.descMax} caracteres)`)}
@@ -16607,6 +16684,7 @@ function bindNuevosAnuncios() {
   document.querySelectorAll('[data-nua-mode]').forEach((el) => el.addEventListener('click', () => { s.mode = el.dataset.nuaMode; render(); }));
   if (s.mode === 'plantilla') bindNutemplate();
   if (s.mode === 'etiqueta') bindNulabel();
+  if (s.mode === 'simple') bindAdAiBox('nua', s.ai);
   [['head', 'headlines', NUA_LIMITS.headMax], ['desc', 'descriptions', NUA_LIMITS.descMax]].forEach(([key, kind, max]) => {
     document.querySelectorAll(`[data-nua-${key}]`).forEach((el) => el.addEventListener('input', (e) => {
       s[kind][Number(el.dataset[`nua${key[0].toUpperCase()}${key.slice(1)}`])] = e.target.value;
@@ -16642,7 +16720,7 @@ function nutNewState() {
   return {
     name: '', loadedId: '', label: '', variables: [],
     langOrder: ['es'], activeLang: 'es', langs: { es: { headlines: '', descriptions: '' } },
-    campaignFilter: '',
+    campaignFilter: '', ai: { brief: '', status: 'idle', error: '', result: null },
     templates: [], templatesStatus: 'idle', templateMsg: '', templateError: '', templateBusy: false,
     rows: {}, targetsStatus: 'idle', targetsLabel: '', excluded: {}, previewKey: '', check: null,
     run: { status: 'idle', error: null, results: {}, applied: false },
@@ -17117,6 +17195,7 @@ function renderNutStepTemplate() {
         ${t.langOrder.length > 1 ? '<button class="btn-link" data-action="nut-del-lang">Quitar este idioma</button>' : ''}
         <select id="nut-lang-add"><option value="">Agregar idioma…</option>${addable.map((l) => `<option value="${l}">${escapeHtml(NUT_LANG_NAMES[l])} (${l})</option>`).join('')}<option value="__otro">Otro código…</option></select>
       </div>
+      ${renderAdAiBox('nut', t.ai, false, `<span>Idioma:</span> <span>${escapeHtml(NUT_LANG_NAMES[t.activeLang] || t.activeLang)}</span> (${escapeHtml(t.activeLang)})`)}
       <p class="field-hint" style="margin:0 0 8px">El idioma de cada campaña se lee de su nombre (Hotel - MERCADO:idioma - TIPO). Escribe un texto por línea: se usan, en orden, los primeros 15 títulos (hasta 30 caracteres) y 4 descripciones (hasta 90) que quepan después de sustituir las variables. Pon primero los que usan el nombre del hotel y deja otros genéricos de reserva.</p>
       <div style="display:flex;gap:20px;flex-wrap:wrap">
         <div class="field" style="flex:1;min-width:300px"><label>Títulos <span class="field-hint">(<span id="nut-hcount">${hL.length}</span>)</span></label>
@@ -17184,6 +17263,7 @@ function bindNutTargets() {
 function bindNutemplate() {
   const t = nutState();
   const on = (id, ev, fn) => { const el = document.getElementById(id); if (el) el.addEventListener(ev, fn); };
+  bindAdAiBox('nut', t.ai);
   on('nut-tpl-select', 'change', (e) => { const x = t.templates.find((y) => String(y.id) === e.target.value); if (x) nutApplyTemplate(x); else { t.loadedId = ''; } render(); });
   on('nut-tpl-name', 'input', (e) => { t.name = e.target.value; });
   on('nut-label', 'input', (e) => { t.label = e.target.value; nutTemplateEdited(); });
@@ -19493,6 +19573,8 @@ function handleAction(action) {
     case 'nul-apply': nulSubmit(false); break;
     case 'nul-new-batch': nulNewBatch(); break;
     case 'nul-sched-create': nulSchedCreate(); break;
+    case 'nua-ai-generate': adAiGenerate('simple'); break;
+    case 'nut-ai-generate': adAiGenerate('plantilla'); break;
     case 'nul-sched-reload': nulSchedLoad(); break;
     case 'nut-prepare': nutPrepareTargets(); break;
     case 'nut-validate': nutSubmit(true); break;
