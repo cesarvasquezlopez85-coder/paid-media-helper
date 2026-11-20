@@ -3489,13 +3489,15 @@ class Handler(SimpleHTTPRequestHandler):
                     self._send_json(400, {"error": "Cada anuncio necesita su grupo de anuncios."})
                     return
                 try:
-                    heads, descs, _p1, _p2, hpins, dpins = google_ads_client.clean_rsa_texts_with_pins(
-                        a.get("headlines"), a.get("descriptions"), "", "", a.get("headline_pins"), a.get("description_pins"))
+                    heads, descs, path1, path2, hpins, dpins = google_ads_client.clean_rsa_texts_with_pins(
+                        a.get("headlines"), a.get("descriptions"), payload.get("path1"), payload.get("path2"),
+                        a.get("headline_pins"), a.get("description_pins"))
                 except ValueError as e:
                     self._send_json(400, {"error": str(e)})
                     return
                 ads.append({"ad_group_id": gid, "final_url": str(a.get("final_url") or "").strip(), "headlines": heads, "descriptions": descs,
-                            "head_pins": hpins, "desc_pins": dpins})
+                            "head_pins": hpins, "desc_pins": dpins, "custom_url": a.get("custom_url") is True,
+                            "path1": path1, "path2": path2})
             accounts.append({"customer_id": cid, "ads": ads})
         simulated = not google_ads_client.is_configured()
         members = None

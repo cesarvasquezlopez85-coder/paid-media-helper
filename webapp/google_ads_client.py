@@ -2185,6 +2185,21 @@ def _create_rsa(customer_id, ad_group_id, heads, descs, path1, path2, final_url,
     return resource
 
 
+def _check_bulk_ad_url(url, group_urls, account_urls, custom_url):
+    """Regla de la URL en la creación por plantilla. Por defecto debe ser una de las que ya usan los anuncios activos del
+    propio grupo. Con `custom_url` (la persona escribió una URL de destino para toda la tanda) basta que sea de un dominio
+    que ya usen los anuncios activos de la cuenta; si la cuenta no tiene ninguno no hay referencia y se rechaza."""
+    if not custom_url:
+        if url not in group_urls:
+            raise ValueError("La URL no coincide con la de los anuncios activos de este grupo.")
+        return
+    known = {url_host(u) for u in account_urls if url_host(u)}
+    if not known:
+        raise ValueError("La cuenta no tiene anuncios activos de referencia: no se puede usar una URL de destino propia.")
+    if url_host(url) not in known:
+        raise ValueError("La URL de destino no es de un dominio que ya usen los anuncios de esta cuenta: " + ", ".join(sorted(known)[:3]) + ".")
+
+
 def _check_ad_url_rule(final_url, reference_urls, url_confirmed):
     """La URL debe caer en un dominio que ya usan los anuncios de la cuenta. Sin anuncios de referencia, la persona
     la confirma a mano. Devuelve True si el dominio es conocido, False si se aceptó por confirmación manual."""
@@ -2342,6 +2357,8 @@ def _mutate_rsa_batch(customer_id, ads, validate_only):
             "ad": {"finalUrls": [a["final_url"]], "responsiveSearchAd": {
                 "headlines": _rsa_assets(a["headlines"], a.get("head_pins"), "headlines"),
                 "descriptions": _rsa_assets(a["descriptions"], a.get("desc_pins"), "descriptions"),
+                **({"path1": a["path1"]} if a.get("path1") else {}),
+                **({"path2": a["path2"]} if a.get("path2") else {}),
             }},
         }} for a in chunk]
         try:
@@ -2393,7 +2410,8 @@ def _apply_label(customer_id, label_resource, ad_resources):
 def create_bulk_responsive_search_ads(customer_id, ads, label, validate_only=True):
     """Crea (o solo valida) anuncios PAUSADOS en varios grupos de una cuenta. `ads` = [{ad_group_id, final_url,
     headlines, descriptions}] con textos ya limpios. Relee en vivo la estructura y exige: grupo y campaña activos y
-    Search, la URL entre las de los anuncios activos de ESE grupo, menos de 3 RSA activos y ningún anuncio previo con la
+    Search, la URL entre las de los anuncios activos de ESE grupo (o, con `custom_url`, de un dominio que ya usen los
+    anuncios activos de la cuenta), menos de 3 RSA activos y ningún anuncio previo con la
     etiqueta. Devuelve una lista alineada con `ads` con {ok, ...} por grupo."""
     label = clean_ad_label(label)
     live = _search(customer_id, """
@@ -2417,8 +2435,7 @@ def create_bulk_responsive_search_ads(customer_id, ads, label, validate_only=Tru
                 raise ValueError("El grupo se repite en la misma tanda.")
             seen.add(gid)
             url = normalize_final_url(a["final_url"])
-            if url not in url_by_group.get(gid, {}):
-                raise ValueError("La URL no coincide con la de los anuncios activos de este grupo.")
+            _check_bulk_ad_url(url, url_by_group.get(gid, {}), overall, bool(a.get("custom_url")))
             if rsa.get(gid, 0) >= AD_MAX_ENABLED_RSA:
                 raise ValueError(f"El grupo ya tiene {AD_MAX_ENABLED_RSA} anuncios adaptables activos.")
             if labeled.get(gid, 0):
@@ -2613,8 +2630,7 @@ def simulated_create_bulk_responsive_search_ads(customer_id, ads, label, validat
                 raise ValueError("El grupo se repite en la misma tanda.")
             seen.add(gid)
             url = normalize_final_url(a["final_url"])
-            if url not in url_by_group.get(gid, {}):
-                raise ValueError("La URL no coincide con la de los anuncios activos de este grupo.")
+            _check_bulk_ad_url(url, url_by_group.get(gid, {}), raw[3] if raw else {}, bool(a.get("custom_url")))
             if SIMULATED_RSA_ENABLED.get(gid, 1 if url_by_group.get(gid) else 0) >= AD_MAX_ENABLED_RSA:
                 raise ValueError(f"El grupo ya tiene {AD_MAX_ENABLED_RSA} anuncios adaptables activos.")
             if gid in done:
