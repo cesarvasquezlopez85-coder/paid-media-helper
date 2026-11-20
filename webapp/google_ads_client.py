@@ -1965,6 +1965,706 @@ def update_campaign_status(customer_id, campaign_id, status, validate_only=True)
     return {"validate_only": validate_only, "applied": not validate_only, "status": status}
 
 
+# ---------------------------------------------------------------------------
+# Anuncios nuevos (anuncio de búsqueda adaptable, RSA) en varias cuentas de un mismo MCC.
+# Reglas que no se rompen: el anuncio se crea siempre PAUSADO (se activa a mano después), solo en un grupo de anuncios
+# activo de una campaña Search activa que el servidor relee en vivo, y con una URL final cuyo dominio ya usan los
+# anuncios de esa misma cuenta (la URL «original» de cada cuenta); si la cuenta no tiene ningún anuncio de
+# referencia, la persona debe confirmar la URL a mano.
+# ---------------------------------------------------------------------------
+RSA_HEADLINE_MAX = 30
+RSA_DESCRIPTION_MAX = 90
+RSA_PATH_MAX = 15
+RSA_HEADLINES_RANGE = (3, 15)
+RSA_DESCRIPTIONS_RANGE = (2, 4)
+AD_FINAL_URL_MAX = 2000
+
+
+def clean_rsa_texts(headlines, descriptions, path1="", path2=""):
+    """Valida y limpia los textos de un anuncio adaptable. Devuelve (títulos, descripciones, ruta1, ruta2) o lanza
+    ValueError con un mensaje en español."""
+    def _clean(items, kind, one, maxlen, rng):
+        if not isinstance(items, list):
+            raise ValueError(f"Faltan los {kind}.")
+        out, seen = [], set()
+        for raw in items:
+            text = " ".join(str(raw or "").split())
+            if not text:
+                continue
+            if len(text) > maxlen:
+                raise ValueError(f"{one[0]}{one[1]} pasa de {maxlen} caracteres: «{text[:40]}…».")
+            if any(ord(ch) < 32 for ch in text):
+                raise ValueError(f"{one[0]}{one[1]} trae caracteres no permitidos.")
+            key = text.lower()
+            if key in seen:
+                raise ValueError(f"Hay {one[0].lower()}{one[1]} repetid{one[2]}: «{text[:40]}».")
+            seen.add(key)
+            out.append(text)
+        if len(out) < rng[0] or len(out) > rng[1]:
+            raise ValueError(f"Se necesitan entre {rng[0]} y {rng[1]} {kind} (hay {len(out)}).")
+        return out
+
+    heads = _clean(headlines, "títulos", ("Un ", "título", "o"), RSA_HEADLINE_MAX, RSA_HEADLINES_RANGE)
+    descs = _clean(descriptions, "descripciones", ("Una ", "descripción", "a"), RSA_DESCRIPTION_MAX, RSA_DESCRIPTIONS_RANGE)
+    paths = []
+    for raw in (path1, path2):
+        text = str(raw or "").strip()
+        if len(text) > RSA_PATH_MAX or re.search(r"[^\w\-]", text, re.UNICODE):
+            raise ValueError(f"Cada ruta visible admite hasta {RSA_PATH_MAX} caracteres, solo letras, números, guion y guion bajo.")
+        paths.append(text)
+    if paths[1] and not paths[0]:
+        raise ValueError("La segunda ruta visible necesita la primera.")
+    return heads, descs, paths[0], paths[1]
+
+
+def normalize_final_url(url):
+    """URL final válida (http o https, con dominio, sin espacios). Devuelve la URL limpia o lanza ValueError."""
+    text = str(url or "").strip()
+    if not text or len(text) > AD_FINAL_URL_MAX or re.search(r"\s", text):
+        raise ValueError("La URL final falta, es demasiado larga o trae espacios.")
+    parts = urllib.parse.urlsplit(text)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError("La URL final debe empezar con http:// o https:// y traer un dominio.")
+    return text
+
+
+def url_host(url):
+    """Dominio de una URL en minúsculas y sin «www.», o '' si no se puede leer."""
+    try:
+        host = (urllib.parse.urlsplit(str(url or "").strip()).hostname or "").lower()
+    except ValueError:
+        return ""
+    return host[4:] if host.startswith("www.") else host
+
+
+def google_error_text(exc, limit=260):
+    """Mensaje legible de un error de la API de Google Ads (sin ids ni datos de la cuenta): toma los textos de
+    los errores del JSON de la respuesta. Para errores propios (ValueError) devuelve el texto tal cual."""
+    detail = str(exc)
+    if isinstance(exc, ValueError):
+        return detail[:limit]
+    match = re.search(r"respondió \d{3}: (\{.*\})", detail, re.S)
+    messages = []
+    if match:
+        try:
+            body = json.loads(match.group(1)).get("error", {})
+            for d in body.get("details", []) or []:
+                for e in d.get("errors", []) or []:
+                    msg = " ".join(str(e.get("message") or "").split())
+                    if msg and msg not in messages:
+                        messages.append(msg)
+            if not messages and body.get("message"):
+                messages.append(" ".join(str(body["message"]).split()))
+        except (ValueError, AttributeError):
+            pass
+    if messages:
+        return ("Google Ads rechazó el anuncio: " + " · ".join(messages[:2]))[:limit]
+    if "No se pudo conectar" in detail:
+        return "No se pudo conectar con Google Ads. Intenta de nuevo."
+    return "Google Ads no aceptó la solicitud. Revisa los datos e intenta de nuevo."
+
+
+def _search_ads_final_urls(customer_id):
+    """(URL por grupo de anuncios, URLs de toda la cuenta) de los anuncios activos de campañas Search activas."""
+    rows = _search(customer_id, """
+        SELECT ad_group.id, ad_group_ad.ad.final_urls
+        FROM ad_group_ad
+        WHERE ad_group_ad.status = 'ENABLED' AND ad_group.status = 'ENABLED'
+          AND campaign.status = 'ENABLED' AND campaign.advertising_channel_type = 'SEARCH'
+    """)
+    by_group, overall = {}, Counter()
+    for r in rows:
+        urls = (r.get("adGroupAd", {}).get("ad", {}) or {}).get("finalUrls") or []
+        if not urls:
+            continue
+        url = str(urls[0])
+        gid = str((r.get("adGroup") or {}).get("id"))
+        by_group.setdefault(gid, Counter())[url] += 1
+        overall[url] += 1
+    return by_group, overall
+
+
+def fetch_ad_targets(customer_id):
+    """Destinos posibles para un anuncio nuevo en una cuenta: campañas Search activas con sus grupos de anuncios
+    activos (con el gasto de 30 días para sugerir el principal) y la URL que ya usan sus anuncios."""
+    structure = _search(customer_id, """
+        SELECT campaign.id, campaign.name, ad_group.id, ad_group.name
+        FROM ad_group
+        WHERE campaign.advertising_channel_type = 'SEARCH' AND campaign.status = 'ENABLED' AND ad_group.status = 'ENABLED'
+    """)
+    cost_rows = _search(customer_id, """
+        SELECT ad_group.id, metrics.cost_micros
+        FROM ad_group
+        WHERE campaign.advertising_channel_type = 'SEARCH' AND campaign.status = 'ENABLED' AND ad_group.status = 'ENABLED'
+          AND segments.date DURING LAST_30_DAYS
+    """)
+    cost_by_group = {}
+    for r in cost_rows:
+        gid = str((r.get("adGroup") or {}).get("id"))
+        cost_by_group[gid] = cost_by_group.get(gid, 0) + int((r.get("metrics") or {}).get("costMicros") or 0)
+    by_group, overall = _search_ads_final_urls(customer_id)
+    return _build_ad_targets(structure, cost_by_group, by_group, overall)
+
+
+def _build_ad_targets(structure, cost_by_group, url_by_group, url_overall):
+    campaigns = {}
+    for r in structure:
+        c, g = r.get("campaign") or {}, r.get("adGroup") or {}
+        cid, gid = str(c.get("id")), str(g.get("id"))
+        camp = campaigns.setdefault(cid, {"id": cid, "name": c.get("name") or f"Campaña {cid}", "cost_30d": 0.0, "ad_groups": []})
+        cost = cost_by_group.get(gid, 0) / MICROS
+        urls = url_by_group.get(gid)
+        camp["ad_groups"].append({
+            "id": gid, "name": g.get("name") or f"Grupo {gid}", "cost_30d": round(cost, 2),
+            "url": urls.most_common(1)[0][0] if urls else "",
+        })
+        camp["cost_30d"] += cost
+    out = sorted(campaigns.values(), key=lambda c: -c["cost_30d"])
+    for c in out:
+        c["cost_30d"] = round(c["cost_30d"], 2)
+        c["ad_groups"].sort(key=lambda g: -g["cost_30d"])
+    return {
+        "campaigns": out,
+        "urls": [{"url": u, "count": n} for u, n in url_overall.most_common(8)],
+        "default_url": url_overall.most_common(1)[0][0] if url_overall else "",
+    }
+
+
+def _create_rsa(customer_id, ad_group_id, heads, descs, path1, path2, final_url, validate_only):
+    url = f"{BASE_URL}/customers/{customer_id}/adGroupAds:mutate"
+    rsa = {"headlines": [{"text": t} for t in heads], "descriptions": [{"text": t} for t in descs]}
+    if path1:
+        rsa["path1"] = path1
+    if path2:
+        rsa["path2"] = path2
+    body = {
+        "operations": [{"create": {
+            "adGroup": f"customers/{customer_id}/adGroups/{ad_group_id}",
+            "status": "PAUSED",
+            "ad": {"finalUrls": [final_url], "responsiveSearchAd": rsa},
+        }}],
+        "validateOnly": validate_only,
+    }
+    payload = _post_json(url, body)
+    results = payload.get("results") or []
+    resource = (results[0] or {}).get("resourceName", "") if results else ""
+    return resource
+
+
+def _check_ad_url_rule(final_url, reference_urls, url_confirmed):
+    """La URL debe caer en un dominio que ya usan los anuncios de la cuenta. Sin anuncios de referencia, la persona
+    la confirma a mano. Devuelve True si el dominio es conocido, False si se aceptó por confirmación manual."""
+    known = {url_host(u) for u in reference_urls if url_host(u)}
+    if known:
+        if url_host(final_url) not in known:
+            raise ValueError("La URL no es de un dominio que ya usen los anuncios de esta cuenta: " + ", ".join(sorted(known)[:3]) + ".")
+        return True
+    if not url_confirmed:
+        raise ValueError("Esta cuenta no tiene anuncios activos de referencia: confirma la URL a mano para crearla.")
+    return False
+
+
+def create_responsive_search_ad(customer_id, ad_group_id, headlines, descriptions, path1, path2, final_url,
+                                url_confirmed=False, validate_only=True):
+    """Crea (o solo valida, con validate_only=True) un anuncio de búsqueda adaptable PAUSADO en un grupo de anuncios.
+    Relee en vivo el grupo y su campaña y exige que sean Search y estén activos; la URL debe ser del dominio que ya
+    usa la cuenta. Los textos ya deben venir limpios (clean_rsa_texts)."""
+    if not str(ad_group_id).isdigit():
+        raise ValueError("Falta o es inválido el grupo de anuncios.")
+    final_url = normalize_final_url(final_url)
+    rows = _search(customer_id, f"""
+        SELECT ad_group.id, ad_group.name, ad_group.status, campaign.id, campaign.name, campaign.status,
+               campaign.advertising_channel_type
+        FROM ad_group WHERE ad_group.id = {int(ad_group_id)}
+    """)
+    if not rows:
+        raise ValueError("No se encontró el grupo de anuncios en esta cuenta.")
+    g, c = rows[0].get("adGroup") or {}, rows[0].get("campaign") or {}
+    if c.get("advertisingChannelType") != "SEARCH":
+        raise ValueError("El anuncio solo se crea en campañas Search.")
+    if c.get("status") != "ENABLED" or g.get("status") != "ENABLED":
+        raise ValueError("La campaña y el grupo de anuncios deben estar activos.")
+    _, overall = _search_ads_final_urls(customer_id)
+    known = _check_ad_url_rule(final_url, list(overall), url_confirmed)
+    resource = _create_rsa(customer_id, ad_group_id, headlines, descriptions, path1, path2, final_url, validate_only)
+    return {
+        "validate_only": validate_only, "applied": not validate_only, "campaign_id": str(c.get("id")),
+        "campaign_name": c.get("name") or "", "ad_group_name": g.get("name") or "", "resource_name": resource,
+        "ad_id": resource.split("~")[-1] if "~" in resource else "", "url_known": known,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Anuncios nuevos «por plantilla»: el mismo anuncio (con textos por idioma y variables por hotel) en TODOS los grupos de
+# anuncios activos de campañas Search activas de cada cuenta. Cada anuncio se crea PAUSADO, con la URL que ya usan los
+# anuncios activos de ese mismo grupo (sin anuncio de referencia el grupo se omite) y marcado con una etiqueta que
+# identifica la tanda e impide crearlo dos veces. Las escrituras de una cuenta se mandan por lotes en una sola llamada.
+# ---------------------------------------------------------------------------
+AD_LABEL_MAX = 80
+AD_BULK_CHUNK = 50
+AD_MAX_ENABLED_RSA = 3
+
+
+def clean_ad_label(label):
+    """Nombre de etiqueta válido (letras, números, espacios, guion y guion bajo; hasta 80). Lanza ValueError si no."""
+    text = " ".join(str(label or "").split())
+    if not text or len(text) > AD_LABEL_MAX or re.search(r"[^\w\- ]", text, re.UNICODE):
+        raise ValueError(f"La etiqueta es obligatoria (hasta {AD_LABEL_MAX} caracteres: letras, números, espacios, guion y guion bajo).")
+    return text
+
+
+def _gaql_quote(text):
+    return str(text).replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _labeled_ads_by_group(customer_id, label):
+    """{id del grupo: cantidad de anuncios no eliminados con esa etiqueta}."""
+    rows = _search(customer_id, f"""
+        SELECT ad_group.id, ad_group_ad.ad.id, ad_group_ad.status
+        FROM ad_group_ad_label
+        WHERE label.name = '{_gaql_quote(label)}' AND ad_group_ad.status != 'REMOVED'
+    """)
+    out = Counter()
+    for r in rows:
+        out[str((r.get("adGroup") or {}).get("id"))] += 1
+    return out
+
+
+def _enabled_rsa_by_group(customer_id):
+    rows = _search(customer_id, """
+        SELECT ad_group.id, ad_group_ad.ad.id
+        FROM ad_group_ad
+        WHERE ad_group_ad.status = 'ENABLED' AND ad_group_ad.ad.type = 'RESPONSIVE_SEARCH_AD'
+          AND ad_group.status = 'ENABLED' AND campaign.status = 'ENABLED' AND campaign.advertising_channel_type = 'SEARCH'
+    """)
+    out = Counter()
+    for r in rows:
+        out[str((r.get("adGroup") or {}).get("id"))] += 1
+    return out
+
+
+def fetch_bulk_ad_groups(customer_id, label=""):
+    """Todos los grupos de anuncios activos de campañas Search activas de una cuenta, con lo necesario para decidir si
+    se les puede crear el anuncio: nombre de la campaña (de ahí salen el hotel y el idioma), URL de referencia (la más
+    usada por los anuncios activos del grupo), cuántos RSA activos tiene y cuántos anuncios ya llevan la etiqueta."""
+    structure = _search(customer_id, """
+        SELECT campaign.id, campaign.name, ad_group.id, ad_group.name
+        FROM ad_group
+        WHERE campaign.advertising_channel_type = 'SEARCH' AND campaign.status = 'ENABLED' AND ad_group.status = 'ENABLED'
+    """)
+    by_group, overall = _search_ads_final_urls(customer_id)
+    rsa = _enabled_rsa_by_group(customer_id)
+    labeled = _labeled_ads_by_group(customer_id, clean_ad_label(label)) if label else Counter()
+    return _build_bulk_ad_groups(structure, by_group, overall, rsa, labeled)
+
+
+def _build_bulk_ad_groups(structure, url_by_group, url_overall, rsa_by_group, labeled_by_group):
+    campaigns = {}
+    for r in structure:
+        c, g = r.get("campaign") or {}, r.get("adGroup") or {}
+        cid, gid = str(c.get("id")), str(g.get("id"))
+        camp = campaigns.setdefault(cid, {"id": cid, "name": c.get("name") or f"Campaña {cid}", "ad_groups": []})
+        urls = url_by_group.get(gid)
+        camp["ad_groups"].append({
+            "id": gid, "name": g.get("name") or f"Grupo {gid}",
+            "url": urls.most_common(1)[0][0] if urls else "",
+            "rsa_enabled": int(rsa_by_group.get(gid, 0)),
+            "labeled": int(labeled_by_group.get(gid, 0)),
+        })
+    out = sorted(campaigns.values(), key=lambda c: c["name"].lower())
+    for c in out:
+        c["ad_groups"].sort(key=lambda g: g["name"].lower())
+    return {"campaigns": out, "hosts": sorted({url_host(u) for u in url_overall if url_host(u)})}
+
+
+def _partial_failure_errors(payload):
+    """{índice de la operación: mensaje} a partir de partialFailureError de una respuesta de mutate."""
+    out = {}
+    err = payload.get("partialFailureError") or {}
+    for d in err.get("details", []) or []:
+        for e in d.get("errors", []) or []:
+            msg = " ".join(str(e.get("message") or "").split())
+            idx = None
+            for el in ((e.get("location") or {}).get("fieldPathElements") or []):
+                if el.get("fieldName") == "operations" and el.get("index") is not None:
+                    idx = int(el["index"])
+                    break
+            if idx is None:
+                continue
+            out[idx] = (out.get(idx, "") + (" · " if idx in out else "") + msg)[:240]
+    return out
+
+
+def _mutate_rsa_batch(customer_id, ads, validate_only):
+    """Manda por lotes los anuncios [{ad_group_id, final_url, headlines, descriptions}] (todos PAUSADOS). Devuelve una
+    lista alineada con `ads`: {"ok": True, "resource_name": ...} o {"ok": False, "error": ...}."""
+    url = f"{BASE_URL}/customers/{customer_id}/adGroupAds:mutate"
+    out = []
+    for start in range(0, len(ads), AD_BULK_CHUNK):
+        chunk = ads[start:start + AD_BULK_CHUNK]
+        ops = [{"create": {
+            "adGroup": f"customers/{customer_id}/adGroups/{a['ad_group_id']}",
+            "status": "PAUSED",
+            "ad": {"finalUrls": [a["final_url"]], "responsiveSearchAd": {
+                "headlines": [{"text": t} for t in a["headlines"]],
+                "descriptions": [{"text": t} for t in a["descriptions"]],
+            }},
+        }} for a in chunk]
+        try:
+            payload = _post_json(url, {"operations": ops, "partialFailure": True, "validateOnly": validate_only})
+        except Exception as e:  # noqa: BLE001 — un lote que falla entero se reporta en cada anuncio del lote
+            msg = google_error_text(e)
+            out.extend({"ok": False, "error": msg} for _ in chunk)
+            continue
+        errors = _partial_failure_errors(payload)
+        results = payload.get("results") or []
+        for i in range(len(chunk)):
+            if i in errors:
+                out.append({"ok": False, "error": "Google Ads rechazó el anuncio: " + errors[i]})
+            else:
+                rn = (results[i] or {}).get("resourceName", "") if i < len(results) else ""
+                out.append({"ok": True, "resource_name": rn})
+    return out
+
+
+def _ensure_label(customer_id, label):
+    """Resource name de la etiqueta de la cuenta (la crea si no existe)."""
+    rows = _search(customer_id, f"SELECT label.resource_name, label.name FROM label WHERE label.name = '{_gaql_quote(label)}'")
+    if rows:
+        return (rows[0].get("label") or {}).get("resourceName", "")
+    payload = _post_json(f"{BASE_URL}/customers/{customer_id}/labels:mutate", {"operations": [{"create": {
+        "name": label, "textLabel": {"description": "Anuncios creados desde Paid Media Helper", "backgroundColor": "#FFB300"},
+    }}]})
+    return ((payload.get("results") or [{}])[0] or {}).get("resourceName", "")
+
+
+def _apply_label(customer_id, label_resource, ad_resources):
+    """Etiqueta los anuncios creados. Devuelve {resource_name del anuncio: mensaje de error} (vacío si todo salió bien)."""
+    failed = {}
+    for start in range(0, len(ad_resources), AD_BULK_CHUNK):
+        chunk = ad_resources[start:start + AD_BULK_CHUNK]
+        ops = [{"create": {"adGroupAd": rn, "label": label_resource}} for rn in chunk]
+        try:
+            payload = _post_json(f"{BASE_URL}/customers/{customer_id}/adGroupAdLabels:mutate", {"operations": ops, "partialFailure": True})
+        except Exception as e:  # noqa: BLE001
+            for rn in chunk:
+                failed[rn] = google_error_text(e)
+            continue
+        for idx, msg in _partial_failure_errors(payload).items():
+            if idx < len(chunk):
+                failed[chunk[idx]] = msg
+    return failed
+
+
+def create_bulk_responsive_search_ads(customer_id, ads, label, validate_only=True):
+    """Crea (o solo valida) anuncios PAUSADOS en varios grupos de una cuenta. `ads` = [{ad_group_id, final_url,
+    headlines, descriptions}] con textos ya limpios. Relee en vivo la estructura y exige: grupo y campaña activos y
+    Search, la URL entre las de los anuncios activos de ESE grupo, menos de 3 RSA activos y ningún anuncio previo con la
+    etiqueta. Devuelve una lista alineada con `ads` con {ok, ...} por grupo."""
+    label = clean_ad_label(label)
+    live = _search(customer_id, """
+        SELECT campaign.id, campaign.name, ad_group.id, ad_group.name
+        FROM ad_group
+        WHERE campaign.advertising_channel_type = 'SEARCH' AND campaign.status = 'ENABLED' AND ad_group.status = 'ENABLED'
+    """)
+    groups = {str((r.get("adGroup") or {}).get("id")): r for r in live}
+    url_by_group, overall = _search_ads_final_urls(customer_id)
+    rsa = _enabled_rsa_by_group(customer_id)
+    labeled = _labeled_ads_by_group(customer_id, label)
+    results = [None] * len(ads)
+    to_send, to_send_idx, seen = [], [], set()
+    for i, a in enumerate(ads):
+        gid = str(a["ad_group_id"])
+        row = groups.get(gid)
+        try:
+            if not row:
+                raise ValueError("El grupo ya no está activo en una campaña Search activa (o no es de esta cuenta).")
+            if gid in seen:
+                raise ValueError("El grupo se repite en la misma tanda.")
+            seen.add(gid)
+            url = normalize_final_url(a["final_url"])
+            if url not in url_by_group.get(gid, {}):
+                raise ValueError("La URL no coincide con la de los anuncios activos de este grupo.")
+            if rsa.get(gid, 0) >= AD_MAX_ENABLED_RSA:
+                raise ValueError(f"El grupo ya tiene {AD_MAX_ENABLED_RSA} anuncios adaptables activos.")
+            if labeled.get(gid, 0):
+                raise ValueError("El grupo ya tiene un anuncio con esa etiqueta.")
+        except ValueError as e:
+            results[i] = {"ok": False, "error": str(e)}
+            continue
+        c, g = row.get("campaign") or {}, row.get("adGroup") or {}
+        results[i] = {"campaign_id": str(c.get("id")), "campaign_name": c.get("name") or "", "ad_group_name": g.get("name") or ""}
+        to_send.append({**a, "final_url": url})
+        to_send_idx.append(i)
+    sent = _mutate_rsa_batch(customer_id, to_send, validate_only) if to_send else []
+    created = []
+    for i, res in zip(to_send_idx, sent):
+        base = results[i]
+        if not res["ok"]:
+            results[i] = {"ok": False, "error": res["error"]}
+            continue
+        rn = res.get("resource_name", "")
+        results[i] = {**base, "ok": True, "resource_name": rn, "ad_id": rn.split("~")[-1] if "~" in rn else "", "labeled": False}
+        if rn:
+            created.append(i)
+    if not validate_only and created:
+        label_error = ""
+        failed = {}
+        try:
+            label_resource = _ensure_label(customer_id, label)
+            if not label_resource:
+                raise RuntimeError("No se pudo crear la etiqueta.")
+            failed = _apply_label(customer_id, label_resource, [results[i]["resource_name"] for i in created])
+        except Exception as e:  # noqa: BLE001 — los anuncios ya existen (pausados); se avisa que quedaron sin etiqueta
+            label_error = google_error_text(e)
+        for i in created:
+            rn = results[i]["resource_name"]
+            if label_error:
+                results[i]["label_error"] = label_error
+            elif rn in failed:
+                results[i]["label_error"] = failed[rn]
+            else:
+                results[i]["labeled"] = True
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Activar o pausar, a mano y con vista previa, los anuncios adaptables que llevan una etiqueta (los de una tanda creada
+# con «Por plantilla»). Solo se toca el estado de anuncios que el servidor vuelve a encontrar con esa etiqueta en ese
+# momento; para activar, el grupo y la campaña deben estar activos y ser Search, y el grupo no puede pasar de 3
+# anuncios adaptables activos. No se crea ni se elimina nada.
+# ---------------------------------------------------------------------------
+AD_STATUS_VALUES = ("ENABLED", "PAUSED")
+
+
+def _labeled_ads_detail(customer_id, label):
+    """Anuncios adaptables no eliminados que llevan la etiqueta, con el estado de su grupo y su campaña."""
+    rows = _search(customer_id, f"""
+        SELECT ad_group.id, ad_group.name, ad_group.status, ad_group_ad.ad.id, ad_group_ad.status,
+               campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type
+        FROM ad_group_ad_label
+        WHERE label.name = '{_gaql_quote(label)}' AND ad_group_ad.status != 'REMOVED'
+          AND ad_group_ad.ad.type = 'RESPONSIVE_SEARCH_AD'
+    """)
+    out = []
+    for r in rows:
+        g, c = r.get("adGroup") or {}, r.get("campaign") or {}
+        aga = r.get("adGroupAd") or {}
+        out.append({
+            "ad_group_id": str(g.get("id")), "ad_group_name": g.get("name") or "", "ad_id": str((aga.get("ad") or {}).get("id")),
+            "status": aga.get("status") or "", "campaign_id": str(c.get("id")), "campaign_name": c.get("name") or "",
+            "active_context": c.get("status") == "ENABLED" and g.get("status") == "ENABLED" and c.get("advertisingChannelType") == "SEARCH",
+        })
+    out.sort(key=lambda x: (x["campaign_name"].lower(), x["ad_group_name"].lower(), x["ad_id"]))
+    return out
+
+
+def fetch_label_ads(customer_id, label):
+    """Anuncios con la etiqueta en una cuenta y cuántos adaptables activos tiene cada grupo (para el límite de 3)."""
+    label = clean_ad_label(label)
+    ads = _labeled_ads_detail(customer_id, label)
+    return {"ads": ads, "rsa_enabled": dict(_enabled_rsa_by_group(customer_id))}
+
+
+def fetch_account_timezone(customer_id):
+    """Zona horaria de la cuenta (por ejemplo «America/Bogota»), tal como la guarda Google Ads."""
+    rows = _search(customer_id, "SELECT customer.time_zone FROM customer")
+    tz = ((rows[0].get("customer") or {}).get("timeZone") or "") if rows else ""
+    if not tz:
+        raise ValueError("No se pudo leer la zona horaria de la cuenta.")
+    return tz
+
+
+def _mutate_ad_status_batch(customer_id, resources, status, validate_only):
+    """Cambia el estado de los anuncios (resource names). Devuelve una lista alineada: {"ok": True} o {"ok": False, "error"}."""
+    url = f"{BASE_URL}/customers/{customer_id}/adGroupAds:mutate"
+    out = []
+    for start in range(0, len(resources), AD_BULK_CHUNK):
+        chunk = resources[start:start + AD_BULK_CHUNK]
+        ops = [{"update": {"resourceName": rn, "status": status}, "updateMask": "status"} for rn in chunk]
+        try:
+            payload = _post_json(url, {"operations": ops, "partialFailure": True, "validateOnly": validate_only})
+        except Exception as e:  # noqa: BLE001 — un lote que falla entero se reporta en cada anuncio del lote
+            msg = google_error_text(e)
+            out.extend({"ok": False, "error": msg} for _ in chunk)
+            continue
+        errors = _partial_failure_errors(payload)
+        for i in range(len(chunk)):
+            out.append({"ok": False, "error": "Google Ads rechazó el cambio: " + errors[i]} if i in errors else {"ok": True})
+    return out
+
+
+def _check_label_ad_change(row, status, enabled_in_group, planned_in_group):
+    """Regla de un cambio de estado sobre un anuncio con etiqueta. Lanza ValueError con el motivo si no se puede."""
+    if status == "ENABLED":
+        if row["status"] != "PAUSED":
+            raise ValueError("El anuncio ya está activo.")
+        if not row["active_context"]:
+            raise ValueError("La campaña o el grupo de anuncios no está activo (o no es Search).")
+        if enabled_in_group + planned_in_group >= AD_MAX_ENABLED_RSA:
+            raise ValueError(f"El grupo pasaría de {AD_MAX_ENABLED_RSA} anuncios adaptables activos.")
+    else:
+        if row["status"] != "ENABLED":
+            raise ValueError("El anuncio ya está pausado.")
+
+
+def set_label_ads_status(customer_id, items, label, status, validate_only=True):
+    """Activa o pausa (o solo valida) anuncios que llevan la etiqueta. `items` = [{ad_group_id, ad_id}]. Relee en vivo
+    qué anuncios llevan la etiqueta y su estado. Devuelve una lista alineada con `items`."""
+    if status not in AD_STATUS_VALUES:
+        raise ValueError("El estado debe ser ENABLED o PAUSED.")
+    label = clean_ad_label(label)
+    live = {(a["ad_group_id"], a["ad_id"]): a for a in _labeled_ads_detail(customer_id, label)}
+    enabled = _enabled_rsa_by_group(customer_id)
+    planned = Counter()
+    results = [None] * len(items)
+    to_send, idx = [], []
+    for i, it in enumerate(items):
+        key = (str(it["ad_group_id"]), str(it["ad_id"]))
+        row = live.get(key)
+        try:
+            if not row:
+                raise ValueError("El anuncio ya no tiene esa etiqueta o fue eliminado.")
+            _check_label_ad_change(row, status, enabled.get(key[0], 0), planned[key[0]])
+        except ValueError as e:
+            results[i] = {"ok": False, "error": str(e), "skipped": True}
+            continue
+        if status == "ENABLED":
+            planned[key[0]] += 1
+        results[i] = {"ok": True, "campaign_name": row["campaign_name"], "ad_group_name": row["ad_group_name"], "ad_id": key[1], "old_status": row["status"]}
+        to_send.append(f"customers/{customer_id}/adGroupAds/{key[0]}~{key[1]}")
+        idx.append(i)
+    sent = _mutate_ad_status_batch(customer_id, to_send, status, validate_only) if to_send else []
+    for i, res in zip(idx, sent):
+        if not res["ok"]:
+            results[i] = {"ok": False, "error": res["error"]}
+    return results
+
+
+# Estado en memoria del modo simulado: por (cuenta, etiqueta), {id del grupo: {ad_id, status}} de los anuncios creados.
+_SIMULATED_LABELED = {}
+
+
+def simulated_bulk_ad_groups(customer_id, label=""):
+    raw = _simulated_ad_targets_raw(customer_id)
+    if raw is None:
+        return {"campaigns": [], "hosts": []}
+    structure, _cost, url_by_group, overall = raw
+    rsa = {gid: (SIMULATED_RSA_ENABLED.get(gid, 1 if urls else 0)) for gid, urls in url_by_group.items()}
+    labeled = Counter()
+    if label:
+        for gid in _SIMULATED_LABELED.get((str(customer_id), clean_ad_label(label)), set()):
+            labeled[gid] += 1
+    return _build_bulk_ad_groups(structure, url_by_group, overall, rsa, labeled)
+
+
+SIMULATED_RSA_ENABLED = {"5012": 3}
+
+
+def simulated_create_bulk_responsive_search_ads(customer_id, ads, label, validate_only=True):
+    """Misma lógica que create_bulk_responsive_search_ads sin tocar Google (un título con «rechazar» simula un rechazo)."""
+    label = clean_ad_label(label)
+    raw = _simulated_ad_targets_raw(customer_id)
+    structure, url_by_group = (raw[0], raw[2]) if raw else ([], {})
+    groups = {r["adGroup"]["id"]: r for r in structure}
+    done = _SIMULATED_LABELED.setdefault((str(customer_id), label), {})
+    results, seen = [], set()
+    for a in ads:
+        gid = str(a["ad_group_id"])
+        row = groups.get(gid)
+        try:
+            if not row:
+                raise ValueError("El grupo ya no está activo en una campaña Search activa (o no es de esta cuenta).")
+            if gid in seen:
+                raise ValueError("El grupo se repite en la misma tanda.")
+            seen.add(gid)
+            url = normalize_final_url(a["final_url"])
+            if url not in url_by_group.get(gid, {}):
+                raise ValueError("La URL no coincide con la de los anuncios activos de este grupo.")
+            if SIMULATED_RSA_ENABLED.get(gid, 1 if url_by_group.get(gid) else 0) >= AD_MAX_ENABLED_RSA:
+                raise ValueError(f"El grupo ya tiene {AD_MAX_ENABLED_RSA} anuncios adaptables activos.")
+            if gid in done:
+                raise ValueError("El grupo ya tiene un anuncio con esa etiqueta.")
+            if any("rechazar" in t.lower() for t in a["headlines"]):
+                raise ValueError("Google Ads rechazó el anuncio: Simulación de rechazo por política.")
+        except ValueError as e:
+            results.append({"ok": False, "error": str(e)})
+            continue
+        resource = f"customers/{customer_id}/adGroupAds/{gid}~9{gid[-3:]}0001"
+        if not validate_only:
+            done[gid] = {"ad_id": resource.split("~")[-1], "status": "PAUSED"}
+        results.append({
+            "ok": True, "campaign_id": row["campaign"]["id"], "campaign_name": row["campaign"]["name"],
+            "ad_group_name": row["adGroup"]["name"], "resource_name": resource if not validate_only else "",
+            "ad_id": resource.split("~")[-1] if not validate_only else "", "labeled": not validate_only,
+        })
+    return results
+
+
+def _simulated_label_ads_detail(customer_id, label):
+    raw = _simulated_ad_targets_raw(customer_id)
+    if raw is None:
+        return [], {}
+    structure, url_by_group = raw[0], raw[2]
+    groups = {r["adGroup"]["id"]: r for r in structure}
+    out, enabled = [], {}
+    for gid, r in groups.items():
+        enabled[gid] = SIMULATED_RSA_ENABLED.get(gid, 1 if url_by_group.get(gid) else 0)
+    # Los activos de cualquier etiqueta cuentan para el límite del grupo (como en Google Ads).
+    for (cid, _lab), by_group in _SIMULATED_LABELED.items():
+        if cid != str(customer_id):
+            continue
+        for gid, info in by_group.items():
+            if info["status"] == "ENABLED" and gid in enabled:
+                enabled[gid] += 1
+    for gid, info in (_SIMULATED_LABELED.get((str(customer_id), label), {}) or {}).items():
+        r = groups.get(gid)
+        if not r:
+            continue
+        out.append({"ad_group_id": gid, "ad_group_name": r["adGroup"]["name"], "ad_id": info["ad_id"], "status": info["status"],
+                    "campaign_id": r["campaign"]["id"], "campaign_name": r["campaign"]["name"], "active_context": True})
+    out.sort(key=lambda x: (x["campaign_name"].lower(), x["ad_group_name"].lower(), x["ad_id"]))
+    return out, enabled
+
+
+SIMULATED_ACCOUNT_TIMEZONES = {"1111111111": "America/Bogota", "2222222222": "Europe/Madrid"}
+
+
+def simulated_account_timezone(customer_id):
+    return SIMULATED_ACCOUNT_TIMEZONES.get(str(customer_id), "America/Bogota")
+
+
+def simulated_label_ads(customer_id, label):
+    ads, enabled = _simulated_label_ads_detail(customer_id, clean_ad_label(label))
+    return {"ads": ads, "rsa_enabled": enabled}
+
+
+def simulated_set_label_ads_status(customer_id, items, label, status, validate_only=True):
+    if status not in AD_STATUS_VALUES:
+        raise ValueError("El estado debe ser ENABLED o PAUSED.")
+    label = clean_ad_label(label)
+    ads, enabled = _simulated_label_ads_detail(customer_id, label)
+    live = {(a["ad_group_id"], a["ad_id"]): a for a in ads}
+    planned = Counter()
+    results = []
+    for it in items:
+        key = (str(it["ad_group_id"]), str(it["ad_id"]))
+        row = live.get(key)
+        try:
+            if not row:
+                raise ValueError("El anuncio ya no tiene esa etiqueta o fue eliminado.")
+            _check_label_ad_change(row, status, enabled.get(key[0], 0), planned[key[0]])
+        except ValueError as e:
+            results.append({"ok": False, "error": str(e), "skipped": True})
+            continue
+        if status == "ENABLED":
+            planned[key[0]] += 1
+        if not validate_only:
+            _SIMULATED_LABELED[(str(customer_id), label)][key[0]]["status"] = status
+        results.append({"ok": True, "campaign_name": row["campaign_name"], "ad_group_name": row["ad_group_name"], "ad_id": key[1], "old_status": row["status"]})
+    return results
+
+
 RECOMMENDATION_SUBSCRIPTION_STATUS_VALUES = ("ENABLED", "PAUSED")
 
 
@@ -3418,6 +4118,73 @@ SIMULATED_ACCOUNTS = [
     {"id": "1111111111", "name": "Estelar Hoteles (simulada)"},
     {"id": "2222222222", "name": "Click Clack (simulada)"},
 ]
+
+SIMULATED_AD_STRUCTURE = {
+    "1111111111": {
+        "structure": [
+            ("501", "Estelar Hoteles - CO:es - Search Marca", "5011", "Marca exacta", 8520000000, "https://www.estelar-demo.example/reservas"),
+            ("501", "Estelar Hoteles - CO:es - Search Marca", "5012", "Marca + hotel", 2100000000, "https://www.estelar-demo.example/reservas"),
+            ("502", "Estelar Hoteles - CO:es - Search Genérica", "5021", "Hoteles baratos", 14640000000, "https://www.estelar-demo.example/ofertas"),
+            ("503", "Estelar Hoteles - UK:en - Search Marca", "5031", "Brand exact", 1200000000, "https://www.estelar-demo.example/en/book"),
+        ],
+    },
+    "2222222222": {
+        "structure": [
+            ("601", "Click Clack - Search Marca", "6011", "Marca", 3200000000, "https://clickclack-demo.example/"),
+            ("602", "Click Clack - Search Eventos", "6021", "Eventos y reuniones", 900000000, ""),
+        ],
+    },
+}
+
+
+def _simulated_ad_targets_raw(customer_id):
+    spec = SIMULATED_AD_STRUCTURE.get(str(customer_id))
+    if not spec:
+        return None
+    structure, cost_by_group, url_by_group, overall = [], {}, {}, Counter()
+    for camp_id, camp_name, gid, gname, cost_micros, url in spec["structure"]:
+        structure.append({"campaign": {"id": camp_id, "name": camp_name}, "adGroup": {"id": gid, "name": gname}})
+        cost_by_group[gid] = cost_micros
+        if url:
+            url_by_group[gid] = Counter({url: 2})
+            overall[url] += 2
+    return structure, cost_by_group, url_by_group, overall
+
+
+def simulated_ad_targets(customer_id):
+    raw = _simulated_ad_targets_raw(customer_id)
+    if raw is None:
+        return {"campaigns": [], "urls": [], "default_url": ""}
+    return _build_ad_targets(*raw)
+
+
+def simulated_create_responsive_search_ad(customer_id, ad_group_id, headlines, descriptions, path1, path2, final_url,
+                                          url_confirmed=False, validate_only=True):
+    """Misma validación que create_responsive_search_ad, sin tocar Google: sirve para probar el flujo en modo simulado."""
+    if not str(ad_group_id).isdigit():
+        raise ValueError("Falta o es inválido el grupo de anuncios.")
+    final_url = normalize_final_url(final_url)
+    raw = _simulated_ad_targets_raw(customer_id)
+    group = None
+    if raw:
+        for r in raw[0]:
+            if r["adGroup"]["id"] == str(ad_group_id):
+                group = r
+    if not group:
+        raise ValueError("No se encontró el grupo de anuncios en esta cuenta.")
+    known = _check_ad_url_rule(final_url, list(raw[3]), url_confirmed)
+    if any("rechazar" in t.lower() for t in headlines):
+        raise RuntimeError('Google Ads API respondió 400: {"error": {"details": [{"errors": [{"message": "Simulación de rechazo por política."}]}]}}')
+    resource = f"customers/{customer_id}/adGroupAds/{ad_group_id}~9{str(ad_group_id)[-3:]}0001"
+    return {
+        "validate_only": validate_only, "applied": not validate_only, "campaign_id": group["campaign"]["id"],
+        "campaign_name": group["campaign"]["name"], "ad_group_name": group["adGroup"]["name"],
+        "resource_name": resource if not validate_only else "", "ad_id": resource.split("~")[-1] if not validate_only else "",
+        "url_known": known,
+    }
+
+
+SIMULATED_MCC_GROUPS = [{"id": "9999999999", "name": "Estelar Hoteles MCC (simulado)"}]
 
 SIMULATED_CAMPAIGNS = [
     {"campaign": "Estelar Hoteles - CO:es - PMAX Corpo", "status": "ENABLED", "channel_type_raw": "performance max", "bid_strategy": "MAXIMIZE_CONVERSION_VALUE", "budget": 8500, "impressions": 412000, "clicks": 9800, "ctr": 0.0238, "avg_cpc": 1.9, "cost": 18620, "conversions": 214, "cost_per_conv": 87.0, "conv_rate": 0.0218, "conv_value": 118200, "lost_is_budget": 0.22, "lost_is_rank": 0.04, "impr_share": 0.74},

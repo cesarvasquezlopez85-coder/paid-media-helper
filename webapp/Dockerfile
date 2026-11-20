@@ -1,6 +1,11 @@
 FROM python:3.11-slim
 
 WORKDIR /app
+
+# Zonas horarias (zoneinfo): el programador de anuncios usa la hora local de cada cuenta de Google Ads.
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY . .
 
 # La base de datos vive en /data (fuera de /app) para poder montar ahí un

@@ -24,6 +24,7 @@ Correr con:
 """
 
 import contextlib
+from concurrent.futures import ThreadPoolExecutor
 import datetime
 import hashlib
 import http.cookies
@@ -38,6 +39,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import zoneinfo
 from collections import defaultdict
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -182,6 +184,23 @@ def get_mcc_member_ids(mcc_customer_id):
         _mcc_members_cache[mcc_customer_id] = (now + MCC_MEMBERS_TTL_SECONDS, members)
     return members
 WRITE_RATE_LIMIT = (30, 60)
+# Anuncios nuevos: cuentas por tanda (cada una es una escritura real al aplicar, y el tope por minuto es AD_WRITE_RATE_LIMIT).
+AD_CREATE_MAX_ACCOUNTS = 40
+# Los anuncios tienen su propio tope de escrituras (una por cuenta): una tanda de 40 cuentas cabe con margen y el resto de
+# escrituras de la plataforma sigue con WRITE_RATE_LIMIT.
+AD_WRITE_RATE_LIMIT = (60, 60)
+# Anuncios nuevos por plantilla: tope de anuncios por cuenta y por tanda, y tamaño de una plantilla guardada.
+AD_BULK_MAX_PER_ACCOUNT = 300
+AD_BULK_MAX_TOTAL = 1500
+AD_TEMPLATE_MAX_CHARS = 60000
+AD_TEMPLATE_MAX_COUNT = 200
+# Programación de activar o pausar anuncios por etiqueta: la hora es la de cada cuenta; si el servidor no pudo ejecutarla a
+# tiempo (reinicio, caída), se reintenta hasta SCHEDULE_CATCHUP_SECONDS después y, pasado ese margen, no se ejecuta.
+SCHEDULE_CATCHUP_SECONDS = 6 * 3600
+SCHEDULE_RETRY_SECONDS = 300
+SCHEDULE_MAX_ATTEMPTS = 3
+SCHEDULE_MAX_PENDING = 100
+SCHEDULER_INTERVAL_SECONDS = max(5, int(os.environ.get("PMH_SCHEDULER_INTERVAL_SECONDS", "60") or 60))
 
 # Análisis con IA (Claude): cada llamada cuesta dinero real en la API de
 # Anthropic, a diferencia del resto de endpoints — límite mucho más
@@ -484,6 +503,93 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ad_creation_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at REAL NOT NULL,
+                user_id INTEGER,
+                customer_id TEXT NOT NULL,
+                campaign_id TEXT,
+                campaign_name TEXT,
+                ad_group_id TEXT NOT NULL,
+                ad_group_name TEXT,
+                ad_id TEXT,
+                final_url TEXT,
+                headlines TEXT,
+                descriptions TEXT
+            )
+            """
+        )
+        # Activar o pausar anuncios por etiqueta (Anuncios nuevos): una fila por anuncio cambiado.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ad_status_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at REAL NOT NULL,
+                user_id INTEGER,
+                customer_id TEXT NOT NULL,
+                ad_group_id TEXT NOT NULL,
+                ad_id TEXT NOT NULL,
+                campaign_name TEXT,
+                ad_group_name TEXT,
+                label TEXT,
+                old_status TEXT,
+                new_status TEXT NOT NULL,
+                source TEXT,
+                schedule_id INTEGER
+            )
+            """
+        )
+        # Programaciones de activar o pausar por etiqueta (Anuncios nuevos): qué, cuándo (hora de cada cuenta) y cómo salió.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ad_schedules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at REAL NOT NULL,
+                user_id INTEGER,
+                mcc_id TEXT NOT NULL,
+                mcc_name TEXT,
+                label TEXT NOT NULL,
+                action TEXT NOT NULL,
+                run_date TEXT NOT NULL,
+                run_time TEXT NOT NULL,
+                accounts TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending'
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ad_schedule_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                schedule_id INTEGER NOT NULL,
+                customer_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                started_at REAL,
+                finished_at REAL,
+                ok_count INTEGER NOT NULL DEFAULT 0,
+                skipped_count INTEGER NOT NULL DEFAULT 0,
+                failed_count INTEGER NOT NULL DEFAULT 0,
+                message TEXT,
+                UNIQUE (schedule_id, customer_id)
+            )
+            """
+        )
+        # Plantillas de Anuncios nuevos (textos por idioma, variables y etiqueta): compartidas entre super admins.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ad_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                user_id INTEGER,
+                name TEXT NOT NULL,
+                data TEXT NOT NULL
+            )
+            """
+        )
         # Historial de la Auditoría de cuenta: una fila por auditoría, con el puntaje, el
         # puntaje por área y los hallazgos (id, gravedad, título) para poder mostrar la
         # tendencia y qué cambió entre una auditoría y la anterior. Se lee por cuenta de
@@ -665,6 +771,325 @@ def store_campaign_status_change(user_id, customer_id, campaign_id, campaign_nam
             (time.time(), user_id, str(customer_id), str(campaign_id), (campaign_name or "")[:200], old_status, new_status),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def store_ad_creation(user_id, customer_id, result, ad_group_id, final_url, headlines, descriptions):
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO ad_creation_log (created_at, user_id, customer_id, campaign_id, campaign_name, ad_group_id, "
+            "ad_group_name, ad_id, final_url, headlines, descriptions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (time.time(), user_id, str(customer_id), str(result.get("campaign_id") or ""), (result.get("campaign_name") or "")[:200],
+             str(ad_group_id), (result.get("ad_group_name") or "")[:200], str(result.get("ad_id") or ""), (final_url or "")[:2000],
+             json.dumps(headlines, ensure_ascii=False), json.dumps(descriptions, ensure_ascii=False)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def store_ad_creation_bulk(user_id, customer_id, rows, label):
+    """Registra cada anuncio creado por plantilla (mismo registro que ad_creation_log, con la etiqueta en la URL no: va aparte)."""
+    conn = get_db()
+    try:
+        now = time.time()
+        conn.executemany(
+            "INSERT INTO ad_creation_log (created_at, user_id, customer_id, campaign_id, campaign_name, ad_group_id, "
+            "ad_group_name, ad_id, final_url, headlines, descriptions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(now, user_id, str(customer_id), str(r["result"].get("campaign_id") or ""), (r["result"].get("campaign_name") or "")[:200],
+              str(r["ad_group_id"]), (r["result"].get("ad_group_name") or "")[:200], str(r["result"].get("ad_id") or ""),
+              (r["final_url"] or "")[:2000], json.dumps(r["headlines"], ensure_ascii=False),
+              json.dumps(r["descriptions"], ensure_ascii=False)) for r in rows],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def store_ad_status_changes(user_id, customer_id, rows, label, new_status, source="manual", schedule_id=None):
+    conn = get_db()
+    try:
+        now = time.time()
+        conn.executemany(
+            "INSERT INTO ad_status_log (created_at, user_id, customer_id, ad_group_id, ad_id, campaign_name, ad_group_name, label, "
+            "old_status, new_status, source, schedule_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(now, user_id, str(customer_id), str(r["ad_group_id"]), str(r["ad_id"]), (r.get("campaign_name") or "")[:200],
+              (r.get("ad_group_name") or "")[:200], label, r.get("old_status") or "", new_status, source, schedule_id) for r in rows],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Programador de «activar o pausar por etiqueta». Una tarea de fondo revisa cada SCHEDULER_INTERVAL_SECONDS las
+# programaciones pendientes y, cuando llega la hora de una cuenta (en su propia zona horaria), activa o pausa los
+# anuncios que siguen llevando la etiqueta. Antes de aplicar valida con Google (igual que la vista previa manual) y solo
+# aplica lo aceptado; cada ejecución por cuenta queda en ad_schedule_runs y cada cambio en ad_status_log.
+# ---------------------------------------------------------------------------
+def _schedule_local_target(run_date, run_time):
+    return datetime.datetime.strptime(f"{run_date} {run_time}", "%Y-%m-%d %H:%M")
+
+
+def _schedule_account_clock(acc, run_date, run_time, now_utc=None):
+    """(ya es la hora, segundos de retraso) para una cuenta, con la hora local de esa cuenta."""
+    now_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
+    tz = zoneinfo.ZoneInfo(acc["tz"])
+    local_now = now_utc.astimezone(tz).replace(tzinfo=None)
+    late = (local_now - _schedule_local_target(run_date, run_time)).total_seconds()
+    return late >= 0, late
+
+
+def _schedule_user_row(user_id):
+    conn = get_db()
+    try:
+        return conn.execute("SELECT id, username, is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
+    finally:
+        conn.close()
+
+
+def _schedule_user_can_access(user, customer_id):
+    if user["is_admin"]:
+        return True
+    conn = get_db()
+    try:
+        return conn.execute("SELECT 1 FROM user_account_access WHERE user_id = ? AND customer_id = ?", (user["id"], customer_id)).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def _schedule_save_run(schedule_id, customer_id, status, ok=0, skipped=0, failed=0, message="", permanent=False):
+    conn = get_db()
+    try:
+        attempts_sql = ", attempts = ?" if permanent else ""
+        params = [status, time.time(), ok, skipped, failed, (message or "")[:400]]
+        if permanent:
+            params.append(SCHEDULE_MAX_ATTEMPTS)
+        params += [schedule_id, customer_id]
+        conn.execute(
+            f"UPDATE ad_schedule_runs SET status = ?, finished_at = ?, ok_count = ?, skipped_count = ?, failed_count = ?, message = ?{attempts_sql} "
+            "WHERE schedule_id = ? AND customer_id = ?", params)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _schedule_execute_account(sched, acc):
+    """Aplica la programación a una cuenta. Devuelve (estado final, ok, omitidos, fallidos, mensaje, permanente)."""
+    user = _schedule_user_row(sched["user_id"])
+    if not user or user["username"].lower() not in SUPER_ADMIN_USERNAMES:
+        return "error", 0, 0, 0, "Quien programó esto ya no es super admin: no se ejecutó.", True
+    cid = acc["id"]
+    simulated = not google_ads_client.is_configured()
+    if not simulated:
+        members = get_mcc_member_ids(sched["mcc_id"])
+        if members is None:
+            return "error", 0, 0, 0, "No se pudo leer las cuentas del MCC.", False
+        if cid not in members:
+            return "error", 0, 0, 0, "La cuenta ya no pertenece al MCC.", True
+        if not _schedule_user_can_access(user, cid):
+            return "error", 0, 0, 0, "Quien programó esto ya no tiene acceso a la cuenta.", True
+    fetch = google_ads_client.simulated_label_ads if simulated else google_ads_client.fetch_label_ads
+    change = google_ads_client.simulated_set_label_ads_status if simulated else google_ads_client.set_label_ads_status
+    data = fetch(cid, sched["label"])
+    items = [{"ad_group_id": a["ad_group_id"], "ad_id": a["ad_id"]} for a in data["ads"]]
+    if not items:
+        return "done", 0, 0, 0, "Ningún anuncio llevaba la etiqueta.", False
+    # Vista previa: Google valida y solo se aplica lo aceptado.
+    checked = change(cid, items, sched["label"], sched["action"], validate_only=True)
+    to_apply = [it for it, r in zip(items, checked) if r.get("ok")]
+    skipped = sum(1 for r in checked if not r.get("ok") and r.get("skipped"))
+    failed_msgs = [r.get("error") for r in checked if not r.get("ok") and not r.get("skipped")]
+    ok = 0
+    if to_apply:
+        applied = change(cid, to_apply, sched["label"], sched["action"], validate_only=False)
+        done_rows = [{"ad_group_id": it["ad_group_id"], "ad_id": it["ad_id"], "campaign_name": r.get("campaign_name"),
+                      "ad_group_name": r.get("ad_group_name"), "old_status": r.get("old_status")}
+                     for it, r in zip(to_apply, applied) if r.get("ok")]
+        ok = len(done_rows)
+        skipped += sum(1 for r in applied if not r.get("ok") and r.get("skipped"))
+        failed_msgs += [r.get("error") for r in applied if not r.get("ok") and not r.get("skipped")]
+        if done_rows:
+            try:
+                store_ad_status_changes(sched["user_id"], cid, done_rows, sched["label"], sched["action"], source="programado", schedule_id=sched["id"])
+            except Exception as e:  # noqa: BLE001 — el cambio ya quedó en Google Ads; un fallo del registro no debe ocultarlo
+                print(f"[ad-status-log] {e}", flush=True)
+    msg = " · ".join(dict.fromkeys(m for m in failed_msgs if m))[:300]
+    return "done", ok, skipped, len(failed_msgs), msg, False
+
+
+def scheduler_tick():
+    """Una pasada del programador: ejecuta lo que ya llegó a su hora y no se ha ejecutado."""
+    conn = get_db()
+    try:
+        scheds = [dict(r) for r in conn.execute("SELECT * FROM ad_schedules WHERE status = 'pending'").fetchall()]
+        runs = {(r["schedule_id"], r["customer_id"]): dict(r) for r in conn.execute("SELECT * FROM ad_schedule_runs").fetchall()}
+    finally:
+        conn.close()
+    now = time.time()
+    for sched in scheds:
+        try:
+            accounts = json.loads(sched["accounts"])
+        except ValueError:
+            continue
+        for acc in accounts:
+            run = runs.get((sched["id"], acc["id"]))
+            if run and (run["status"] in ("done", "missed") or (run["status"] == "error" and (run["attempts"] >= SCHEDULE_MAX_ATTEMPTS or now - (run["finished_at"] or 0) < SCHEDULE_RETRY_SECONDS))):
+                continue
+            if run and run["status"] == "running" and now - (run["started_at"] or 0) < 900:
+                continue
+            try:
+                due, late = _schedule_account_clock(acc, sched["run_date"], sched["run_time"])
+            except Exception as e:  # noqa: BLE001 — zona horaria inválida o no disponible
+                due, late = False, 0
+                print(f"[scheduler] zona horaria de {acc.get('id')}: {e}", flush=True)
+            if not due:
+                continue
+            conn = get_db()
+            try:
+                if late > SCHEDULE_CATCHUP_SECONDS:
+                    conn.execute("INSERT OR IGNORE INTO ad_schedule_runs (schedule_id, customer_id, status, attempts, finished_at, message) VALUES (?, ?, 'missed', 0, ?, ?)",
+                                 (sched["id"], acc["id"], now, "No se ejecutó: el servidor no pudo hacerlo dentro del margen de 6 horas."))
+                    conn.commit()
+                    continue
+                if not run:
+                    try:
+                        conn.execute("INSERT INTO ad_schedule_runs (schedule_id, customer_id, status, attempts, started_at) VALUES (?, ?, 'running', 1, ?)", (sched["id"], acc["id"], now))
+                        conn.commit()
+                    except sqlite3.IntegrityError:
+                        continue
+                else:
+                    cur = conn.execute("UPDATE ad_schedule_runs SET status = 'running', attempts = attempts + 1, started_at = ? WHERE schedule_id = ? AND customer_id = ? AND status = ? AND attempts = ?",
+                                       (now, sched["id"], acc["id"], run["status"], run["attempts"]))
+                    conn.commit()
+                    if cur.rowcount != 1:
+                        continue
+            finally:
+                conn.close()
+            try:
+                status, ok, skipped, failed, msg, permanent = _schedule_execute_account(sched, acc)
+            except Exception as e:  # noqa: BLE001 — un fallo en una cuenta no debe frenar a las demás
+                print(f"[scheduler] cuenta {acc['id']}: {' '.join(str(e).split())[:300]}", flush=True)
+                status, ok, skipped, failed, msg, permanent = "error", 0, 0, 0, google_ads_client.google_error_text(e), False
+            _schedule_save_run(sched["id"], acc["id"], status, ok, skipped, failed, msg, permanent)
+
+
+def _scheduler_loop():
+    while True:
+        try:
+            scheduler_tick()
+        except Exception as e:  # noqa: BLE001 — la tarea de fondo nunca debe morir
+            print(f"[scheduler] {' '.join(str(e).split())[:300]}", flush=True)
+        time.sleep(SCHEDULER_INTERVAL_SECONDS)
+
+
+def list_ad_schedules(limit=100):
+    conn = get_db()
+    try:
+        scheds = [dict(r) for r in conn.execute("SELECT * FROM ad_schedules ORDER BY id DESC LIMIT ?", (limit,)).fetchall()]
+        runs = {}
+        for r in conn.execute("SELECT * FROM ad_schedule_runs").fetchall():
+            runs.setdefault(r["schedule_id"], {})[r["customer_id"]] = dict(r)
+    finally:
+        conn.close()
+    out = []
+    for sc in scheds:
+        try:
+            accounts = json.loads(sc["accounts"])
+        except ValueError:
+            accounts = []
+        rows = []
+        for acc in accounts:
+            run = runs.get(sc["id"], {}).get(acc["id"])
+            terminal = bool(run) and (run["status"] in ("done", "missed") or (run["status"] == "error" and run["attempts"] >= SCHEDULE_MAX_ATTEMPTS))
+            rows.append({"id": acc["id"], "name": acc.get("name") or acc["id"], "tz": acc.get("tz"), "terminal": terminal,
+                         "status": run["status"] if run else "pending", "attempts": run["attempts"] if run else 0,
+                         "ok": run["ok_count"] if run else 0, "skipped": run["skipped_count"] if run else 0,
+                         "failed": run["failed_count"] if run else 0, "message": (run["message"] or "") if run else ""})
+        if sc["status"] == "cancelled":
+            overall = "cancelled"
+        elif rows and all(r["terminal"] for r in rows):
+            overall = "finished_with_errors" if any(r["status"] in ("error", "missed") or r["failed"] for r in rows) else "finished"
+        elif any(r["status"] in ("running", "done", "missed", "error") for r in rows):
+            overall = "in_progress"
+        else:
+            overall = "pending"
+        out.append({"id": sc["id"], "created_at": sc["created_at"], "mcc_id": sc["mcc_id"], "mcc_name": sc["mcc_name"], "label": sc["label"],
+                    "action": sc["action"], "run_date": sc["run_date"], "run_time": sc["run_time"], "status": overall, "accounts": rows})
+    return out
+
+
+def create_ad_schedule(user_id, mcc_id, mcc_name, label, action, run_date, run_time, accounts):
+    conn = get_db()
+    try:
+        pending = conn.execute("SELECT COUNT(*) AS n FROM ad_schedules WHERE status = 'pending'").fetchone()["n"]
+        if pending >= SCHEDULE_MAX_PENDING:
+            raise ValueError(f"Ya hay {SCHEDULE_MAX_PENDING} programaciones pendientes: cancela alguna primero.")
+        cur = conn.execute(
+            "INSERT INTO ad_schedules (created_at, user_id, mcc_id, mcc_name, label, action, run_date, run_time, accounts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (time.time(), user_id, mcc_id, mcc_name, label, action, run_date, run_time, json.dumps(accounts, ensure_ascii=False)))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def cancel_ad_schedule(schedule_id):
+    conn = get_db()
+    try:
+        cur = conn.execute("UPDATE ad_schedules SET status = 'cancelled' WHERE id = ? AND status = 'pending'", (schedule_id,))
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def list_ad_templates():
+    conn = get_db()
+    try:
+        rows = conn.execute("SELECT id, name, updated_at, data FROM ad_templates ORDER BY name COLLATE NOCASE").fetchall()
+    finally:
+        conn.close()
+    out = []
+    for r in rows:
+        try:
+            data = json.loads(r["data"])
+        except ValueError:
+            continue
+        out.append({"id": r["id"], "name": r["name"], "updated_at": r["updated_at"], "data": data})
+    return out
+
+
+def save_ad_template(user_id, name, data):
+    """Crea la plantilla o, si ya hay una con ese nombre (sin distinguir mayúsculas), la reemplaza. Devuelve su id."""
+    blob = json.dumps(data, ensure_ascii=False)
+    conn = get_db()
+    try:
+        now = time.time()
+        row = conn.execute("SELECT id FROM ad_templates WHERE name = ? COLLATE NOCASE", (name,)).fetchone()
+        if row:
+            conn.execute("UPDATE ad_templates SET updated_at = ?, user_id = ?, name = ?, data = ? WHERE id = ?", (now, user_id, name, blob, row["id"]))
+            tid = row["id"]
+        else:
+            count = conn.execute("SELECT COUNT(*) AS n FROM ad_templates").fetchone()["n"]
+            if count >= AD_TEMPLATE_MAX_COUNT:
+                raise ValueError(f"Ya hay {AD_TEMPLATE_MAX_COUNT} plantillas guardadas: borra alguna primero.")
+            cur = conn.execute("INSERT INTO ad_templates (created_at, updated_at, user_id, name, data) VALUES (?, ?, ?, ?, ?)", (now, now, user_id, name, blob))
+            tid = cur.lastrowid
+        conn.commit()
+        return tid
+    finally:
+        conn.close()
+
+
+def delete_ad_template(template_id):
+    conn = get_db()
+    try:
+        cur = conn.execute("DELETE FROM ad_templates WHERE id = ?", (template_id,))
+        conn.commit()
+        return cur.rowcount > 0
     finally:
         conn.close()
 
@@ -876,6 +1301,37 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_audiences(parse_qs(parsed.query))
             return
 
+        if path == "/api/google-ads/ad-targets":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_ad_targets(parse_qs(parsed.query))
+            return
+
+        if path == "/api/google-ads/ad-groups-bulk":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_ad_groups_bulk(parse_qs(parsed.query))
+            return
+
+        if path == "/api/ad-schedules":
+            if not self._require_super_admin_json():
+                return
+            self._send_json(200, {"schedules": list_ad_schedules(), "interval_seconds": SCHEDULER_INTERVAL_SECONDS,
+                                  "catchup_hours": SCHEDULE_CATCHUP_SECONDS // 3600})
+            return
+
+        if path == "/api/google-ads/label-ads":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_label_ads(parse_qs(parsed.query))
+            return
+
+        if path == "/api/ad-templates":
+            if not self._require_super_admin_json():
+                return
+            self._send_json(200, {"templates": list_ad_templates()})
+            return
+
         if path == "/api/google-ads/hotel-campaigns":
             if not self._require_super_admin_json():
                 return
@@ -1069,6 +1525,37 @@ class Handler(SimpleHTTPRequestHandler):
             # Pausar o reactivar recomendaciones automáticas desde la Auditoría: para todos los usuarios con sesión
             # (cada cuenta valida el acceso del usuario).
             self._handle_recommendation_subscriptions(payload)
+        elif path == "/api/google-ads/ads-create":
+            # Anuncios nuevos en varias cuentas de un MCC: solo super admin (el servidor responde 403 a los demás).
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_ads_create(payload)
+        elif path == "/api/google-ads/ads-create-bulk":
+            # Anuncios nuevos por plantilla en todos los grupos de varias cuentas de un MCC: solo super admin.
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_ads_create_bulk(payload)
+        elif path == "/api/google-ads/label-ads-status":
+            # Activar o pausar anuncios por etiqueta (manual, con vista previa): solo super admin.
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_label_ads_status(payload)
+        elif path == "/api/ad-schedules":
+            if not self._require_super_admin_json():
+                return
+            self._handle_ad_schedule_create(payload)
+        elif path == "/api/ad-schedules/cancel":
+            if not self._require_super_admin_json():
+                return
+            self._handle_ad_schedule_cancel(payload)
+        elif path == "/api/ad-templates":
+            if not self._require_super_admin_json():
+                return
+            self._handle_ad_template_save(payload)
+        elif path == "/api/ad-templates/delete":
+            if not self._require_super_admin_json():
+                return
+            self._handle_ad_template_delete(payload)
         elif path == "/api/google-ads/hotel-modifiers-apply":
             if not self._require_super_admin_json():
                 return
@@ -2182,7 +2669,7 @@ class Handler(SimpleHTTPRequestHandler):
         if not user:
             return
         if not google_ads_client.is_configured():
-            self._send_json(200, {"groups": [], "simulated": True})
+            self._send_json(200, {"groups": google_ads_client.SIMULATED_MCC_GROUPS, "simulated": True})
             return
         try:
             groups = google_ads_client.list_mcc_groups()
@@ -2230,7 +2717,7 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(400, {"error": "Falta o es inválido el parámetro group_customer_id."})
             return
         if not google_ads_client.is_configured():
-            self._send_json(200, {"accounts": [], "simulated": True})
+            self._send_json(200, {"accounts": google_ads_client.SIMULATED_ACCOUNTS, "simulated": True})
             return
         try:
             accounts = google_ads_client.list_mcc_group_accounts(group_customer_id)
@@ -2804,6 +3291,499 @@ class Handler(SimpleHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001 — el cambio ya quedó en Google Ads; un fallo del registro no debe ocultarlo
                 print(f"[campaign-status-log] {e}", flush=True)
         self._send_json(200, result)
+
+    def _handle_google_ads_ad_targets(self, query):
+        # Campañas Search y grupos de anuncios activos de una cuenta, y la URL que ya usan sus anuncios (para crear anuncios nuevos).
+        user = self._get_current_user()
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not google_ads_client.is_configured():
+            self._send_json(200, {**google_ads_client.simulated_ad_targets(customer_id), "simulated": True})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+        try:
+            data = google_ads_client.fetch_ad_targets(customer_id)
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+            return
+        self._send_json(200, {**data, "simulated": False})
+
+    def _handle_google_ads_ads_create(self, payload):
+        # Crea (o valida sin crear) el mismo anuncio de búsqueda adaptable, PAUSADO, en varias cuentas de un MCC.
+        user = self._get_current_user()
+        validate_only = payload.get("validate_only", True) is not False
+        mcc_id = str(payload.get("mcc_id") or "").strip()
+        raw_items = payload.get("items")
+        if not mcc_id.isdigit():
+            self._send_json(400, {"error": "Elige primero el MCC."})
+            return
+        if not isinstance(raw_items, list) or not raw_items:
+            self._send_json(400, {"error": "Elige al menos una cuenta."})
+            return
+        if len(raw_items) > AD_CREATE_MAX_ACCOUNTS:
+            self._send_json(400, {"error": f"Máximo {AD_CREATE_MAX_ACCOUNTS} cuentas por vez."})
+            return
+        try:
+            heads, descs, path1, path2 = google_ads_client.clean_rsa_texts(
+                payload.get("headlines"), payload.get("descriptions"), payload.get("path1"), payload.get("path2"))
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        items, seen = [], set()
+        for it in raw_items:
+            it = it if isinstance(it, dict) else {}
+            cid = str(it.get("customer_id") or "").strip()
+            gid = str(it.get("ad_group_id") or "").strip()
+            if not cid.isdigit() or not gid.isdigit():
+                self._send_json(400, {"error": "Cada cuenta necesita su campaña y su grupo de anuncios."})
+                return
+            if cid in seen:
+                self._send_json(400, {"error": "Una cuenta no puede repetirse en la misma tanda."})
+                return
+            seen.add(cid)
+            items.append({"customer_id": cid, "ad_group_id": gid, "final_url": str(it.get("final_url") or "").strip(),
+                          "url_confirmed": it.get("url_confirmed") is True})
+        simulated = not google_ads_client.is_configured()
+        members = None
+        if not simulated:
+            members = get_mcc_member_ids(mcc_id)
+            if members is None:
+                self._send_json(502, {"error": "No se pudo leer las cuentas de ese MCC. Intenta de nuevo."})
+                return
+        results = [None] * len(items)
+        to_run = []
+        for i, it in enumerate(items):
+            cid = it["customer_id"]
+            if members is not None and cid not in members:
+                results[i] = {"customer_id": cid, "ok": False, "error": "Esta cuenta no pertenece al MCC elegido."}
+            elif not simulated and not self._user_can_access_account(user, cid):
+                results[i] = {"customer_id": cid, "ok": False, "error": "No tienes acceso a esta cuenta de Google Ads."}
+            elif not validate_only and not _write_limiter.allow(f"user:{user['id']}:ads", *AD_WRITE_RATE_LIMIT):
+                results[i] = {"customer_id": cid, "ok": False, "error": "Demasiadas escrituras seguidas: espera un minuto y vuelve a intentar con esta cuenta."}
+            else:
+                to_run.append(i)
+        fn = google_ads_client.simulated_create_responsive_search_ad if simulated else google_ads_client.create_responsive_search_ad
+
+        def run(i):
+            it = items[i]
+            try:
+                r = fn(it["customer_id"], it["ad_group_id"], heads, descs, path1, path2, it["final_url"],
+                       url_confirmed=it["url_confirmed"], validate_only=validate_only)
+                return i, {"customer_id": it["customer_id"], "ok": True, "campaign_name": r.get("campaign_name"),
+                           "ad_group_name": r.get("ad_group_name"), "ad_id": r.get("ad_id"), "url_known": r.get("url_known"), "_r": r}
+            except Exception as e:  # noqa: BLE001 — un fallo en una cuenta no debe frenar a las demás
+                if not isinstance(e, ValueError):
+                    print(f"[google-ads-error] ads-create {' '.join(str(e).split())[:300]}", flush=True)
+                return i, {"customer_id": it["customer_id"], "ok": False, "error": google_ads_client.google_error_text(e)}
+
+        if to_run:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                for i, res in pool.map(run, to_run):
+                    results[i] = res
+        out = []
+        for i, res in enumerate(results):
+            r = res.pop("_r", None)
+            if r and not validate_only:
+                try:
+                    store_ad_creation(user["id"], items[i]["customer_id"], r, items[i]["ad_group_id"], items[i]["final_url"], heads, descs)
+                except Exception as e:  # noqa: BLE001 — el anuncio ya quedó en Google Ads; un fallo del registro no debe ocultarlo
+                    print(f"[ad-creation-log] {e}", flush=True)
+            out.append(res)
+        self._send_json(200, {"validate_only": validate_only, "simulated": simulated, "results": out,
+                              "ok_count": sum(1 for r in out if r.get("ok")), "error_count": sum(1 for r in out if not r.get("ok"))})
+
+    def _handle_google_ads_ad_groups_bulk(self, query):
+        # Todos los grupos activos de campañas Search activas de una cuenta, con URL de referencia, RSA activos y etiqueta previa.
+        user = self._get_current_user()
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        label = (query.get("label") or [""])[0]
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        try:
+            label = google_ads_client.clean_ad_label(label) if label.strip() else ""
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        if not google_ads_client.is_configured():
+            self._send_json(200, {**google_ads_client.simulated_bulk_ad_groups(customer_id, label), "simulated": True})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+        try:
+            data = google_ads_client.fetch_bulk_ad_groups(customer_id, label)
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+            return
+        self._send_json(200, {**data, "simulated": False})
+
+    def _handle_google_ads_ads_create_bulk(self, payload):
+        # Crea (o valida sin crear) anuncios PAUSADOS por plantilla: cada cuenta trae sus grupos y, por grupo, sus textos y su URL.
+        user = self._get_current_user()
+        validate_only = payload.get("validate_only", True) is not False
+        mcc_id = str(payload.get("mcc_id") or "").strip()
+        raw_accounts = payload.get("accounts")
+        if not mcc_id.isdigit():
+            self._send_json(400, {"error": "Elige primero el MCC."})
+            return
+        try:
+            label = google_ads_client.clean_ad_label(payload.get("label"))
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        if not isinstance(raw_accounts, list) or not raw_accounts:
+            self._send_json(400, {"error": "Elige al menos una cuenta."})
+            return
+        if len(raw_accounts) > AD_CREATE_MAX_ACCOUNTS:
+            self._send_json(400, {"error": f"Máximo {AD_CREATE_MAX_ACCOUNTS} cuentas por vez."})
+            return
+        accounts, seen_acc, total = [], set(), 0
+        for acc in raw_accounts:
+            acc = acc if isinstance(acc, dict) else {}
+            cid = str(acc.get("customer_id") or "").strip()
+            raw_ads = acc.get("ads")
+            if not cid.isdigit() or not isinstance(raw_ads, list) or not raw_ads:
+                self._send_json(400, {"error": "Cada cuenta necesita al menos un grupo de anuncios."})
+                return
+            if cid in seen_acc:
+                self._send_json(400, {"error": "Una cuenta no puede repetirse en la misma tanda."})
+                return
+            seen_acc.add(cid)
+            if len(raw_ads) > AD_BULK_MAX_PER_ACCOUNT:
+                self._send_json(400, {"error": f"Máximo {AD_BULK_MAX_PER_ACCOUNT} anuncios por cuenta en cada tanda."})
+                return
+            total += len(raw_ads)
+            if total > AD_BULK_MAX_TOTAL:
+                self._send_json(400, {"error": f"Máximo {AD_BULK_MAX_TOTAL} anuncios por tanda."})
+                return
+            ads = []
+            for a in raw_ads:
+                a = a if isinstance(a, dict) else {}
+                gid = str(a.get("ad_group_id") or "").strip()
+                if not gid.isdigit():
+                    self._send_json(400, {"error": "Cada anuncio necesita su grupo de anuncios."})
+                    return
+                try:
+                    heads, descs, _p1, _p2 = google_ads_client.clean_rsa_texts(a.get("headlines"), a.get("descriptions"))
+                except ValueError as e:
+                    self._send_json(400, {"error": str(e)})
+                    return
+                ads.append({"ad_group_id": gid, "final_url": str(a.get("final_url") or "").strip(), "headlines": heads, "descriptions": descs})
+            accounts.append({"customer_id": cid, "ads": ads})
+        simulated = not google_ads_client.is_configured()
+        members = None
+        if not simulated:
+            members = get_mcc_member_ids(mcc_id)
+            if members is None:
+                self._send_json(502, {"error": "No se pudo leer las cuentas de ese MCC. Intenta de nuevo."})
+                return
+        results = [None] * len(accounts)
+        to_run = []
+        for i, acc in enumerate(accounts):
+            cid = acc["customer_id"]
+            if members is not None and cid not in members:
+                results[i] = {"customer_id": cid, "ok": False, "error": "Esta cuenta no pertenece al MCC elegido."}
+            elif not simulated and not self._user_can_access_account(user, cid):
+                results[i] = {"customer_id": cid, "ok": False, "error": "No tienes acceso a esta cuenta de Google Ads."}
+            elif not validate_only and not _write_limiter.allow(f"user:{user['id']}:ads", *AD_WRITE_RATE_LIMIT):
+                results[i] = {"customer_id": cid, "ok": False, "error": "Demasiadas escrituras seguidas: espera un minuto y vuelve a intentar con esta cuenta."}
+            else:
+                to_run.append(i)
+        fn = google_ads_client.simulated_create_bulk_responsive_search_ads if simulated else google_ads_client.create_bulk_responsive_search_ads
+
+        def run(i):
+            acc = accounts[i]
+            try:
+                return i, {"customer_id": acc["customer_id"], "ok": True, "items": fn(acc["customer_id"], acc["ads"], label, validate_only=validate_only)}
+            except Exception as e:  # noqa: BLE001 — un fallo en una cuenta no debe frenar a las demás
+                if not isinstance(e, ValueError):
+                    print(f"[google-ads-error] ads-create-bulk {' '.join(str(e).split())[:300]}", flush=True)
+                return i, {"customer_id": acc["customer_id"], "ok": False, "error": google_ads_client.google_error_text(e)}
+
+        if to_run:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                for i, res in pool.map(run, to_run):
+                    results[i] = res
+        ok_count = error_count = 0
+        for i, res in enumerate(results):
+            if not res.get("ok"):
+                error_count += len(accounts[i]["ads"])
+                continue
+            items = res["items"]
+            ok_count += sum(1 for x in items if x.get("ok"))
+            error_count += sum(1 for x in items if not x.get("ok"))
+            if not validate_only:
+                logged = [{"result": it, "ad_group_id": accounts[i]["ads"][j]["ad_group_id"], "final_url": accounts[i]["ads"][j]["final_url"],
+                           "headlines": accounts[i]["ads"][j]["headlines"], "descriptions": accounts[i]["ads"][j]["descriptions"]}
+                          for j, it in enumerate(items) if it.get("ok")]
+                if logged:
+                    try:
+                        store_ad_creation_bulk(user["id"], accounts[i]["customer_id"], logged, label)
+                    except Exception as e:  # noqa: BLE001 — los anuncios ya quedaron en Google Ads; un fallo del registro no debe ocultarlos
+                        print(f"[ad-creation-log] {e}", flush=True)
+        self._send_json(200, {"validate_only": validate_only, "simulated": simulated, "label": label, "results": results,
+                              "ok_count": ok_count, "error_count": error_count})
+
+    def _handle_google_ads_label_ads(self, query):
+        # Anuncios adaptables de una cuenta que llevan la etiqueta, con su estado y el de su grupo y campaña.
+        user = self._get_current_user()
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        try:
+            label = google_ads_client.clean_ad_label((query.get("label") or [""])[0])
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        if not google_ads_client.is_configured():
+            self._send_json(200, {**google_ads_client.simulated_label_ads(customer_id, label), "simulated": True})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+        try:
+            data = google_ads_client.fetch_label_ads(customer_id, label)
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+            return
+        self._send_json(200, {**data, "simulated": False})
+
+    def _handle_google_ads_label_ads_status(self, payload):
+        # Activa o pausa (o solo valida) anuncios que llevan la etiqueta, en varias cuentas de un MCC.
+        user = self._get_current_user()
+        validate_only = payload.get("validate_only", True) is not False
+        mcc_id = str(payload.get("mcc_id") or "").strip()
+        status = str(payload.get("status") or "").strip()
+        raw_accounts = payload.get("accounts")
+        if not mcc_id.isdigit():
+            self._send_json(400, {"error": "Elige primero el MCC."})
+            return
+        if status not in google_ads_client.AD_STATUS_VALUES:
+            self._send_json(400, {"error": "Elige si se activan o se pausan los anuncios."})
+            return
+        try:
+            label = google_ads_client.clean_ad_label(payload.get("label"))
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        if not isinstance(raw_accounts, list) or not raw_accounts:
+            self._send_json(400, {"error": "Elige al menos una cuenta."})
+            return
+        if len(raw_accounts) > AD_CREATE_MAX_ACCOUNTS:
+            self._send_json(400, {"error": f"Máximo {AD_CREATE_MAX_ACCOUNTS} cuentas por vez."})
+            return
+        accounts, seen_acc, total = [], set(), 0
+        for acc in raw_accounts:
+            acc = acc if isinstance(acc, dict) else {}
+            cid = str(acc.get("customer_id") or "").strip()
+            raw_ads = acc.get("ads")
+            if not cid.isdigit() or not isinstance(raw_ads, list) or not raw_ads:
+                self._send_json(400, {"error": "Cada cuenta necesita al menos un anuncio."})
+                return
+            if cid in seen_acc:
+                self._send_json(400, {"error": "Una cuenta no puede repetirse en la misma tanda."})
+                return
+            seen_acc.add(cid)
+            if len(raw_ads) > AD_BULK_MAX_PER_ACCOUNT:
+                self._send_json(400, {"error": f"Máximo {AD_BULK_MAX_PER_ACCOUNT} anuncios por cuenta en cada tanda."})
+                return
+            total += len(raw_ads)
+            if total > AD_BULK_MAX_TOTAL:
+                self._send_json(400, {"error": f"Máximo {AD_BULK_MAX_TOTAL} anuncios por tanda."})
+                return
+            ads, seen_ads = [], set()
+            for a in raw_ads:
+                a = a if isinstance(a, dict) else {}
+                gid, aid = str(a.get("ad_group_id") or "").strip(), str(a.get("ad_id") or "").strip()
+                if not gid.isdigit() or not aid.isdigit():
+                    self._send_json(400, {"error": "Cada anuncio necesita su grupo de anuncios y su ID."})
+                    return
+                if (gid, aid) in seen_ads:
+                    self._send_json(400, {"error": "Un anuncio no puede repetirse en la misma tanda."})
+                    return
+                seen_ads.add((gid, aid))
+                ads.append({"ad_group_id": gid, "ad_id": aid})
+            accounts.append({"customer_id": cid, "ads": ads})
+        simulated = not google_ads_client.is_configured()
+        members = None
+        if not simulated:
+            members = get_mcc_member_ids(mcc_id)
+            if members is None:
+                self._send_json(502, {"error": "No se pudo leer las cuentas de ese MCC. Intenta de nuevo."})
+                return
+        results = [None] * len(accounts)
+        to_run = []
+        for i, acc in enumerate(accounts):
+            cid = acc["customer_id"]
+            if members is not None and cid not in members:
+                results[i] = {"customer_id": cid, "ok": False, "error": "Esta cuenta no pertenece al MCC elegido."}
+            elif not simulated and not self._user_can_access_account(user, cid):
+                results[i] = {"customer_id": cid, "ok": False, "error": "No tienes acceso a esta cuenta de Google Ads."}
+            elif not validate_only and not _write_limiter.allow(f"user:{user['id']}:ads", *AD_WRITE_RATE_LIMIT):
+                results[i] = {"customer_id": cid, "ok": False, "error": "Demasiadas escrituras seguidas: espera un minuto y vuelve a intentar con esta cuenta."}
+            else:
+                to_run.append(i)
+        fn = google_ads_client.simulated_set_label_ads_status if simulated else google_ads_client.set_label_ads_status
+
+        def run(i):
+            acc = accounts[i]
+            try:
+                return i, {"customer_id": acc["customer_id"], "ok": True, "items": fn(acc["customer_id"], acc["ads"], label, status, validate_only=validate_only)}
+            except Exception as e:  # noqa: BLE001 — un fallo en una cuenta no debe frenar a las demás
+                if not isinstance(e, ValueError):
+                    print(f"[google-ads-error] label-ads-status {' '.join(str(e).split())[:300]}", flush=True)
+                return i, {"customer_id": acc["customer_id"], "ok": False, "error": google_ads_client.google_error_text(e)}
+
+        if to_run:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                for i, res in pool.map(run, to_run):
+                    results[i] = res
+        ok_count = error_count = 0
+        for i, res in enumerate(results):
+            if not res.get("ok"):
+                error_count += len(accounts[i]["ads"])
+                continue
+            items = res["items"]
+            ok_count += sum(1 for x in items if x.get("ok"))
+            error_count += sum(1 for x in items if not x.get("ok"))
+            if not validate_only:
+                changed = [{"ad_group_id": accounts[i]["ads"][j]["ad_group_id"], "ad_id": accounts[i]["ads"][j]["ad_id"],
+                            "campaign_name": it.get("campaign_name"), "ad_group_name": it.get("ad_group_name"), "old_status": it.get("old_status")}
+                           for j, it in enumerate(items) if it.get("ok")]
+                if changed:
+                    try:
+                        store_ad_status_changes(user["id"], accounts[i]["customer_id"], changed, label, status)
+                    except Exception as e:  # noqa: BLE001 — el cambio ya quedó en Google Ads; un fallo del registro no debe ocultarlo
+                        print(f"[ad-status-log] {e}", flush=True)
+        self._send_json(200, {"validate_only": validate_only, "simulated": simulated, "label": label, "status": status, "results": results,
+                              "ok_count": ok_count, "error_count": error_count})
+
+    def _handle_ad_schedule_create(self, payload):
+        # Programa activar o pausar los anuncios de una etiqueta en varias cuentas de un MCC, a una fecha y hora (la de cada cuenta).
+        user = self._get_current_user()
+        mcc_id = str(payload.get("mcc_id") or "").strip()
+        mcc_name = " ".join(str(payload.get("mcc_name") or "").split())[:120]
+        action = str(payload.get("action") or "").strip()
+        run_date = str(payload.get("run_date") or "").strip()
+        run_time = str(payload.get("run_time") or "").strip()
+        raw_accounts = payload.get("accounts")
+        if not mcc_id.isdigit():
+            self._send_json(400, {"error": "Elige primero el MCC."})
+            return
+        if action not in google_ads_client.AD_STATUS_VALUES:
+            self._send_json(400, {"error": "Elige si se activan o se pausan los anuncios."})
+            return
+        try:
+            label = google_ads_client.clean_ad_label(payload.get("label"))
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        try:
+            target = _schedule_local_target(run_date, run_time)
+        except ValueError:
+            self._send_json(400, {"error": "Elige una fecha y una hora válidas."})
+            return
+        now_naive_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        # La hora es la de cada cuenta (de UTC-12 a UTC+14): una fecha más vieja que eso ya pasó en todas las cuentas.
+        if target < now_naive_utc - datetime.timedelta(hours=14) or target > now_naive_utc + datetime.timedelta(days=366):
+            self._send_json(400, {"error": "La fecha y la hora ya pasaron o están a más de un año."})
+            return
+        if not isinstance(raw_accounts, list) or not raw_accounts:
+            self._send_json(400, {"error": "Elige al menos una cuenta."})
+            return
+        if len(raw_accounts) > AD_CREATE_MAX_ACCOUNTS:
+            self._send_json(400, {"error": f"Máximo {AD_CREATE_MAX_ACCOUNTS} cuentas por vez."})
+            return
+        ids, seen = [], set()
+        for a in raw_accounts:
+            a = a if isinstance(a, dict) else {}
+            cid = str(a.get("id") or "").strip()
+            if not cid.isdigit() or cid in seen:
+                self._send_json(400, {"error": "Las cuentas son inválidas o están repetidas."})
+                return
+            seen.add(cid)
+            ids.append((cid, " ".join(str(a.get("name") or "").split())[:120] or cid))
+        simulated = not google_ads_client.is_configured()
+        if not simulated:
+            members = get_mcc_member_ids(mcc_id)
+            if members is None:
+                self._send_json(502, {"error": "No se pudo leer las cuentas de ese MCC. Intenta de nuevo."})
+                return
+            for cid, _name in ids:
+                if cid not in members:
+                    self._send_json(400, {"error": "Una de las cuentas no pertenece al MCC elegido."})
+                    return
+                if not self._user_can_access_account(user, cid):
+                    self._send_json(403, {"error": "No tienes acceso a una de las cuentas de Google Ads."})
+                    return
+        fetch_tz = google_ads_client.simulated_account_timezone if simulated else google_ads_client.fetch_account_timezone
+
+        def tz_of(item):
+            cid, name = item
+            try:
+                tz = fetch_tz(cid)
+                zoneinfo.ZoneInfo(tz)  # falla si el servidor no tiene esa zona horaria
+                return {"id": cid, "name": name, "tz": tz}, False
+            except Exception as e:  # noqa: BLE001
+                print(f"[scheduler] zona horaria de {cid}: {' '.join(str(e).split())[:200]}", flush=True)
+                return None, True
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(tz_of, ids))
+        bad = sum(1 for _acc, failed in results if failed)
+        if bad:
+            self._send_json(502, {"error": f"No se pudo leer la zona horaria de {bad} cuenta(s). Intenta de nuevo."})
+            return
+        try:
+            sid = create_ad_schedule(user["id"], mcc_id, mcc_name, label, action, run_date, run_time, [acc for acc, _ in results])
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        self._send_json(200, {"id": sid, "schedules": list_ad_schedules()})
+
+    def _handle_ad_schedule_cancel(self, payload):
+        try:
+            sid = int(payload.get("id"))
+        except (TypeError, ValueError):
+            self._send_json(400, {"error": "Programación inválida."})
+            return
+        if not cancel_ad_schedule(sid):
+            self._send_json(404, {"error": "La programación ya no está pendiente."})
+            return
+        self._send_json(200, {"schedules": list_ad_schedules()})
+
+    def _handle_ad_template_save(self, payload):
+        user = self._get_current_user()
+        name = " ".join(str(payload.get("name") or "").split())
+        data = payload.get("data")
+        if not name or len(name) > 80:
+            self._send_json(400, {"error": "Ponle un nombre a la plantilla (hasta 80 caracteres)."})
+            return
+        if not isinstance(data, dict) or len(json.dumps(data, ensure_ascii=False)) > AD_TEMPLATE_MAX_CHARS:
+            self._send_json(400, {"error": "La plantilla es inválida o demasiado grande."})
+            return
+        try:
+            tid = save_ad_template(user["id"], name, data)
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        self._send_json(200, {"id": tid, "templates": list_ad_templates()})
+
+    def _handle_ad_template_delete(self, payload):
+        try:
+            tid = int(payload.get("id"))
+        except (TypeError, ValueError):
+            self._send_json(400, {"error": "Plantilla inválida."})
+            return
+        if not delete_ad_template(tid):
+            self._send_json(404, {"error": "La plantilla ya no existe."})
+            return
+        self._send_json(200, {"templates": list_ad_templates()})
 
     def _handle_recommendation_subscriptions(self, payload):
         # Pausa o reactiva recomendaciones automáticas de una cuenta. Escribe de verdad en Google Ads cuando validate_only es false.
@@ -4518,6 +5498,7 @@ class Handler(SimpleHTTPRequestHandler):
 if __name__ == "__main__":
     os.chdir(BASE_DIR)
     init_db()
+    threading.Thread(target=_scheduler_loop, name="ad-scheduler", daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"Paid Media Helper corriendo en http://localhost:{PORT}")
     try:

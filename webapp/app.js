@@ -291,6 +291,15 @@ const state = {
     listFilter: 'all', listLimit: 50, usoKind: 'all', usoCampaign: 'all', usoSearch: '', usoLimit: 40,
     perfKind: 'all', perfSort: 'cost', perfLimit: 50,
   },
+  // Anuncios nuevos: crea el mismo anuncio de búsqueda adaptable (pausado) en varias cuentas de un mismo MCC, cada uno con la URL que ya usa esa cuenta. Solo super admin.
+  nuevosAnuncios: {
+    mcc: { status: 'idle', groups: [], filter: '', selectedId: '', selectedName: '', error: null },
+    accountsStatus: 'idle', accounts: [], accountFilter: '', selected: [],
+    headlines: ['', '', ''], descriptions: ['', ''], path1: '', path2: '', matchText: '',
+    targetsStatus: 'idle', rows: {}, check: null, run: { status: 'idle', error: null, results: {}, applied: false },
+    simulated: false,
+    mode: 'simple', tpl: null, lab: null, // 'simple' | 'plantilla' | 'etiqueta'; tpl y lab se crean al entrar a cada modo (nutState, nulState)
+  },
   // IA Max (AI Max for Search) — a diferencia de "Ask Advisor", sí tiene
   // API real (Campaign.ai_max_setting, desde v25). Tres sub-vistas sobre
   // las mismas campañas Search de la cuenta elegida: estado/toggle, qué
@@ -514,6 +523,10 @@ function themedFontsLink(legacyHref) {
 const PLUS_JAKARTA_HREF = 'https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;700;800&display=swap';
 
 const PAGE_META = {
+  anuncios: {
+    title: 'Anuncios nuevos',
+    caption: 'Crea el mismo anuncio de búsqueda adaptable en varias cuentas de un mismo MCC. Cada cuenta usa la URL que ya tienen sus anuncios y el anuncio queda pausado, para que lo revises y lo actives.',
+  },
   audiencias: {
     title: 'Audiencias',
     caption: 'Qué listas y audiencias tiene una cuenta de Google Ads, en qué campañas se usan y cuánto rinde cada una (CPA %), solo lectura, con descarga en CSV y HTML.',
@@ -897,6 +910,7 @@ function render() {
   else if (state.page === 'campanas') pageHtml = renderCampanasPage();
   else if (state.page === 'cambios') pageHtml = renderCambiosPage();
   else if (state.page === 'audiencias') pageHtml = renderAudienciasPage();
+  else if (state.page === 'anuncios') pageHtml = renderNuevosAnunciosPage();
   else if (state.page === 'exclusiones') pageHtml = renderContentExclusionsPage();
   else if (state.page === 'keywordplanner') pageHtml = renderKeywordPlannerPage();
   else if (state.page === 'pacing') pageHtml = renderPacingPage();
@@ -16148,6 +16162,1488 @@ function renderCambiosPage() {
 }
 
 // ---------------------------------------------------------------------------
+// Anuncios nuevos (solo super admin). Crea el mismo anuncio de búsqueda adaptable (RSA), PAUSADO, en varias cuentas de un
+// mismo MCC. Pasos: MCC y cuentas → títulos y descripciones → destino por cuenta (campaña, grupo y URL que ya usa la cuenta)
+// → validar con Google sin crear → crear. El servidor vuelve a validar todo (cuenta del MCC, grupo activo, dominio de la URL).
+// ---------------------------------------------------------------------------
+const NUA_MAX_ACCOUNTS = 40;
+const NUA_LIMITS = { headMax: 30, headMin: 3, headCap: 15, descMax: 90, descMin: 2, descCap: 4, pathMax: 15 };
+
+function nuaTexts() {
+  const s = state.nuevosAnuncios;
+  const clean = (list) => list.map((x) => String(x || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+  return { heads: clean(s.headlines), descs: clean(s.descriptions), path1: s.path1.trim(), path2: s.path2.trim() };
+}
+
+// Mismas reglas que el servidor (google_ads_client.clean_rsa_texts), para avisar antes de enviar. Devuelve '' si está bien.
+function nuaTextsError() {
+  const { heads, descs, path1, path2 } = nuaTexts();
+  const L = NUA_LIMITS;
+  const dup = (list) => new Set(list.map((x) => x.toLowerCase())).size !== list.length;
+  if (heads.length < L.headMin || heads.length > L.headCap) return `Se necesitan entre ${L.headMin} y ${L.headCap} títulos (hay ${heads.length}).`;
+  if (heads.some((x) => x.length > L.headMax)) return `Hay un título de más de ${L.headMax} caracteres.`;
+  if (dup(heads)) return 'Hay un título repetido.';
+  if (descs.length < L.descMin || descs.length > L.descCap) return `Se necesitan entre ${L.descMin} y ${L.descCap} descripciones (hay ${descs.length}).`;
+  if (descs.some((x) => x.length > L.descMax)) return `Hay una descripción de más de ${L.descMax} caracteres.`;
+  if (dup(descs)) return 'Hay una descripción repetida.';
+  const badPath = (x) => x.length > L.pathMax || /[^\p{L}\p{N}_-]/u.test(x);
+  if (badPath(path1) || badPath(path2)) return `Cada ruta visible admite hasta ${L.pathMax} caracteres, solo letras, números, guion y guion bajo.`;
+  if (path2 && !path1) return 'La segunda ruta visible necesita la primera.';
+  return '';
+}
+
+function nuaKnownHosts(row) {
+  const hosts = new Set();
+  [...(row.urls || []).map((u) => u.url), row.defaultUrl].forEach((u) => { const h = nuaHost(u); if (h) hosts.add(h); });
+  return hosts;
+}
+
+function nuaHost(url) {
+  try { return new URL(String(url || '').trim()).hostname.toLowerCase().replace(/^www\./, ''); } catch (e) { return ''; }
+}
+
+function nuaUrlValid(url) {
+  const u = String(url || '').trim();
+  if (!u || /\s/.test(u)) return false;
+  try { const p = new URL(u); return (p.protocol === 'http:' || p.protocol === 'https:') && !!p.hostname; } catch (e) { return false; }
+}
+
+// Por qué una fila no se puede usar todavía ('' si está lista).
+function nuaRowProblem(row) {
+  if (row.status !== 'ready') return row.status === 'loading' ? 'Leyendo la cuenta…' : (row.error || 'No se pudo leer la cuenta.');
+  if (!row.campaigns.length) return 'Sin campañas Search activas con grupos de anuncios activos.';
+  if (!row.adGroupId) return 'Elige el grupo de anuncios.';
+  if (!nuaUrlValid(row.url)) return 'Escribe una URL final válida (https://…).';
+  const known = nuaKnownHosts(row);
+  if (known.size) { if (!known.has(nuaHost(row.url))) return `La URL debe ser de ${[...known].slice(0, 3).join(', ')}, el dominio que ya usa esta cuenta.`; }
+  else if (!row.confirmed) return 'Sin anuncios de referencia: confirma la URL.';
+  return '';
+}
+
+function nuaActiveRows() {
+  const s = state.nuevosAnuncios;
+  return s.selected.map((id) => s.rows[id]).filter((r) => r && r.include);
+}
+
+function nuaReadyRows() { return nuaActiveRows().filter((r) => !nuaRowProblem(r)); }
+
+function nuaItems(rows) {
+  return rows.map((r) => ({ customer_id: r.id, ad_group_id: r.adGroupId, final_url: r.url.trim(), url_confirmed: nuaKnownHosts(r).size === 0 && !!r.confirmed }));
+}
+
+// Huella de lo que se validó: si cambia cualquier texto, ruta, destino o URL, hay que validar de nuevo antes de crear.
+function nuaSignature(rows) {
+  const s = state.nuevosAnuncios;
+  const t = nuaTexts();
+  return JSON.stringify({ m: s.mcc.selectedId, t, i: nuaItems(rows) });
+}
+
+function nuaInvalidate() {
+  const s = state.nuevosAnuncios;
+  if (s.check || s.run.applied) { s.check = null; s.run = { status: 'idle', error: null, results: {}, applied: false }; render(); } else nuaSyncButtons();
+}
+
+function nuaSyncButtons() {
+  const s = state.nuevosAnuncios;
+  const hint = document.getElementById('nua-texts-hint');
+  if (hint) hint.textContent = nuaTextsError();
+  const v = document.getElementById('nua-validate');
+  if (v) v.disabled = s.run.status === 'loading' || !!nuaTextsError() || !nuaReadyRows().length;
+}
+
+function nuaLoadMccGroups(fromRender) {
+  const m = state.nuevosAnuncios.mcc;
+  m.status = 'loading'; m.error = null;
+  if (!fromRender) render();
+  fetch('/api/google-ads/mcc-groups')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      m.groups = data.groups || [];
+      state.nuevosAnuncios.simulated = !!data.simulated;
+      m.status = 'ready';
+      render();
+    })
+    .catch((err) => { m.status = 'error'; m.error = err.message || String(err); render(); });
+}
+
+function nuaPickMcc(groupId, groupName) {
+  const s = state.nuevosAnuncios;
+  s.mcc.selectedId = groupId; s.mcc.selectedName = groupName; s.mcc.error = null;
+  s.accountsStatus = 'loading'; s.accounts = []; s.selected = []; s.rows = {}; s.targetsStatus = 'idle'; s.check = null;
+  s.run = { status: 'idle', error: null, results: {}, applied: false };
+  nutResetTargets();
+  render();
+  fetch(`/api/google-ads/mcc-group-accounts?group_customer_id=${encodeURIComponent(groupId)}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      if (s.mcc.selectedId !== groupId) return;
+      s.accounts = (data.accounts || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+      s.accountsStatus = 'ready';
+      render();
+    })
+    .catch((err) => { s.accountsStatus = 'error'; s.mcc.error = err.message || String(err); render(); });
+}
+
+function nuaClearMcc() {
+  const s = state.nuevosAnuncios;
+  s.mcc.selectedId = ''; s.mcc.selectedName = ''; s.mcc.filter = '';
+  s.accountsStatus = 'idle'; s.accounts = []; s.selected = []; s.rows = {}; s.targetsStatus = 'idle'; s.check = null;
+  s.run = { status: 'idle', error: null, results: {}, applied: false };
+  nutResetTargets();
+  render();
+}
+
+function nuaSelectAccounts(all) {
+  const s = state.nuevosAnuncios;
+  const f = s.accountFilter.trim().toLowerCase();
+  const visible = s.accounts.filter((a) => !f || a.name.toLowerCase().includes(f) || a.id.includes(f)).map((a) => a.id);
+  if (all) s.selected = [...new Set([...s.selected, ...visible])].slice(0, NUA_MAX_ACCOUNTS);
+  else s.selected = s.selected.filter((id) => !visible.includes(id));
+  s.targetsStatus = 'idle'; s.rows = {}; s.check = null;
+  nutResetTargets();
+  render();
+}
+
+function nuaAddText(kind) {
+  const s = state.nuevosAnuncios;
+  const cap = kind === 'headlines' ? NUA_LIMITS.headCap : NUA_LIMITS.descCap;
+  if (s[kind].length < cap) { s[kind].push(''); nuaInvalidate(); render(); }
+}
+
+function nuaRemoveText(kind, idx) {
+  const s = state.nuevosAnuncios;
+  const min = kind === 'headlines' ? NUA_LIMITS.headMin : NUA_LIMITS.descMin;
+  if (s[kind].length > min) { s[kind].splice(idx, 1); s.check = null; s.run = { status: 'idle', error: null, results: {}, applied: false }; render(); }
+}
+
+function nuaPickGroup(row, campaignId, adGroupId) {
+  const camp = row.campaigns.find((c) => c.id === campaignId) || row.campaigns[0];
+  const group = camp && (camp.ad_groups.find((g) => g.id === adGroupId) || camp.ad_groups[0]);
+  row.campaignId = camp ? camp.id : ''; row.adGroupId = group ? group.id : '';
+  if (!row.urlEdited && group) row.url = group.url || row.defaultUrl || '';
+}
+
+function nuaPrepareTargets() {
+  const s = state.nuevosAnuncios;
+  if (!s.selected.length) return;
+  s.targetsStatus = 'loading'; s.check = null; s.run = { status: 'idle', error: null, results: {}, applied: false };
+  s.rows = {};
+  s.selected.forEach((id) => {
+    const acc = s.accounts.find((a) => a.id === id);
+    s.rows[id] = { id, name: acc ? acc.name : id, status: 'loading', error: null, campaigns: [], urls: [], defaultUrl: '', campaignId: '', adGroupId: '', url: '', urlEdited: false, confirmed: false, include: true };
+  });
+  render();
+  const queue = s.selected.slice();
+  const worker = () => {
+    const id = queue.shift();
+    if (!id) return Promise.resolve();
+    const row = s.rows[id];
+    return fetch(`/api/google-ads/ad-targets?customer_id=${encodeURIComponent(id)}`)
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Error desconocido.');
+        if (data.simulated) s.simulated = true;
+        row.campaigns = data.campaigns || []; row.urls = data.urls || []; row.defaultUrl = data.default_url || '';
+        row.status = 'ready';
+        nuaPickGroup(row, '', '');
+        if (!row.campaigns.length) row.include = false;
+      })
+      .catch((err) => { row.status = 'error'; row.error = err.message || String(err); row.include = false; })
+      .then(() => { render(); return worker(); });
+  };
+  Promise.all([worker(), worker(), worker(), worker()]).then(() => { s.targetsStatus = 'ready'; render(); });
+}
+
+// Sugerencia por nombre: en cada cuenta, el primer grupo cuya campaña o nombre contenga el texto (si ninguno, se deja como está).
+function nuaSuggestByName() {
+  const s = state.nuevosAnuncios;
+  const q = s.matchText.trim().toLowerCase();
+  if (!q) return;
+  Object.values(s.rows).forEach((row) => {
+    if (row.status !== 'ready') return;
+    for (const c of row.campaigns) {
+      const hit = c.ad_groups.find((g) => c.name.toLowerCase().includes(q) || g.name.toLowerCase().includes(q));
+      if (hit) { row.urlEdited = false; nuaPickGroup(row, c.id, hit.id); return; }
+    }
+  });
+  s.check = null; s.run = { status: 'idle', error: null, results: {}, applied: false };
+  render();
+}
+
+function nuaNewBatch() {
+  const s = state.nuevosAnuncios;
+  s.headlines = ['', '', '']; s.descriptions = ['', '']; s.path1 = ''; s.path2 = ''; s.matchText = '';
+  s.selected = []; s.rows = {}; s.targetsStatus = 'idle'; s.check = null;
+  s.run = { status: 'idle', error: null, results: {}, applied: false };
+  render();
+}
+
+function nuaSubmit(validateOnly) {
+  const s = state.nuevosAnuncios;
+  const err = nuaTextsError();
+  if (err) { s.run = { status: 'error', error: err, results: {}, applied: false }; render(); return; }
+  let rows = nuaReadyRows();
+  if (!validateOnly) {
+    if (!s.check || s.check.signature !== nuaSignature(rows.filter((r) => s.check.okIds.includes(r.id)))) return;
+    rows = rows.filter((r) => s.check.okIds.includes(r.id));
+    if (!rows.length) return;
+    if (!window.confirm(`Se crearán ${rows.length} anuncios pausados en ${rows.length} cuentas del MCC «${s.mcc.selectedName}». ¿Continuar?`)) return;
+  }
+  if (!rows.length) return;
+  const t = nuaTexts();
+  s.run = { status: 'loading', error: null, results: {}, applied: false };
+  render();
+  fetch('/api/google-ads/ads-create', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ validate_only: validateOnly, mcc_id: s.mcc.selectedId, headlines: t.heads, descriptions: t.descs, path1: t.path1, path2: t.path2, items: nuaItems(rows) }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      const results = {};
+      (data.results || []).forEach((x) => { results[x.customer_id] = x; });
+      if (data.simulated) s.simulated = true;
+      s.run = { status: 'ready', error: null, results, applied: !validateOnly };
+      if (validateOnly) {
+        const okIds = (data.results || []).filter((x) => x.ok).map((x) => x.customer_id);
+        s.check = okIds.length ? { signature: nuaSignature(rows.filter((r) => okIds.includes(r.id))), okIds } : null;
+      } else s.check = null;
+      render();
+    })
+    .catch((err) => { s.run = { status: 'error', error: err.message || String(err), results: {}, applied: false }; render(); });
+}
+
+// Celda «Resultado» de una fila: lo que respondió Google o, si todavía no se envió, por qué la fila aún no está lista.
+function nuaResultCell(row) {
+  const s = state.nuevosAnuncios;
+  const r = s.run.results[row.id];
+  if (r) {
+    if (!r.ok) return `<span style="color:var(--color-danger,#b3261e)">✕ ${escapeHtml(r.error || 'Error')}</span>`;
+    return s.run.applied
+      ? `<span style="color:var(--color-success,#1d6b41);font-weight:700">✓ Creado, pausado${r.ad_id ? ` (ID ${escapeHtml(r.ad_id)})` : ''}</span>`
+      : '<span style="color:var(--color-success,#1d6b41);font-weight:700">✓ Google lo validó</span>';
+  }
+  const problem = row.include ? nuaRowProblem(row) : '';
+  return problem ? `<span class="field-hint">${escapeHtml(problem)}</span>` : '';
+}
+
+function nuaRefreshRow(row) {
+  const cell = document.getElementById(`nua-res-${row.id}`);
+  if (cell) cell.innerHTML = nuaResultCell(row);
+}
+
+function nuaCounter(len, max) {
+  return `<span class="field-hint nua-count" style="min-width:48px;text-align:right;${len > max ? 'color:var(--color-danger,#b3261e);font-weight:700' : ''}">${len}/${max}</span>`;
+}
+
+function nuaTextRows(kind, max, cap, minRows, label) {
+  const s = state.nuevosAnuncios;
+  const list = s[kind];
+  const key = kind === 'headlines' ? 'head' : 'desc';
+  return `
+    <div class="field" style="flex:1;min-width:300px">
+      <label>${label}</label>
+      ${list.map((v, i) => `
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+          <input type="text" id="nua-${key}-${i}" data-nua-${key}="${i}" value="${escapeHtml(v)}" style="flex:1" autocomplete="off" />
+          ${nuaCounter(v.length, max)}
+          ${list.length > minRows ? `<button class="btn-link" data-nua-del-${key}="${i}" title="Quitar">✕</button>` : '<span style="width:20px"></span>'}
+        </div>`).join('')}
+      ${list.length < cap ? `<button class="btn-outline sm" data-action="nua-add-${key}">Agregar</button>` : ''}
+    </div>`;
+}
+
+function renderNuevosAnunciosPage() {
+  const s = state.nuevosAnuncios;
+  if (s.mcc.status === 'idle') nuaLoadMccGroups(true);
+  const sim = s.simulated ? '<div class="ok-panel" style="margin:0 0 12px"><strong>Modo simulado.</strong> La API de Google Ads no está configurada en el servidor: las cuentas y los anuncios son de ejemplo y no se crea nada real.</div>' : '';
+  const ready = s.mcc.selectedId && s.accountsStatus === 'ready';
+  if (s.mode === 'plantilla') {
+    return `${sim}${renderNuaModeSwitch()}${renderNuaStepAccounts()}${ready ? renderNutStepTemplate() : ''}${s.selected.length && s.mcc.selectedId ? renderNutStepTargets() : ''}`;
+  }
+  if (s.mode === 'etiqueta') {
+    if (ready && nulState().sched.status === 'idle') nulSchedLoad();
+    return `${sim}${renderNuaModeSwitch()}${renderNuaStepAccounts()}${ready ? renderNulStepLabel() : ''}${ready && s.selected.length ? renderNulStepRows() : ''}${ready && s.selected.length ? renderNulSchedForm() : ''}${ready ? renderNulSchedList() : ''}`;
+  }
+  return `${sim}${renderNuaModeSwitch()}${renderNuaStepAccounts()}${ready ? renderNuaStepTexts() : ''}${s.selected.length && s.mcc.selectedId ? renderNuaStepTargets() : ''}`;
+}
+
+function renderNuaStepAccounts() {
+  const s = state.nuevosAnuncios;
+  const m = s.mcc;
+  const head = (inner) => `<div class="card" style="margin-bottom:16px"><h3 style="margin:0 0 10px;font-size:14px">1. MCC y cuentas</h3>${inner}</div>`;
+  if (m.status === 'idle' || m.status === 'loading') return head('<p class="footnote">Cargando los MCC…</p>');
+  if (m.status === 'error') return head(`<div class="error-panel">${escapeHtml(m.error)}</div><button class="btn-outline sm" data-action="nua-mcc-load" style="margin-top:8px">Reintentar</button>`);
+  if (!m.selectedId) {
+    const f = m.filter.trim().toLowerCase();
+    const matches = f.length >= 2 ? m.groups.filter((g) => g.id.includes(f) || (g.name || '').toLowerCase().includes(f)).slice(0, 25) : [];
+    return head(`
+      <div class="field">
+        <label>MCC de las cuentas</label>
+        <input type="text" id="nua-mcc-filter" placeholder="Busca por nombre o ID del MCC (${m.groups.length} agrupaciones)…" value="${escapeHtml(m.filter)}" style="width:340px" autocomplete="off" />
+        <p class="field-hint" style="margin-top:6px">Todas las cuentas de un anuncio nuevo salen del mismo MCC.</p>
+        ${matches.length ? `<div class="table-scroll" style="max-height:220px;margin-top:8px"><table><tbody>
+          ${matches.map((g) => `<tr><td>${escapeHtml(g.name)}</td><td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(g.id)}</td><td><button class="btn-outline xs" data-nua-mcc-pick="${escapeHtml(g.id)}" data-nua-mcc-name="${escapeHtml(g.name)}">Usar</button></td></tr>`).join('')}
+        </tbody></table></div>` : (f.length >= 2 ? `<p class="footnote" style="margin-top:8px">Sin resultados para "${escapeHtml(f)}".</p>` : '')}
+      </div>`);
+  }
+  const top = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+      <span class="delta-badge neutral">${escapeHtml(m.selectedName)}</span>
+      <button class="btn-link" data-action="nua-mcc-clear">Cambiar de MCC</button>
+    </div>`;
+  if (s.accountsStatus === 'loading') return head(`${top}<p class="footnote">Cargando las cuentas del MCC…</p>`);
+  if (s.accountsStatus === 'error') return head(`${top}<div class="error-panel">${escapeHtml(m.error)}</div>`);
+  const f = s.accountFilter.trim().toLowerCase();
+  const visible = s.accounts.filter((a) => !f || a.name.toLowerCase().includes(f) || a.id.includes(f));
+  return head(`
+    ${top}
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+      <input type="text" id="nua-acc-filter" placeholder="Filtrar cuentas (${s.accounts.length})…" value="${escapeHtml(s.accountFilter)}" style="width:260px" autocomplete="off" />
+      <button class="btn-outline sm" data-action="nua-acc-all">Marcar las visibles</button>
+      <button class="btn-outline sm" data-action="nua-acc-none">Quitar las visibles</button>
+      <span class="field-hint">${s.selected.length} de máximo 40 marcadas</span>
+    </div>
+    <div class="table-scroll" style="max-height:280px"><table><tbody>
+      ${visible.map((a) => `<tr><td style="width:30px"><input type="checkbox" data-nua-acc="${escapeHtml(a.id)}" ${s.selected.includes(a.id) ? 'checked' : ''} /></td><td>${escapeHtml(a.name)}</td><td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(a.id)}</td></tr>`).join('') || '<tr><td>Sin cuentas que coincidan.</td></tr>'}
+    </tbody></table></div>`);
+}
+
+function renderNuaStepTexts() {
+  const s = state.nuevosAnuncios;
+  const err = nuaTextsError();
+  const L = NUA_LIMITS;
+  return `
+    <div class="card" style="margin-bottom:16px">
+      <h3 style="margin:0 0 10px;font-size:14px">2. Títulos y descripciones</h3>
+      <div style="display:flex;gap:24px;flex-wrap:wrap">
+        ${nuaTextRows('headlines', L.headMax, L.headCap, L.headMin, `Títulos (${L.headMin} a ${L.headCap}, hasta ${L.headMax} caracteres)`)}
+        ${nuaTextRows('descriptions', L.descMax, L.descCap, L.descMin, `Descripciones (${L.descMin} a ${L.descCap}, hasta ${L.descMax} caracteres)`)}
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:6px">
+        <div class="field"><label>Ruta visible 1 (opcional)</label><input type="text" id="nua-path1" value="${escapeHtml(s.path1)}" style="width:160px" maxlength="15" autocomplete="off" /></div>
+        <div class="field"><label>Ruta visible 2 (opcional)</label><input type="text" id="nua-path2" value="${escapeHtml(s.path2)}" style="width:160px" maxlength="15" autocomplete="off" /></div>
+      </div>
+      <p id="nua-texts-hint" class="field-hint" style="margin-top:8px;color:var(--color-danger,#b3261e)">${escapeHtml(err)}</p>
+      <p class="field-hint" style="margin-top:8px">El mismo texto se usa en todas las cuentas: conviene que sean del mismo idioma. La URL no se escribe aquí: cada cuenta usa la suya.</p>
+    </div>`;
+}
+
+function renderNuaStepTargets() {
+  const s = state.nuevosAnuncios;
+  const textsErr = nuaTextsError();
+  const prepared = Object.keys(s.rows).length > 0;
+  const prepBtn = `<button class="btn-accent" data-action="nua-prepare" ${s.targetsStatus === 'loading' ? 'disabled' : ''}>${prepared ? 'Leer de nuevo los destinos' : 'Leer los destinos de las cuentas'}</button>`;
+  let body = '';
+  if (prepared) {
+    const rows = s.selected.map((id) => s.rows[id]).filter(Boolean);
+    const ready = nuaReadyRows();
+    const okIds = s.check ? s.check.okIds : [];
+    const opt = (value, label, current) => `<option value="${escapeHtml(value)}" ${current === value ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+    body = `
+      <div style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;margin:12px 0 8px">
+        <div class="field"><label>Sugerir por nombre (campaña o grupo)</label>
+          <input type="text" id="nua-match" value="${escapeHtml(s.matchText)}" placeholder="ej. marca" style="width:220px" autocomplete="off" /></div>
+        <button class="btn-outline sm" data-action="nua-suggest">Sugerir</button>
+        <span class="field-hint" style="max-width:420px">Por defecto se propone el grupo con más gasto de los últimos 30 días; cámbialo fila por fila.</span>
+      </div>
+      <div class="table-scroll"><table>
+        <thead><tr><th></th><th>Cuenta</th><th>Campaña</th><th>Grupo de anuncios</th><th>URL final</th><th>Resultado</th></tr></thead>
+        <tbody>
+          ${rows.map((row) => {
+            const camp = row.campaigns.find((c) => c.id === row.campaignId);
+            const known = nuaKnownHosts(row);
+            return `<tr>
+              <td><input type="checkbox" data-nua-inc="${escapeHtml(row.id)}" ${row.include ? 'checked' : ''} ${row.status !== 'ready' || !row.campaigns.length ? 'disabled' : ''} /></td>
+              <td><strong>${escapeHtml(row.name)}</strong><br><span class="field-hint" style="font-family:ui-monospace,monospace">${escapeHtml(row.id)}</span></td>
+              ${row.status === 'ready' && row.campaigns.length ? `
+              <td><select data-nua-camp="${escapeHtml(row.id)}" style="max-width:240px">${row.campaigns.map((c) => opt(c.id, c.name, row.campaignId)).join('')}</select></td>
+              <td><select data-nua-group="${escapeHtml(row.id)}" style="max-width:200px">${(camp ? camp.ad_groups : []).map((g) => opt(g.id, g.name, row.adGroupId)).join('')}</select></td>
+              <td>
+                <input type="text" id="nua-url-${escapeHtml(row.id)}" data-nua-url="${escapeHtml(row.id)}" value="${escapeHtml(row.url)}" style="width:280px" autocomplete="off" />
+                ${known.size === 0 ? `<br><label class="field-hint"><input type="checkbox" data-nua-conf="${escapeHtml(row.id)}" ${row.confirmed ? 'checked' : ''} /> Confirmo esta URL (la cuenta no tiene anuncios de referencia)</label>` : ''}
+              </td>` : `<td colspan="3"><span class="field-hint">${escapeHtml(nuaRowProblem(row))}</span></td>`}
+              <td id="nua-res-${escapeHtml(row.id)}">${nuaResultCell(row)}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table></div>
+      ${s.run.status === 'error' ? `<div class="error-panel" style="margin-top:12px">${escapeHtml(s.run.error)}</div>` : ''}
+      ${s.run.status === 'loading' ? '<div class="state-panel loading" style="margin-top:12px"><div class="spinner"></div><p>Trabajando con Google Ads…</p></div>' : ''}
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px">
+        <button class="btn-outline" id="nua-validate" data-action="nua-validate" ${s.run.status === 'loading' || textsErr || !ready.length ? 'disabled' : ''}>Validar con Google (sin crear)</button>
+        <button class="btn-accent" id="nua-create" data-action="nua-create" ${s.run.status === 'loading' || !s.check || !okIds.length ? 'disabled' : ''}>${s.check ? `Crear ${okIds.length} anuncio${okIds.length === 1 ? '' : 's'} pausado${okIds.length === 1 ? '' : 's'}` : 'Crear los anuncios pausados'}</button>
+        ${s.run.applied ? '<button class="btn-outline" data-action="nua-new-batch">Empezar otra tanda</button>' : ''}
+        <span class="field-hint" style="max-width:520px">${s.run.applied ? 'Los anuncios quedaron pausados: revísalos en Google Ads y actívalos cuando estén listos.' : 'Primero se valida con Google sin crear nada; el botón de crear se habilita solo con lo que Google aceptó.'}</span>
+      </div>`;
+  }
+  return `
+    <div class="card" style="margin-bottom:16px">
+      <h3 style="margin:0 0 10px;font-size:14px">3. Dónde se crea cada anuncio</h3>
+      <p class="field-hint" style="margin:0 0 8px">La URL final es la que ya usan los anuncios de cada cuenta; el servidor rechaza una URL de otro dominio.</p>
+      ${s.targetsStatus === 'loading' ? '<p class="footnote">Leyendo las campañas y los anuncios de cada cuenta…</p>' : ''}
+      ${prepBtn}
+      ${body}
+    </div>`;
+}
+
+function bindNuevosAnuncios() {
+  const s = state.nuevosAnuncios;
+  const on = (id, ev, fn) => { const el = document.getElementById(id); if (el) el.addEventListener(ev, fn); };
+  on('nua-mcc-filter', 'input', (e) => { s.mcc.filter = e.target.value; render(); });
+  document.querySelectorAll('[data-nua-mcc-pick]').forEach((el) => el.addEventListener('click', () => nuaPickMcc(el.dataset.nuaMccPick, el.dataset.nuaMccName)));
+  on('nua-acc-filter', 'input', (e) => { s.accountFilter = e.target.value; render(); });
+  document.querySelectorAll('[data-nua-acc]').forEach((el) => el.addEventListener('change', () => {
+    const id = el.dataset.nuaAcc;
+    if (el.checked && s.selected.length >= NUA_MAX_ACCOUNTS) { el.checked = false; return; }
+    s.selected = el.checked ? [...s.selected, id] : s.selected.filter((x) => x !== id);
+    s.targetsStatus = 'idle'; s.rows = {}; s.check = null; s.run = { status: 'idle', error: null, results: {}, applied: false };
+    nutResetTargets();
+    render();
+  }));
+  document.querySelectorAll('[data-nua-mode]').forEach((el) => el.addEventListener('click', () => { s.mode = el.dataset.nuaMode; render(); }));
+  if (s.mode === 'plantilla') bindNutemplate();
+  if (s.mode === 'etiqueta') bindNulabel();
+  [['head', 'headlines', NUA_LIMITS.headMax], ['desc', 'descriptions', NUA_LIMITS.descMax]].forEach(([key, kind, max]) => {
+    document.querySelectorAll(`[data-nua-${key}]`).forEach((el) => el.addEventListener('input', (e) => {
+      s[kind][Number(el.dataset[`nua${key[0].toUpperCase()}${key.slice(1)}`])] = e.target.value;
+      const counter = el.parentElement.querySelector('.nua-count');
+      if (counter) { counter.textContent = `${e.target.value.length}/${max}`; counter.style.color = e.target.value.length > max ? 'var(--color-danger,#b3261e)' : ''; }
+      nuaInvalidate();
+    }));
+    document.querySelectorAll(`[data-nua-del-${key}]`).forEach((el) => el.addEventListener('click', () => nuaRemoveText(kind, Number(el.dataset[`nuaDel${key[0].toUpperCase()}${key.slice(1)}`]))));
+  });
+  on('nua-path1', 'input', (e) => { s.path1 = e.target.value; nuaInvalidate(); });
+  on('nua-path2', 'input', (e) => { s.path2 = e.target.value; nuaInvalidate(); });
+  on('nua-match', 'input', (e) => { s.matchText = e.target.value; });
+  document.querySelectorAll('[data-nua-inc]').forEach((el) => el.addEventListener('change', () => { s.rows[el.dataset.nuaInc].include = el.checked; s.check = null; s.run = { status: 'idle', error: null, results: {}, applied: false }; render(); }));
+  document.querySelectorAll('[data-nua-camp]').forEach((el) => el.addEventListener('change', () => { const row = s.rows[el.dataset.nuaCamp]; nuaPickGroup(row, el.value, ''); s.check = null; s.run = { status: 'idle', error: null, results: {}, applied: false }; render(); }));
+  document.querySelectorAll('[data-nua-group]').forEach((el) => el.addEventListener('change', () => { const row = s.rows[el.dataset.nuaGroup]; nuaPickGroup(row, row.campaignId, el.value); s.check = null; s.run = { status: 'idle', error: null, results: {}, applied: false }; render(); }));
+  document.querySelectorAll('[data-nua-url]').forEach((el) => el.addEventListener('input', (e) => {
+    const row = s.rows[el.dataset.nuaUrl]; row.url = e.target.value; row.urlEdited = true; nuaInvalidate(); nuaRefreshRow(row); nuaSyncButtons();
+  }));
+  document.querySelectorAll('[data-nua-conf]').forEach((el) => el.addEventListener('change', () => { s.rows[el.dataset.nuaConf].confirmed = el.checked; s.check = null; s.run = { status: 'idle', error: null, results: {}, applied: false }; render(); }));
+}
+
+// ---------------------------------------------------------------------------
+// Anuncios nuevos, modo «Por plantilla»: el mismo anuncio (textos por idioma + variables) en TODOS los grupos de anuncios
+// activos de campañas Search activas de cada cuenta. El hotel y el idioma salen del nombre de la campaña
+// («Hotel - MERCADO:idioma - TIPO»); cada anuncio queda PAUSADO, con la URL de los anuncios activos de su propio grupo y
+// una etiqueta que impide crearlo dos veces. Los textos se arman aquí y el servidor los vuelve a validar.
+// ---------------------------------------------------------------------------
+const NUT_LANG_NAMES = { es: 'Español', en: 'Inglés', de: 'Alemán', pt: 'Portugués', fr: 'Francés', it: 'Italiano' };
+const NUT_MAX_PER_ACCOUNT = 300;
+const NUT_MAX_TOTAL = 1500;
+
+function nutNewState() {
+  return {
+    name: '', loadedId: '', label: '', variables: [],
+    langOrder: ['es'], activeLang: 'es', langs: { es: { headlines: '', descriptions: '' } },
+    campaignFilter: '',
+    templates: [], templatesStatus: 'idle', templateMsg: '', templateError: '', templateBusy: false,
+    rows: {}, targetsStatus: 'idle', targetsLabel: '', excluded: {}, previewKey: '', check: null,
+    run: { status: 'idle', error: null, results: {}, applied: false },
+  };
+}
+
+function nutState() {
+  const s = state.nuevosAnuncios;
+  if (!s.tpl) s.tpl = nutNewState();
+  return s.tpl;
+}
+
+function nutResetRun() {
+  const t = nutState();
+  t.check = null; t.run = { status: 'idle', error: null, results: {}, applied: false };
+}
+
+// Selección de cuentas o MCC distinta: se descartan los destinos leídos.
+function nutResetTargets() {
+  const t = nutState();
+  t.rows = {}; t.targetsStatus = 'idle'; t.excluded = {}; t.previewKey = ''; nutResetRun();
+  nulResetTargets();
+}
+
+function nutLines(text) {
+  return String(text || '').split('\n').map((x) => x.replace(/\s+/g, ' ').trim()).filter(Boolean);
+}
+
+function nutLabelValid(label) {
+  const x = String(label || '').replace(/\s+/g, ' ').trim();
+  return !!x && x.length <= 80 && !/[^\p{L}\p{N}_ -]/u.test(x);
+}
+
+function nutVarKey(k) { return String(k || '').trim().toUpperCase(); }
+
+// Mensaje de lo que falta o está mal en la plantilla ('' si está lista).
+function nutTemplateError() {
+  const t = nutState();
+  if (!nutLabelValid(t.label)) return 'Escribe la etiqueta (hasta 80 caracteres: letras, números, espacios, guion y guion bajo).';
+  const keys = new Set(['HOTEL']);
+  for (const v of t.variables) {
+    const k = nutVarKey(v.key);
+    if (!/^[A-Z0-9_]{1,20}$/.test(k)) return 'El nombre de una variable solo admite letras, números y guion bajo (hasta 20).';
+    if (keys.has(k)) return k === 'HOTEL' ? 'HOTEL ya existe: sale del nombre de la campaña.' : `La variable ${k} está repetida.`;
+    keys.add(k);
+  }
+  const withText = t.langOrder.filter((l) => nutLines(t.langs[l].headlines).length || nutLines(t.langs[l].descriptions).length);
+  if (!withText.length) return 'Escribe los textos de al menos un idioma.';
+  for (const l of withText) {
+    const heads = nutLines(t.langs[l].headlines), descs = nutLines(t.langs[l].descriptions);
+    if (heads.length < NUA_LIMITS.headMin) return `El idioma «${l}» necesita al menos ${NUA_LIMITS.headMin} títulos.`;
+    if (descs.length < NUA_LIMITS.descMin) return `El idioma «${l}» necesita al menos ${NUA_LIMITS.descMin} descripciones.`;
+    if (heads.length > 60 || descs.length > 60) return `El idioma «${l}» tiene demasiadas líneas (máximo 60 por lista).`;
+    for (const line of [...heads, ...descs]) {
+      for (const m of line.matchAll(/\{([^{}]*)\}/g)) {
+        if (!keys.has(nutVarKey(m[1]))) return `Un texto de «${l}» usa la variable «${m[1]}» y no está definida.`;
+      }
+    }
+  }
+  return '';
+}
+
+// Valores de las variables para una cuenta: los de la plantilla, con lo que se haya cambiado en esa cuenta.
+function nutVarsFor(accRow) {
+  const t = nutState();
+  const out = {};
+  t.variables.forEach((v) => {
+    const k = nutVarKey(v.key);
+    if (k) out[k] = String((accRow && accRow.vars && accRow.vars[k] !== undefined ? accRow.vars[k] : v.value) || '').trim();
+  });
+  return out;
+}
+
+// Sustituye las variables de una línea. Devuelve null si alguna variable usada está vacía (ese texto se descarta).
+function nutRenderLine(line, vars, hotel) {
+  let empty = false;
+  const text = line.replace(/\{([^{}]*)\}/g, (m, k) => {
+    const key = nutVarKey(k);
+    const val = key === 'HOTEL' ? hotel : (vars[key] || '');
+    if (!val) empty = true;
+    return val;
+  });
+  return empty ? null : text.replace(/\s+/g, ' ').trim();
+}
+
+// Toma, en orden, los primeros textos que caben (max caracteres) sin repetirse, hasta `limit`.
+function nutPick(lines, vars, hotel, max, limit) {
+  const out = [], seen = new Set();
+  for (const line of lines) {
+    const x = nutRenderLine(line, vars, hotel);
+    if (!x || x.length > max) continue;
+    const key = x.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key); out.push(x);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+// «Hotel - ES:es - BRND» → { hotel: 'Hotel', lang: 'es' } (null si el nombre no sigue ese formato).
+function nutParseCampaignName(name) {
+  const parts = String(name || '').split(' - ');
+  for (let i = 1; i < parts.length; i++) {
+    const m = parts[i].trim().match(/^[A-Za-z]{2,3}:([A-Za-z]{2})$/);
+    if (m) return { hotel: parts.slice(0, i).join(' - ').trim(), lang: m[1].toLowerCase() };
+  }
+  return null;
+}
+
+// Una fila por grupo de anuncios de la cuenta: si se puede crear o por qué se omite, y los textos finales.
+function nutComputeAccount(accRow) {
+  const t = nutState();
+  if (!accRow || accRow.status !== 'ready') return [];
+  const vars = nutVarsFor(accRow);
+  const filter = t.campaignFilter.trim().toLowerCase();
+  const out = [];
+  accRow.campaigns.forEach((c) => {
+    if (filter && !c.name.toLowerCase().includes(filter)) return;
+    const parsed = nutParseCampaignName(c.name);
+    c.ad_groups.forEach((g) => {
+      const row = { key: `${accRow.id}:${g.id}`, accId: accRow.id, campaignName: c.name, groupId: g.id, groupName: g.name, hotel: parsed ? parsed.hotel : '', lang: parsed ? parsed.lang : '', url: g.url, reason: '', heads: [], descs: [] };
+      const tpl = parsed ? t.langs[parsed.lang] : null;
+      if (!parsed) row.reason = 'Nombre de campaña sin hotel e idioma (Hotel - MERCADO:idioma - TIPO)';
+      else if (!tpl || !(nutLines(tpl.headlines).length && nutLines(tpl.descriptions).length)) row.reason = `La plantilla no tiene textos en «${parsed.lang}»`;
+      else if (g.labeled) row.reason = 'Ya tiene un anuncio con la etiqueta';
+      else if (g.rsa_enabled >= 3) row.reason = 'Ya tiene 3 anuncios adaptables activos';
+      else if (!g.url) row.reason = 'Sin anuncio activo del que tomar la URL';
+      else {
+        row.heads = nutPick(nutLines(tpl.headlines), vars, parsed.hotel, NUA_LIMITS.headMax, NUA_LIMITS.headCap);
+        row.descs = nutPick(nutLines(tpl.descriptions), vars, parsed.hotel, NUA_LIMITS.descMax, NUA_LIMITS.descCap);
+        if (row.heads.length < NUA_LIMITS.headMin || row.descs.length < NUA_LIMITS.descMin) row.reason = 'Pocos textos caben tras sustituir las variables';
+      }
+      out.push(row);
+    });
+  });
+  return out;
+}
+
+function nutSelectedAccRows() {
+  const s = state.nuevosAnuncios, t = nutState();
+  return s.selected.map((id) => t.rows[id]).filter(Boolean);
+}
+
+// Filas que se enviarían: listas y marcadas.
+function nutReadyRows() {
+  const t = nutState();
+  const out = [];
+  nutSelectedAccRows().forEach((a) => nutComputeAccount(a).forEach((r) => { if (!r.reason && !t.excluded[r.key]) out.push(r); }));
+  return out;
+}
+
+function nutPayload(rows) {
+  const by = new Map();
+  rows.forEach((r) => {
+    if (!by.has(r.accId)) by.set(r.accId, []);
+    by.get(r.accId).push({ ad_group_id: r.groupId, final_url: r.url, headlines: r.heads, descriptions: r.descs });
+  });
+  return [...by].map(([customer_id, ads]) => ({ customer_id, ads }));
+}
+
+function nutSignature(rows) {
+  const s = state.nuevosAnuncios, t = nutState();
+  return JSON.stringify({ m: s.mcc.selectedId, l: t.label.trim(), a: nutPayload(rows) });
+}
+
+function nutLimitsError(rows) {
+  const per = {};
+  rows.forEach((r) => { per[r.accId] = (per[r.accId] || 0) + 1; });
+  if (Object.values(per).some((n) => n > NUT_MAX_PER_ACCOUNT)) return `Máximo ${NUT_MAX_PER_ACCOUNT} anuncios por cuenta en cada tanda: desmarca grupos o filtra por campaña.`;
+  if (rows.length > NUT_MAX_TOTAL) return `Máximo ${NUT_MAX_TOTAL} anuncios por tanda: desmarca grupos, quita cuentas o filtra por campaña.`;
+  return '';
+}
+
+function nutCanValidate() {
+  const t = nutState();
+  if (t.run.status === 'loading' || t.targetsStatus !== 'ready') return false;
+  if (nutTemplateError() || t.targetsLabel !== t.label.replace(/\s+/g, ' ').trim()) return false;
+  const rows = nutReadyRows();
+  return rows.length > 0 && !nutLimitsError(rows);
+}
+
+// ---- Plantillas guardadas ----
+function nutLoadTemplates() {
+  const t = nutState();
+  t.templatesStatus = 'loading';
+  fetch('/api/ad-templates')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      t.templates = data.templates || []; t.templatesStatus = 'ready'; render();
+    })
+    .catch((err) => { t.templatesStatus = 'error'; t.templateError = err.message || String(err); render(); });
+}
+
+function nutTemplateData() {
+  const t = nutState();
+  return {
+    label: t.label, variables: t.variables.map((v) => ({ key: v.key, value: v.value })), langOrder: t.langOrder.slice(),
+    langs: t.langs, campaignFilter: t.campaignFilter,
+  };
+}
+
+function nutApplyTemplate(tpl) {
+  const t = nutState();
+  const d = tpl.data || {};
+  const order = Array.isArray(d.langOrder) && d.langOrder.length ? d.langOrder.filter((l) => /^[a-z]{2}$/.test(l)) : ['es'];
+  t.langOrder = order.length ? order : ['es'];
+  t.langs = {};
+  t.langOrder.forEach((l) => { const x = (d.langs || {})[l] || {}; t.langs[l] = { headlines: String(x.headlines || ''), descriptions: String(x.descriptions || '') }; });
+  t.activeLang = t.langOrder[0];
+  t.label = String(d.label || '');
+  t.variables = (Array.isArray(d.variables) ? d.variables : []).map((v) => ({ key: String(v.key || ''), value: String(v.value || '') }));
+  t.campaignFilter = String(d.campaignFilter || '');
+  t.name = tpl.name; t.loadedId = String(tpl.id);
+  t.templateMsg = ''; t.templateError = '';
+  t.targetsStatus = t.targetsStatus === 'ready' ? 'stale' : t.targetsStatus;
+  nutResetRun();
+}
+
+function nutSaveTemplate() {
+  const t = nutState();
+  const name = t.name.replace(/\s+/g, ' ').trim();
+  t.templateMsg = ''; t.templateError = '';
+  if (!name) { t.templateError = 'Ponle un nombre a la plantilla para guardarla.'; render(); return; }
+  t.templateBusy = true; render();
+  fetch('/api/ad-templates', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, data: nutTemplateData() }) })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      t.templates = data.templates || []; t.loadedId = String(data.id); t.name = name; t.templateMsg = 'Plantilla guardada.'; t.templateBusy = false; render();
+    })
+    .catch((err) => { t.templateBusy = false; t.templateError = err.message || String(err); render(); });
+}
+
+function nutDeleteTemplate() {
+  const t = nutState();
+  if (!t.loadedId) return;
+  if (!window.confirm('¿Borrar la plantilla guardada? No se puede deshacer.')) return;
+  t.templateBusy = true; t.templateMsg = ''; t.templateError = ''; render();
+  fetch('/api/ad-templates/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: Number(t.loadedId) }) })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      t.templates = data.templates || []; t.loadedId = ''; t.templateMsg = 'Plantilla borrada.'; t.templateBusy = false; render();
+    })
+    .catch((err) => { t.templateBusy = false; t.templateError = err.message || String(err); render(); });
+}
+
+// ---- Leer destinos ----
+function nutPrepareTargets() {
+  const s = state.nuevosAnuncios, t = nutState();
+  if (!s.selected.length || !nutLabelValid(t.label)) return;
+  const label = t.label.replace(/\s+/g, ' ').trim();
+  t.targetsStatus = 'loading'; t.targetsLabel = label; t.excluded = {}; t.previewKey = ''; nutResetRun();
+  const prevVars = {};
+  Object.values(t.rows).forEach((r) => { if (r.vars) prevVars[r.id] = r.vars; });
+  t.rows = {};
+  s.selected.forEach((id) => {
+    const acc = s.accounts.find((a) => a.id === id);
+    t.rows[id] = { id, name: acc ? acc.name : id, status: 'loading', error: null, campaigns: [], vars: prevVars[id] || {} };
+  });
+  render();
+  const queue = s.selected.slice();
+  const worker = () => {
+    const id = queue.shift();
+    if (!id) return Promise.resolve();
+    const row = t.rows[id];
+    return fetch(`/api/google-ads/ad-groups-bulk?customer_id=${encodeURIComponent(id)}&label=${encodeURIComponent(label)}`)
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Error desconocido.');
+        if (data.simulated) s.simulated = true;
+        row.campaigns = data.campaigns || []; row.status = 'ready';
+      })
+      .catch((err) => { row.status = 'error'; row.error = err.message || String(err); })
+      .then(() => { nutRefreshTargets(); return worker(); });
+  };
+  Promise.all([worker(), worker(), worker(), worker()]).then(() => {
+    if (nutState() !== t) return;
+    t.targetsStatus = 'ready'; render();
+  });
+}
+
+function nutNewBatch() {
+  const s = state.nuevosAnuncios, t = nutState();
+  s.selected = []; nutResetTargets(); t.targetsLabel = '';
+  render();
+}
+
+// ---- Validar y crear ----
+function nutSubmit(validateOnly) {
+  const s = state.nuevosAnuncios, t = nutState();
+  const tplErr = nutTemplateError();
+  if (tplErr) { t.run = { status: 'error', error: tplErr, results: {}, applied: false }; render(); return; }
+  let rows = nutReadyRows();
+  if (!validateOnly) {
+    if (!t.check) return;
+    rows = rows.filter((r) => t.check.okKeys.includes(r.key));
+    if (!rows.length || t.check.signature !== nutSignature(rows)) return;
+    const accounts = new Set(rows.map((r) => r.accId)).size;
+    if (!window.confirm(`Se crearán ${rows.length} anuncios pausados con la etiqueta «${t.label.replace(/\s+/g, ' ').trim()}» en ${accounts} cuentas del MCC «${s.mcc.selectedName}». ¿Continuar?`)) return;
+  }
+  const limitErr = nutLimitsError(rows);
+  if (limitErr) { t.run = { status: 'error', error: limitErr, results: {}, applied: false }; render(); return; }
+  if (!rows.length) return;
+  const accounts = nutPayload(rows);
+  t.run = { status: 'loading', error: null, results: {}, applied: false };
+  render();
+  fetch('/api/google-ads/ads-create-bulk', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ validate_only: validateOnly, mcc_id: s.mcc.selectedId, label: t.label.replace(/\s+/g, ' ').trim(), accounts }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      if (data.simulated) s.simulated = true;
+      const results = {};
+      (data.results || []).forEach((res, i) => {
+        const sent = accounts[i];
+        (sent ? sent.ads : []).forEach((ad, j) => {
+          const key = `${sent.customer_id}:${ad.ad_group_id}`;
+          results[key] = res.ok ? ((res.items || [])[j] || { ok: false, error: 'Sin respuesta.' }) : { ok: false, error: res.error || 'Error' };
+        });
+      });
+      t.run = { status: 'ready', error: null, results, applied: !validateOnly };
+      if (validateOnly) {
+        const okKeys = rows.filter((r) => results[r.key] && results[r.key].ok).map((r) => r.key);
+        const okRows = rows.filter((r) => okKeys.includes(r.key));
+        t.check = okKeys.length ? { signature: nutSignature(okRows), okKeys } : null;
+      } else t.check = null;
+      render();
+    })
+    .catch((err) => { t.run = { status: 'error', error: err.message || String(err), results: {}, applied: false }; render(); });
+}
+
+// ---- Dibujo ----
+function nutResultCell(row) {
+  const t = nutState();
+  const r = t.run.results[row.key];
+  if (r) {
+    if (!r.ok) return `<span style="color:var(--color-danger,#b3261e)">✕ ${escapeHtml(r.error || 'Error')}</span>`;
+    if (!t.run.applied) return '<span style="color:var(--color-success,#1d6b41);font-weight:700">✓ Google lo validó</span>';
+    return `<span style="color:var(--color-success,#1d6b41);font-weight:700">✓ Creado, pausado${r.ad_id ? ` (ID ${escapeHtml(r.ad_id)})` : ''}</span>${r.label_error ? `<br><span style="color:var(--color-danger,#b3261e)">Sin etiqueta: ${escapeHtml(r.label_error)}</span>` : ''}`;
+  }
+  return '';
+}
+
+function nutAccountBody(accRow) {
+  const t = nutState();
+  if (accRow.status === 'loading') return '<p class="footnote">Leyendo los grupos de anuncios…</p>';
+  if (accRow.status === 'error') return `<p style="color:var(--color-danger,#b3261e);margin:6px 0">${escapeHtml(accRow.error)}</p>`;
+  const rows = nutComputeAccount(accRow);
+  if (!rows.length) return '<p class="footnote">No hay grupos de anuncios activos en campañas Search activas que coincidan con el filtro.</p>';
+  const ready = rows.filter((r) => !r.reason);
+  const marked = ready.filter((r) => !t.excluded[r.key]).length;
+  const trs = rows.map((r) => `<tr>
+      <td style="width:28px"><input type="checkbox" data-nut-inc="${escapeHtml(r.key)}" ${!r.reason && !t.excluded[r.key] ? 'checked' : ''} ${r.reason ? 'disabled' : ''} /></td>
+      <td>${escapeHtml(r.campaignName)}</td><td>${escapeHtml(r.groupName)}</td>
+      <td>${r.lang ? escapeHtml(r.lang) : '—'}</td>
+      <td>${r.reason ? `<span class="field-hint">${escapeHtml(r.reason)}</span>` : `<button class="btn-link" data-nut-view="${escapeHtml(r.key)}">Ver textos</button>`}</td>
+      <td id="nut-res-${escapeHtml(r.key)}">${nutResultCell(r)}</td>
+    </tr>`).join('');
+  return `
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:4px 0 6px">
+      <span class="field-hint">${marked} marcados de ${ready.length} listos · ${rows.length - ready.length} omitidos</span>
+      <button class="btn-outline xs" data-nut-all="${escapeHtml(accRow.id)}">Marcar todos</button>
+      <button class="btn-outline xs" data-nut-none="${escapeHtml(accRow.id)}">Quitar todos</button>
+    </div>
+    <div class="table-scroll" style="max-height:300px"><table>
+      <thead><tr><th></th><th>Campaña</th><th>Grupo de anuncios</th><th>Idioma</th><th>Estado</th><th>Resultado</th></tr></thead>
+      <tbody>${trs}</tbody>
+    </table></div>`;
+}
+
+function nutPreviewHtml() {
+  const t = nutState();
+  if (!t.previewKey) return '';
+  const [accId] = t.previewKey.split(':');
+  const row = nutComputeAccount(t.rows[accId]).find((r) => r.key === t.previewKey);
+  if (!row || row.reason) return '';
+  const list = (items, max) => items.map((x) => `<li>${escapeHtml(x)} <span class="field-hint">${x.length}/${max}</span></li>`).join('');
+  return `<div class="ok-panel" style="margin:12px 0">
+    <strong>${escapeHtml(row.hotel)}</strong> · <span>${escapeHtml(row.campaignName)}</span> › <span>${escapeHtml(row.groupName)}</span><br>
+    <span class="field-hint">URL final:</span> <span style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(row.url)}</span>
+    <div style="display:flex;gap:28px;flex-wrap:wrap;margin-top:8px">
+      <div><strong>Títulos (${row.heads.length})</strong><ol style="margin:4px 0 0 18px;padding:0">${list(row.heads, NUA_LIMITS.headMax)}</ol></div>
+      <div><strong>Descripciones (${row.descs.length})</strong><ol style="margin:4px 0 0 18px;padding:0">${list(row.descs, NUA_LIMITS.descMax)}</ol></div>
+    </div>
+  </div>`;
+}
+
+function nutSummaryHtml() {
+  const t = nutState();
+  const rows = nutReadyRows();
+  const accounts = new Set(rows.map((r) => r.accId)).size;
+  const limitErr = rows.length ? nutLimitsError(rows) : '';
+  return `<span class="field-hint">${rows.length} anuncios listos en ${accounts} cuentas</span>${limitErr ? `<span style="color:var(--color-danger,#b3261e);margin-left:10px">${escapeHtml(limitErr)}</span>` : ''}${t.targetsStatus === 'ready' && t.targetsLabel !== t.label.replace(/\s+/g, ' ').trim() ? '<span style="color:var(--color-danger,#b3261e);margin-left:10px">La etiqueta cambió: lee de nuevo los destinos.</span>' : ''}`;
+}
+
+function nutSyncButtons() {
+  const t = nutState();
+  const hint = document.getElementById('nut-template-hint');
+  if (hint) hint.textContent = nutTemplateError();
+  const v = document.getElementById('nut-validate');
+  if (v) v.disabled = !nutCanValidate();
+  const sum = document.getElementById('nut-summary');
+  if (sum) sum.innerHTML = nutSummaryHtml();
+  const p = document.getElementById('nut-prepare');
+  if (p) p.disabled = t.targetsStatus === 'loading' || !nutLabelValid(t.label);
+}
+
+// Redibuja solo las tablas de destinos (no los campos de texto), para no perder el cursor al escribir.
+function nutRefreshTargets() {
+  const t = nutState();
+  nutSelectedAccRows().forEach((a) => {
+    const box = document.getElementById(`nut-acc-body-${a.id}`);
+    if (box) box.innerHTML = nutAccountBody(a);
+  });
+  const pv = document.getElementById('nut-preview');
+  if (pv) pv.innerHTML = nutPreviewHtml();
+  bindNutTargets();
+  nutSyncButtons();
+}
+
+let nutRefreshTimer = null;
+function nutRefreshSoon() {
+  clearTimeout(nutRefreshTimer);
+  nutRefreshTimer = setTimeout(nutRefreshTargets, 250);
+}
+
+function nutTemplateEdited() {
+  const t = nutState();
+  if (t.check || t.run.applied || Object.keys(t.run.results).length) { nutResetRun(); render(); return; }
+  nutSyncButtons();
+  nutRefreshSoon();
+}
+
+function renderNutStepTemplate() {
+  const t = nutState();
+  if (t.templatesStatus === 'idle') nutLoadTemplates();
+  const err = nutTemplateError();
+  const active = t.langs[t.activeLang] || { headlines: '', descriptions: '' };
+  const addable = Object.keys(NUT_LANG_NAMES).filter((l) => !t.langOrder.includes(l));
+  const hL = nutLines(active.headlines), dL = nutLines(active.descriptions);
+  return `
+    <div class="card" style="margin-bottom:16px">
+      <h3 style="margin:0 0 10px;font-size:14px">2. Plantilla: etiqueta, variables y textos por idioma</h3>
+      <div style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+        <div class="field"><label>Plantilla guardada</label>
+          <select id="nut-tpl-select" style="min-width:220px"><option value="">— Nueva / sin cargar —</option>${t.templates.map((x) => `<option value="${x.id}" ${String(x.id) === t.loadedId ? 'selected' : ''}>${escapeHtml(x.name)}</option>`).join('')}</select></div>
+        <div class="field"><label>Nombre para guardarla</label><input type="text" id="nut-tpl-name" value="${escapeHtml(t.name)}" style="width:220px" maxlength="80" autocomplete="off" /></div>
+        <button class="btn-outline sm" data-action="nut-save" ${t.templateBusy ? 'disabled' : ''}>Guardar plantilla</button>
+        ${t.loadedId ? '<button class="btn-link" data-action="nut-delete">Borrar la cargada</button>' : ''}
+        ${t.templateMsg ? `<span class="field-hint" style="color:var(--color-success,#1d6b41)">${escapeHtml(t.templateMsg)}</span>` : ''}
+        ${t.templateError ? `<span class="field-hint" style="color:var(--color-danger,#b3261e)">${escapeHtml(t.templateError)}</span>` : ''}
+      </div>
+      <div style="display:flex;gap:16px;flex-wrap:wrap">
+        <div class="field"><label>Etiqueta de la tanda</label><input type="text" id="nut-label" value="${escapeHtml(t.label)}" style="width:220px" maxlength="80" placeholder="ej. BF2026" autocomplete="off" />
+          <span class="field-hint" style="display:block;max-width:300px">Marca los anuncios que se crean y evita crearlos dos veces en el mismo grupo.</span></div>
+        <div class="field"><label>Solo campañas cuyo nombre contenga (opcional)</label><input type="text" id="nut-filter" value="${escapeHtml(t.campaignFilter)}" style="width:240px" placeholder="ej. BRND" autocomplete="off" /></div>
+      </div>
+      <div style="margin:10px 0 4px"><strong style="font-size:13px">Variables</strong>
+        <span class="field-hint">En los textos escribe {HOTEL} (sale del nombre de la campaña) o tus propias variables, como {DESCUENTO}. Una variable vacía descarta los textos que la usan. Cada cuenta puede cambiar su valor más abajo.</span></div>
+      ${t.variables.map((v, i) => `<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+          <span>{</span><input type="text" data-nut-vkey="${i}" value="${escapeHtml(v.key)}" style="width:130px" maxlength="20" placeholder="NOMBRE" autocomplete="off" /><span>}</span>
+          <input type="text" data-nut-vval="${i}" value="${escapeHtml(v.value)}" style="width:240px" placeholder="valor por defecto" autocomplete="off" />
+          <button class="btn-link" data-nut-vdel="${i}" title="Quitar">✕</button></div>`).join('')}
+      <button class="btn-outline sm" data-action="nut-add-var">Agregar variable</button>
+      <div style="margin:14px 0 6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <strong style="font-size:13px">Idiomas</strong>
+        ${t.langOrder.map((l) => `<button class="${l === t.activeLang ? 'btn-accent' : 'btn-outline'} sm" data-nut-lang="${l}">${escapeHtml(NUT_LANG_NAMES[l] || l)} (${l})</button>`).join('')}
+        ${t.langOrder.length > 1 ? '<button class="btn-link" data-action="nut-del-lang">Quitar este idioma</button>' : ''}
+        <select id="nut-lang-add"><option value="">Agregar idioma…</option>${addable.map((l) => `<option value="${l}">${escapeHtml(NUT_LANG_NAMES[l])} (${l})</option>`).join('')}<option value="__otro">Otro código…</option></select>
+      </div>
+      <p class="field-hint" style="margin:0 0 8px">El idioma de cada campaña se lee de su nombre (Hotel - MERCADO:idioma - TIPO). Escribe un texto por línea: se usan, en orden, los primeros 15 títulos (hasta 30 caracteres) y 4 descripciones (hasta 90) que quepan después de sustituir las variables. Pon primero los que usan el nombre del hotel y deja otros genéricos de reserva.</p>
+      <div style="display:flex;gap:20px;flex-wrap:wrap">
+        <div class="field" style="flex:1;min-width:300px"><label>Títulos <span class="field-hint">(<span id="nut-hcount">${hL.length}</span>)</span></label>
+          <textarea id="nut-heads" rows="9" style="width:100%;font-family:inherit">${escapeHtml(active.headlines)}</textarea></div>
+        <div class="field" style="flex:1;min-width:300px"><label>Descripciones <span class="field-hint">(<span id="nut-dcount">${dL.length}</span>)</span></label>
+          <textarea id="nut-descs" rows="9" style="width:100%;font-family:inherit">${escapeHtml(active.descriptions)}</textarea></div>
+      </div>
+      <p id="nut-template-hint" class="field-hint" style="margin-top:8px;color:var(--color-danger,#b3261e)">${escapeHtml(err)}</p>
+    </div>`;
+}
+
+function renderNutStepTargets() {
+  const t = nutState();
+  const prepared = Object.keys(t.rows).length > 0;
+  const ready = nutCanValidate();
+  const okKeys = t.check ? t.check.okKeys : [];
+  const varNames = t.variables.map((v) => nutVarKey(v.key)).filter(Boolean);
+  const accounts = nutSelectedAccRows();
+  const body = prepared ? `
+      <div id="nut-preview">${nutPreviewHtml()}</div>
+      ${accounts.map((a) => `
+        <div style="border-top:1px solid var(--color-border,#ddd);padding-top:10px;margin-top:10px">
+          <strong>${escapeHtml(a.name)}</strong> <span class="field-hint" style="font-family:ui-monospace,monospace">${escapeHtml(a.id)}</span>
+          ${varNames.length ? `<div style="display:flex;gap:10px;flex-wrap:wrap;margin:6px 0">${varNames.map((k) => `<label class="field-hint">{${escapeHtml(k)}} <input type="text" data-nut-acc-var="${escapeHtml(a.id)}" data-nut-var-key="${escapeHtml(k)}" value="${escapeHtml(a.vars[k] !== undefined ? a.vars[k] : (t.variables.find((v) => nutVarKey(v.key) === k) || { value: '' }).value)}" style="width:150px" autocomplete="off" /></label>`).join('')}</div>` : ''}
+          <div id="nut-acc-body-${escapeHtml(a.id)}">${nutAccountBody(a)}</div>
+        </div>`).join('')}
+      ${t.run.status === 'error' ? `<div class="error-panel" style="margin-top:12px">${escapeHtml(t.run.error)}</div>` : ''}
+      ${t.run.status === 'loading' ? '<div class="state-panel loading" style="margin-top:12px"><div class="spinner"></div><p>Trabajando con Google Ads…</p></div>' : ''}
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px">
+        <button class="btn-outline" id="nut-validate" data-action="nut-validate" ${ready ? '' : 'disabled'}>Validar con Google (sin crear)</button>
+        <button class="btn-accent" id="nut-create" data-action="nut-create" ${t.run.status === 'loading' || !t.check || !okKeys.length ? 'disabled' : ''}>${t.check ? `Crear ${okKeys.length} anuncio${okKeys.length === 1 ? '' : 's'} pausado${okKeys.length === 1 ? '' : 's'}` : 'Crear los anuncios pausados'}</button>
+        ${t.run.applied ? '<button class="btn-outline" data-action="nut-new-batch">Empezar otra tanda</button>' : ''}
+        <span id="nut-summary">${nutSummaryHtml()}</span>
+      </div>
+      <p class="field-hint" style="margin-top:8px">${t.run.applied ? 'Los anuncios quedaron pausados y con la etiqueta: revísalos en Google Ads y actívalos cuando estén listos.' : 'Primero se valida con Google sin crear nada; el botón de crear se habilita solo con lo que Google aceptó y se bloquea si cambias algo.'}</p>` : '';
+  return `
+    <div class="card" style="margin-bottom:16px">
+      <h3 style="margin:0 0 10px;font-size:14px">3. Dónde se crea cada anuncio</h3>
+      <p class="field-hint" style="margin:0 0 8px">Se propone un anuncio en cada grupo activo de campañas Search activas, con la URL de los anuncios activos de ese mismo grupo. Se omiten los grupos sin anuncio de referencia, con 3 anuncios adaptables activos o que ya tienen la etiqueta.</p>
+      ${t.targetsStatus === 'loading' ? '<p class="footnote">Leyendo las campañas y los anuncios de cada cuenta…</p>' : ''}
+      ${t.targetsStatus === 'stale' ? '<p class="field-hint" style="color:var(--color-danger,#b3261e)">Se cargó otra plantilla: lee de nuevo los destinos para que la etiqueta y los idiomas coincidan.</p>' : ''}
+      <button class="btn-accent" id="nut-prepare" data-action="nut-prepare" ${t.targetsStatus === 'loading' || !nutLabelValid(t.label) ? 'disabled' : ''}>${prepared ? 'Leer de nuevo los destinos' : 'Leer los grupos de las cuentas'}</button>
+      ${body}
+    </div>`;
+}
+
+function renderNuaModeSwitch() {
+  const s = state.nuevosAnuncios;
+  const btn = (mode, label, hint) => `<button class="${s.mode === mode ? 'btn-accent' : 'btn-outline'}" data-nua-mode="${mode}" title="${escapeHtml(hint)}">${label}</button>`;
+  return `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+    ${btn('simple', 'Un anuncio, un grupo por cuenta', 'Los mismos textos en un grupo que eliges en cada cuenta')}
+    ${btn('plantilla', 'Por plantilla, todos los grupos', 'Textos por idioma y variables por hotel en todos los grupos activos')}
+    ${btn('etiqueta', 'Activar o pausar por etiqueta', 'Activa o pausa, con vista previa, los anuncios de una tanda creada por plantilla')}
+  </div>`;
+}
+
+function bindNutTargets() {
+  const t = nutState();
+  document.querySelectorAll('[data-nut-inc]').forEach((el) => { el.onchange = () => { if (el.checked) delete t.excluded[el.dataset.nutInc]; else t.excluded[el.dataset.nutInc] = true; nutResetRun(); render(); }; });
+  document.querySelectorAll('[data-nut-view]').forEach((el) => { el.onclick = () => { t.previewKey = el.dataset.nutView; const pv = document.getElementById('nut-preview'); if (pv) pv.innerHTML = nutPreviewHtml(); }; });
+  document.querySelectorAll('[data-nut-all]').forEach((el) => { el.onclick = () => { nutComputeAccount(t.rows[el.dataset.nutAll]).forEach((r) => { delete t.excluded[r.key]; }); nutResetRun(); render(); }; });
+  document.querySelectorAll('[data-nut-none]').forEach((el) => { el.onclick = () => { nutComputeAccount(t.rows[el.dataset.nutNone]).forEach((r) => { if (!r.reason) t.excluded[r.key] = true; }); nutResetRun(); render(); }; });
+}
+
+function bindNutemplate() {
+  const t = nutState();
+  const on = (id, ev, fn) => { const el = document.getElementById(id); if (el) el.addEventListener(ev, fn); };
+  on('nut-tpl-select', 'change', (e) => { const x = t.templates.find((y) => String(y.id) === e.target.value); if (x) nutApplyTemplate(x); else { t.loadedId = ''; } render(); });
+  on('nut-tpl-name', 'input', (e) => { t.name = e.target.value; });
+  on('nut-label', 'input', (e) => { t.label = e.target.value; nutTemplateEdited(); });
+  on('nut-filter', 'input', (e) => { t.campaignFilter = e.target.value; nutTemplateEdited(); });
+  on('nut-heads', 'input', (e) => { t.langs[t.activeLang].headlines = e.target.value; const c = document.getElementById('nut-hcount'); if (c) c.textContent = nutLines(e.target.value).length; nutTemplateEdited(); });
+  on('nut-descs', 'input', (e) => { t.langs[t.activeLang].descriptions = e.target.value; const c = document.getElementById('nut-dcount'); if (c) c.textContent = nutLines(e.target.value).length; nutTemplateEdited(); });
+  document.querySelectorAll('[data-nut-vkey]').forEach((el) => el.addEventListener('input', (e) => { t.variables[Number(el.dataset.nutVkey)].key = e.target.value; nutTemplateEdited(); }));
+  document.querySelectorAll('[data-nut-vval]').forEach((el) => el.addEventListener('input', (e) => { t.variables[Number(el.dataset.nutVval)].value = e.target.value; nutTemplateEdited(); }));
+  document.querySelectorAll('[data-nut-vdel]').forEach((el) => el.addEventListener('click', () => { t.variables.splice(Number(el.dataset.nutVdel), 1); nutResetRun(); render(); }));
+  document.querySelectorAll('[data-nut-lang]').forEach((el) => el.addEventListener('click', () => { t.activeLang = el.dataset.nutLang; render(); }));
+  on('nut-lang-add', 'change', (e) => {
+    let code = e.target.value;
+    if (code === '__otro') code = (window.prompt('Código de idioma de 2 letras (el mismo que aparece en el nombre de la campaña, p. ej. nl):') || '').trim().toLowerCase();
+    if (!/^[a-z]{2}$/.test(code) || t.langOrder.includes(code)) { render(); return; }
+    t.langOrder.push(code); t.langs[code] = { headlines: '', descriptions: '' }; t.activeLang = code; nutResetRun(); render();
+  });
+  document.querySelectorAll('[data-nut-acc-var]').forEach((el) => el.addEventListener('input', (e) => {
+    const row = t.rows[el.dataset.nutAccVar]; row.vars[el.dataset.nutVarKey] = e.target.value;
+    if (t.check || t.run.applied || Object.keys(t.run.results).length) { nutResetRun(); render(); return; }
+    nutRefreshSoon();
+  }));
+  bindNutTargets();
+}
+
+// ---------------------------------------------------------------------------
+// Anuncios nuevos, modo «Activar o pausar por etiqueta»: lista los anuncios adaptables que llevan una etiqueta (los de una
+// tanda creada con «Por plantilla») y permite activarlos o pausarlos a mano, con vista previa (validación de Google sin
+// aplicar) antes de cambiar nada. El servidor vuelve a leer en vivo qué anuncios llevan la etiqueta y su estado; para
+// activar, el grupo y la campaña deben estar activos y ser Search, y el grupo no puede pasar de 3 anuncios adaptables activos.
+// ---------------------------------------------------------------------------
+const NUL_MAX_ENABLED_RSA = 3;
+
+function nulNewState() {
+  return { label: '', action: 'ENABLED', rows: {}, status: 'idle', readLabel: '', excluded: {}, check: null, run: { status: 'idle', error: null, results: {}, applied: false },
+    sched: { list: [], status: 'idle', error: null, date: '', time: '09:00', run: { status: 'idle', error: null, done: false }, open: {} } };
+}
+
+function nulState() {
+  const s = state.nuevosAnuncios;
+  if (!s.lab) s.lab = nulNewState();
+  return s.lab;
+}
+
+function nulResetRun() {
+  const l = nulState();
+  l.check = null; l.run = { status: 'idle', error: null, results: {}, applied: false };
+}
+
+function nulResetTargets() {
+  const l = nulState();
+  l.rows = {}; l.status = 'idle'; l.excluded = {}; nulResetRun();
+}
+
+function nulCleanLabel() { return nulState().label.replace(/\s+/g, ' ').trim(); }
+
+function nulSelectedRows() {
+  const s = state.nuevosAnuncios, l = nulState();
+  return s.selected.map((id) => l.rows[id]).filter(Boolean);
+}
+
+// Una fila por anuncio con la etiqueta: si se puede aplicar la acción elegida o por qué no.
+function nulCompute(accRow) {
+  const l = nulState();
+  if (!accRow || accRow.status !== 'ready') return [];
+  const planned = {};
+  return accRow.ads.map((a) => {
+    const key = `${accRow.id}:${a.ad_group_id}:${a.ad_id}`;
+    const row = { key, accId: accRow.id, adGroupId: a.ad_group_id, adId: a.ad_id, campaignName: a.campaign_name, groupName: a.ad_group_name, current: a.status, reason: '' };
+    if (l.action === 'ENABLED') {
+      if (a.status !== 'PAUSED') row.reason = 'Ya está activo';
+      else if (!a.active_context) row.reason = 'La campaña o el grupo no está activo (o no es Search)';
+      else if (!l.excluded[key]) {
+        if ((accRow.rsaEnabled[a.ad_group_id] || 0) + (planned[a.ad_group_id] || 0) >= NUL_MAX_ENABLED_RSA) row.reason = 'El grupo pasaría de 3 anuncios adaptables activos';
+        else planned[a.ad_group_id] = (planned[a.ad_group_id] || 0) + 1;
+      }
+    } else if (a.status !== 'ENABLED') row.reason = 'Ya está pausado';
+    return row;
+  });
+}
+
+function nulReadyRows() {
+  const l = nulState();
+  const out = [];
+  nulSelectedRows().forEach((a) => nulCompute(a).forEach((r) => { if (!r.reason && !l.excluded[r.key]) out.push(r); }));
+  return out;
+}
+
+function nulPayload(rows) {
+  const by = new Map();
+  rows.forEach((r) => { if (!by.has(r.accId)) by.set(r.accId, []); by.get(r.accId).push({ ad_group_id: r.adGroupId, ad_id: r.adId }); });
+  return [...by].map(([customer_id, ads]) => ({ customer_id, ads }));
+}
+
+function nulSignature(rows) {
+  const s = state.nuevosAnuncios, l = nulState();
+  return JSON.stringify({ m: s.mcc.selectedId, l: nulCleanLabel(), s: l.action, a: nulPayload(rows) });
+}
+
+function nulLimitsError(rows) {
+  const per = {};
+  rows.forEach((r) => { per[r.accId] = (per[r.accId] || 0) + 1; });
+  if (Object.values(per).some((n) => n > NUT_MAX_PER_ACCOUNT)) return `Máximo ${NUT_MAX_PER_ACCOUNT} anuncios por cuenta en cada tanda: desmarca anuncios o quita cuentas.`;
+  if (rows.length > NUT_MAX_TOTAL) return `Máximo ${NUT_MAX_TOTAL} anuncios por tanda: desmarca anuncios o quita cuentas.`;
+  return '';
+}
+
+function nulCanValidate() {
+  const l = nulState();
+  if (l.run.status === 'loading' || l.status !== 'ready' || l.readLabel !== nulCleanLabel()) return false;
+  const rows = nulReadyRows();
+  return rows.length > 0 && !nulLimitsError(rows);
+}
+
+function nulRead() {
+  const s = state.nuevosAnuncios, l = nulState();
+  if (!s.selected.length || !nutLabelValid(l.label)) return;
+  const label = nulCleanLabel();
+  l.status = 'loading'; l.readLabel = label; l.excluded = {}; nulResetRun();
+  l.rows = {};
+  s.selected.forEach((id) => {
+    const acc = s.accounts.find((a) => a.id === id);
+    l.rows[id] = { id, name: acc ? acc.name : id, status: 'loading', error: null, ads: [], rsaEnabled: {} };
+  });
+  render();
+  const queue = s.selected.slice();
+  const worker = () => {
+    const id = queue.shift();
+    if (!id) return Promise.resolve();
+    const row = l.rows[id];
+    return fetch(`/api/google-ads/label-ads?customer_id=${encodeURIComponent(id)}&label=${encodeURIComponent(label)}`)
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Error desconocido.');
+        if (data.simulated) s.simulated = true;
+        row.ads = data.ads || []; row.rsaEnabled = data.rsa_enabled || {}; row.status = 'ready';
+      })
+      .catch((err) => { row.status = 'error'; row.error = err.message || String(err); })
+      .then(() => worker());
+  };
+  Promise.all([worker(), worker(), worker(), worker()]).then(() => {
+    if (nulState() !== l) return;
+    l.status = 'ready'; render();
+  });
+}
+
+function nulSubmit(validateOnly) {
+  const s = state.nuevosAnuncios, l = nulState();
+  let rows = nulReadyRows();
+  if (!validateOnly) {
+    if (!l.check) return;
+    rows = rows.filter((r) => l.check.okKeys.includes(r.key));
+    if (!rows.length || l.check.signature !== nulSignature(rows)) return;
+    const accounts = new Set(rows.map((r) => r.accId)).size;
+    const verb = l.action === 'ENABLED' ? 'activarán' : 'pausarán';
+    if (!window.confirm(`Se ${verb} ${rows.length} anuncios con la etiqueta «${nulCleanLabel()}» en ${accounts} cuentas del MCC «${s.mcc.selectedName}». ¿Continuar?`)) return;
+  }
+  const limitErr = nulLimitsError(rows);
+  if (limitErr) { l.run = { status: 'error', error: limitErr, results: {}, applied: false }; render(); return; }
+  if (!rows.length) return;
+  const accounts = nulPayload(rows);
+  l.run = { status: 'loading', error: null, results: {}, applied: false };
+  render();
+  fetch('/api/google-ads/label-ads-status', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ validate_only: validateOnly, mcc_id: s.mcc.selectedId, label: nulCleanLabel(), status: l.action, accounts }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      if (data.simulated) s.simulated = true;
+      const results = {};
+      (data.results || []).forEach((res, i) => {
+        const sent = accounts[i];
+        (sent ? sent.ads : []).forEach((ad, j) => {
+          const key = `${sent.customer_id}:${ad.ad_group_id}:${ad.ad_id}`;
+          results[key] = res.ok ? ((res.items || [])[j] || { ok: false, error: 'Sin respuesta.' }) : { ok: false, error: res.error || 'Error' };
+        });
+      });
+      l.run = { status: 'ready', error: null, results, applied: !validateOnly };
+      if (validateOnly) {
+        const okKeys = rows.filter((r) => results[r.key] && results[r.key].ok).map((r) => r.key);
+        l.check = okKeys.length ? { signature: nulSignature(rows.filter((r) => okKeys.includes(r.key))), okKeys } : null;
+      } else {
+        l.check = null;
+        // Refleja en la tabla el estado nuevo de lo que sí se cambió.
+        rows.forEach((r) => {
+          if (results[r.key] && results[r.key].ok) {
+            const acc = l.rows[r.accId];
+            const ad = acc && acc.ads.find((x) => x.ad_group_id === r.adGroupId && x.ad_id === r.adId);
+            if (ad) {
+              ad.status = l.action;
+              acc.rsaEnabled[r.adGroupId] = Math.max(0, (acc.rsaEnabled[r.adGroupId] || 0) + (l.action === 'ENABLED' ? 1 : -1));
+            }
+          }
+        });
+      }
+      render();
+    })
+    .catch((err) => { l.run = { status: 'error', error: err.message || String(err), results: {}, applied: false }; render(); });
+}
+
+function nulNewBatch() {
+  const s = state.nuevosAnuncios;
+  s.selected = []; nulResetTargets(); nutResetTargets();
+  render();
+}
+
+function nulStatusLabel(status) {
+  return status === 'ENABLED' ? 'Activo' : status === 'PAUSED' ? 'Pausado' : status;
+}
+
+function nulResultCell(row) {
+  const l = nulState();
+  const r = l.run.results[row.key];
+  if (!r) return '';
+  if (!r.ok) return `<span style="color:var(--color-danger,#b3261e)">✕ ${escapeHtml(r.error || 'Error')}</span>`;
+  if (!l.run.applied) return '<span style="color:var(--color-success,#1d6b41);font-weight:700">✓ Google lo validó</span>';
+  return `<span style="color:var(--color-success,#1d6b41);font-weight:700">${l.action === 'ENABLED' ? '✓ Activado' : '✓ Pausado'}</span>`;
+}
+
+function nulAccountBody(accRow) {
+  const l = nulState();
+  if (accRow.status === 'loading') return '<p class="footnote">Leyendo los anuncios con la etiqueta…</p>';
+  if (accRow.status === 'error') return `<p style="color:var(--color-danger,#b3261e);margin:6px 0">${escapeHtml(accRow.error)}</p>`;
+  const rows = nulCompute(accRow);
+  if (!rows.length) return '<p class="footnote">Ningún anuncio de esta cuenta lleva esa etiqueta.</p>';
+  const ready = rows.filter((r) => !r.reason);
+  const marked = ready.filter((r) => !l.excluded[r.key]).length;
+  const trs = rows.map((r) => `<tr>
+      <td style="width:28px"><input type="checkbox" data-nul-inc="${escapeHtml(r.key)}" ${!r.reason && !l.excluded[r.key] ? 'checked' : ''} ${r.reason ? 'disabled' : ''} /></td>
+      <td>${escapeHtml(r.campaignName)}</td><td>${escapeHtml(r.groupName)}</td>
+      <td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(r.adId)}</td>
+      <td>${escapeHtml(nulStatusLabel(r.current))}</td>
+      <td>${r.reason ? `<span class="field-hint">${escapeHtml(r.reason)}</span>` : ''}</td>
+      <td>${nulResultCell(r)}</td>
+    </tr>`).join('');
+  return `
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:4px 0 6px">
+      <span class="field-hint">${marked} marcados de ${ready.length} aplicables · ${rows.length - ready.length} no aplicables</span>
+      <button class="btn-outline xs" data-nul-all="${escapeHtml(accRow.id)}">Marcar todos</button>
+      <button class="btn-outline xs" data-nul-none="${escapeHtml(accRow.id)}">Quitar todos</button>
+    </div>
+    <div class="table-scroll" style="max-height:300px"><table>
+      <thead><tr><th></th><th>Campaña</th><th>Grupo de anuncios</th><th>ID del anuncio</th><th>Estado actual</th><th>Motivo</th><th>Resultado</th></tr></thead>
+      <tbody>${trs}</tbody>
+    </table></div>`;
+}
+
+function renderNulStepLabel() {
+  const l = nulState();
+  return `
+    <div class="card" style="margin-bottom:16px">
+      <h3 style="margin:0 0 10px;font-size:14px">2. Etiqueta y acción</h3>
+      <div style="display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap">
+        <div class="field"><label>Etiqueta de la tanda</label><input type="text" id="nul-label" value="${escapeHtml(l.label)}" style="width:220px" maxlength="80" placeholder="ej. BF2026" autocomplete="off" /></div>
+        <div class="field"><label>Qué hacer con los anuncios de la etiqueta</label>
+          <select id="nul-action"><option value="ENABLED" ${l.action === 'ENABLED' ? 'selected' : ''}>Activar los anuncios pausados</option><option value="PAUSED" ${l.action === 'PAUSED' ? 'selected' : ''}>Pausar los anuncios activos</option></select></div>
+      </div>
+      <p class="field-hint" style="margin:8px 0 0">Solo se tocan los anuncios adaptables que llevan esa etiqueta (los creados con «Por plantilla»). Activar exige que la campaña y el grupo estén activos y que el grupo no pase de 3 anuncios adaptables activos. Primero se valida con Google sin cambiar nada.</p>
+      <p id="nul-label-hint" class="field-hint" style="margin-top:8px;color:var(--color-danger,#b3261e)">${nutLabelValid(l.label) ? '' : 'Escribe la etiqueta (hasta 80 caracteres: letras, números, espacios, guion y guion bajo).'}</p>
+    </div>`;
+}
+
+function renderNulStepRows() {
+  const l = nulState();
+  const prepared = Object.keys(l.rows).length > 0;
+  const okKeys = l.check ? l.check.okKeys : [];
+  const verbBtn = l.action === 'ENABLED' ? 'Activar' : 'Pausar';
+  const accounts = nulSelectedRows();
+  const body = prepared ? `
+      ${accounts.map((a) => `
+        <div style="border-top:1px solid var(--color-border,#ddd);padding-top:10px;margin-top:10px">
+          <strong>${escapeHtml(a.name)}</strong> <span class="field-hint" style="font-family:ui-monospace,monospace">${escapeHtml(a.id)}</span>
+          <div id="nul-acc-body-${escapeHtml(a.id)}">${nulAccountBody(a)}</div>
+        </div>`).join('')}
+      ${l.run.status === 'error' ? `<div class="error-panel" style="margin-top:12px">${escapeHtml(l.run.error)}</div>` : ''}
+      ${l.run.status === 'loading' ? '<div class="state-panel loading" style="margin-top:12px"><div class="spinner"></div><p>Trabajando con Google Ads…</p></div>' : ''}
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px">
+        <button class="btn-outline" id="nul-validate" data-action="nul-validate" ${nulCanValidate() ? '' : 'disabled'}>Validar con Google (sin cambiar nada)</button>
+        <button class="btn-accent" id="nul-apply" data-action="nul-apply" ${l.run.status === 'loading' || !l.check || !okKeys.length ? 'disabled' : ''}>${l.check ? `${verbBtn} ${okKeys.length} anuncio${okKeys.length === 1 ? '' : 's'}` : `${verbBtn} los anuncios`}</button>
+        ${l.run.applied ? '<button class="btn-outline" data-action="nul-new-batch">Empezar de nuevo</button>' : ''}
+        <span id="nul-summary" class="field-hint">${nulReadyRows().length} anuncios aplicables</span>
+        ${l.status === 'ready' && l.readLabel !== nulCleanLabel() ? '<span style="color:var(--color-danger,#b3261e)">La etiqueta cambió: lee de nuevo los anuncios.</span>' : ''}
+      </div>
+      <p class="field-hint" style="margin-top:8px">${l.run.applied ? 'Cambio aplicado. Cada anuncio cambiado queda registrado.' : 'El botón de aplicar se habilita solo con lo que Google validó y se bloquea si cambias la etiqueta, la acción o las marcas.'}</p>` : '';
+  return `
+    <div class="card" style="margin-bottom:16px">
+      <h3 style="margin:0 0 10px;font-size:14px">3. Anuncios con la etiqueta</h3>
+      ${l.status === 'loading' ? '<p class="footnote">Leyendo los anuncios de cada cuenta…</p>' : ''}
+      <button class="btn-accent" id="nul-read" data-action="nul-read" ${l.status === 'loading' || !nutLabelValid(l.label) ? 'disabled' : ''}>${prepared ? 'Leer de nuevo los anuncios' : 'Leer los anuncios con la etiqueta'}</button>
+      ${body}
+    </div>`;
+}
+
+function nulSyncButtons() {
+  const l = nulState();
+  const hint = document.getElementById('nul-label-hint');
+  if (hint) hint.textContent = nutLabelValid(l.label) ? '' : 'Escribe la etiqueta (hasta 80 caracteres: letras, números, espacios, guion y guion bajo).';
+  const r = document.getElementById('nul-read');
+  if (r) r.disabled = l.status === 'loading' || !nutLabelValid(l.label);
+  const v = document.getElementById('nul-validate');
+  if (v) v.disabled = !nulCanValidate();
+  const sb = document.getElementById('nul-sched-create');
+  if (sb) sb.disabled = !nulSchedCanCreate();
+}
+
+function bindNulabel() {
+  const l = nulState();
+  const on = (id, ev, fn) => { const el = document.getElementById(id); if (el) el.addEventListener(ev, fn); };
+  on('nul-label', 'input', (e) => { l.label = e.target.value; nulResetRun(); nulSyncButtons(); });
+  on('nul-action', 'change', (e) => { l.action = e.target.value; nulResetRun(); render(); });
+  document.querySelectorAll('[data-nul-inc]').forEach((el) => el.addEventListener('change', () => { if (el.checked) delete l.excluded[el.dataset.nulInc]; else l.excluded[el.dataset.nulInc] = true; nulResetRun(); render(); }));
+  document.querySelectorAll('[data-nul-all]').forEach((el) => el.addEventListener('click', () => { nulCompute(l.rows[el.dataset.nulAll]).forEach((r) => { delete l.excluded[r.key]; }); nulResetRun(); render(); }));
+  document.querySelectorAll('[data-nul-none]').forEach((el) => el.addEventListener('click', () => { nulCompute(l.rows[el.dataset.nulNone]).forEach((r) => { if (!r.reason) l.excluded[r.key] = true; }); nulResetRun(); render(); }));
+  const syncSched = () => { const b = document.getElementById('nul-sched-create'); if (b) b.disabled = !nulSchedCanCreate(); };
+  on('nul-sched-date', 'input', (e) => { l.sched.date = e.target.value; l.sched.run = { status: 'idle', error: null, done: false }; syncSched(); });
+  on('nul-sched-time', 'input', (e) => { l.sched.time = e.target.value; l.sched.run = { status: 'idle', error: null, done: false }; syncSched(); });
+  document.querySelectorAll('[data-nul-sched-toggle]').forEach((el) => el.addEventListener('click', () => { const id = el.dataset.nulSchedToggle; l.sched.open[id] = !l.sched.open[id]; render(); }));
+  document.querySelectorAll('[data-nul-sched-cancel]').forEach((el) => el.addEventListener('click', () => nulSchedCancel(Number(el.dataset.nulSchedCancel))));
+}
+
+// Programar la activación o la pausa por etiqueta: el servidor (una tarea de fondo) lo ejecuta a la hora local de cada cuenta,
+// vuelve a validar con Google justo antes de aplicar y solo cambia lo que en ese momento sea aplicable.
+function nulSchedAccounts() {
+  return nulSelectedRows().filter((a) => a.status === 'ready' && a.ads.length > 0).map((a) => ({ id: a.id, name: a.name }));
+}
+
+function nulSchedTimeOk() {
+  const sc = nulState().sched;
+  return /^\d{4}-\d{2}-\d{2}$/.test(sc.date) && /^\d{2}:\d{2}$/.test(sc.time);
+}
+
+function nulSchedCanCreate() {
+  const l = nulState();
+  return l.status === 'ready' && l.readLabel === nulCleanLabel() && nutLabelValid(l.label) && nulSchedAccounts().length > 0
+    && nulSchedTimeOk() && l.sched.run.status !== 'loading';
+}
+
+function nulSchedLoad() {
+  const sc = nulState().sched;
+  sc.status = 'loading'; sc.error = null;
+  fetch('/api/ad-schedules')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      sc.list = data.schedules || []; sc.status = 'ready';
+    })
+    .catch((err) => { sc.status = 'error'; sc.error = err.message || String(err); })
+    .then(() => { if (state.nuevosAnuncios.mode === 'etiqueta') render(); });
+}
+
+function nulSchedCreate() {
+  const s = state.nuevosAnuncios, l = nulState(), sc = l.sched;
+  if (!nulSchedCanCreate()) return;
+  const accounts = nulSchedAccounts();
+  const label = nulCleanLabel();
+  const when = `${sc.date} ${sc.time}`;
+  const msg = l.action === 'ENABLED'
+    ? `Se programará la activación de los anuncios con la etiqueta «${label}» en ${accounts.length} cuentas del MCC «${s.mcc.selectedName}» para el ${when} (hora de cada cuenta). ¿Continuar?`
+    : `Se programará la pausa de los anuncios con la etiqueta «${label}» en ${accounts.length} cuentas del MCC «${s.mcc.selectedName}» para el ${when} (hora de cada cuenta). ¿Continuar?`;
+  if (!window.confirm(msg)) return;
+  sc.run = { status: 'loading', error: null, done: false };
+  render();
+  fetch('/api/ad-schedules', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mcc_id: s.mcc.selectedId, mcc_name: s.mcc.selectedName, label, action: l.action, run_date: sc.date, run_time: sc.time, accounts }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      if (data.simulated) s.simulated = true;
+      sc.list = data.schedules || sc.list; sc.status = 'ready';
+      sc.run = { status: 'ready', error: null, done: true };
+      render();
+    })
+    .catch((err) => { sc.run = { status: 'error', error: err.message || String(err), done: false }; render(); });
+}
+
+function nulSchedCancel(id) {
+  const sc = nulState().sched;
+  if (!window.confirm('Se cancelará esta programación y no se cambiará ningún anuncio. ¿Continuar?')) return;
+  fetch('/api/ad-schedules/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      sc.list = data.schedules || sc.list; sc.error = null; render();
+    })
+    .catch((err) => { sc.error = err.message || String(err); nulSchedLoad(); });
+}
+
+function nulSchedStatusLabel(st) {
+  return { pending: 'Pendiente', in_progress: 'En curso', finished: 'Terminada', finished_with_errors: 'Terminada con avisos', cancelled: 'Cancelada' }[st] || st;
+}
+
+function nulSchedRunLabel(st) {
+  return { pending: 'Pendiente', running: 'Ejecutando', done: 'Hecho', error: 'Con error', missed: 'No se ejecutó' }[st] || st;
+}
+
+function nulSchedRunDetail(a) {
+  const dot = '<span class="field-hint"> · </span>';
+  const msg = a.message ? `${dot}<span>${escapeHtml(a.message)}</span>` : '';
+  if (a.status === 'done') return `${dot}<span>${a.ok}</span> <span>cambiados</span>${dot}<span>${a.skipped}</span> <span>omitidos</span>${dot}<span>${a.failed}</span> <span>con error</span>${msg}`;
+  if (a.status === 'error') return `${msg}${a.terminal ? '' : `${dot}<span>Se reintentará.</span>`}`;
+  return msg;
+}
+
+function renderNulSchedForm() {
+  const l = nulState(), sc = l.sched;
+  const today = new Date(); const pad = (n) => String(n).padStart(2, '0');
+  const minDate = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+  const accounts = nulSchedAccounts();
+  return `
+    <div class="card" style="margin-bottom:16px">
+      <h3 style="margin:0 0 10px;font-size:14px">4. Programar para más tarde (opcional)</h3>
+      <div style="display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap">
+        <div class="field"><label>Fecha</label><input type="date" id="nul-sched-date" value="${escapeHtml(sc.date)}" min="${minDate}" /></div>
+        <div class="field"><label>Hora (la de cada cuenta)</label><input type="time" id="nul-sched-time" value="${escapeHtml(sc.time)}" /></div>
+        <button class="btn-accent" id="nul-sched-create" data-action="nul-sched-create" ${nulSchedCanCreate() ? '' : 'disabled'}>${l.action === 'ENABLED' ? 'Programar la activación' : 'Programar la pausa'}</button>
+      </div>
+      <p class="field-hint" style="margin:8px 0 0">Cuentas con anuncios con esa etiqueta que se programarán: ${accounts.length}.</p>
+      <p class="field-hint" style="margin:4px 0 0">La hora es la de la zona horaria de cada cuenta en Google Ads. Al llegar la hora el servidor vuelve a validar con Google y solo cambia lo que en ese momento sea aplicable (no usa las marcas de arriba). Si el servidor no puede hacerlo a tiempo, lo reintenta hasta 6 horas después; pasado ese margen no se ejecuta. No se puede validar de antemano lo que pasará ese día.</p>
+      ${sc.run.status === 'error' ? `<div class="error-panel" style="margin-top:10px">${escapeHtml(sc.run.error)}</div>` : ''}
+      ${sc.run.status === 'loading' ? '<p class="footnote">Guardando la programación…</p>' : ''}
+      ${sc.run.done ? '<p class="field-hint" style="margin-top:10px;color:var(--color-success,#1d6b41);font-weight:700">Programación guardada. Puedes verla abajo.</p>' : ''}
+    </div>`;
+}
+
+function renderNulSchedList() {
+  const sc = nulState().sched;
+  const rows = sc.list.map((x) => {
+    const open = !!sc.open[x.id];
+    const detail = open ? `<tr><td colspan="8" style="background:var(--color-surface-2,#f6f6f6)">${x.accounts.map((a) => `<div style="margin:3px 0"><strong>${escapeHtml(a.name)}</strong> <span class="field-hint" style="font-family:ui-monospace,monospace">${escapeHtml(a.id)}</span><span class="field-hint"> · </span><span class="field-hint">${escapeHtml(a.tz || '')}</span><span class="field-hint"> · </span><span>${escapeHtml(nulSchedRunLabel(a.status))}</span>${a.status === 'pending' ? '' : nulSchedRunDetail(a)}</div>`).join('')}</td></tr>` : '';
+    return `<tr>
+      <td>${x.id}</td>
+      <td>${x.action === 'ENABLED' ? 'Activar' : 'Pausar'}</td>
+      <td>${escapeHtml(x.label)}</td>
+      <td>${escapeHtml(x.mcc_name || x.mcc_id)}</td>
+      <td>${escapeHtml(x.run_date)} ${escapeHtml(x.run_time)}</td>
+      <td>${x.accounts.length}</td>
+      <td><strong>${escapeHtml(nulSchedStatusLabel(x.status))}</strong></td>
+      <td><button class="btn-outline xs" data-nul-sched-toggle="${x.id}">${open ? 'Ocultar' : 'Detalle'}</button>
+        ${x.status === 'pending' ? ` <button class="btn-outline xs" data-nul-sched-cancel="${x.id}">Cancelar</button>` : ''}</td>
+    </tr>${detail}`;
+  }).join('');
+  return `
+    <div class="card" style="margin-bottom:16px">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+        <h3 style="margin:0;font-size:14px">Programaciones</h3>
+        <button class="btn-outline xs" data-action="nul-sched-reload" ${sc.status === 'loading' ? 'disabled' : ''}>Actualizar</button>
+      </div>
+      ${sc.status === 'loading' && !sc.list.length ? '<p class="footnote">Cargando las programaciones…</p>' : ''}
+      ${sc.error ? `<div class="error-panel" style="margin-bottom:8px">${escapeHtml(sc.error)}</div>` : ''}
+      ${sc.status !== 'loading' && !sc.error && !sc.list.length ? '<p class="footnote">Todavía no hay programaciones.</p>' : ''}
+      ${sc.list.length ? `<div class="table-scroll" style="max-height:420px"><table>
+        <thead><tr><th>N.º</th><th>Acción</th><th>Etiqueta</th><th>MCC</th><th>Fecha y hora (de cada cuenta)</th><th>Cuentas</th><th>Estado</th><th></th></tr></thead>
+        <tbody>${rows}</tbody></table></div>` : ''}
+    </div>`;
+}
+
+// ---------------------------------------------------------------------------
 // Audiencias (solo lectura; solo super admin mientras se afina). Tres pestañas
 // sobre una cuenta de la lista de Ritmo de consumo: Resumen (inventario de
 // listas), Dónde se usan (mapa audiencia × campaña) y Rendimiento (CPA % por
@@ -16924,6 +18420,8 @@ function bindEvents() {
   });
   camOn('cf-search', 'input', (e) => { state.cambios.filters.search = e.target.value; state.cambios.limit = CAMBIOS_PAGE_SIZE; render(); hotelRefocus('cf-search'); });
 
+  // Anuncios nuevos
+  if (state.page === 'anuncios') bindNuevosAnuncios();
   // Audiencias
   document.querySelectorAll('[data-aud-tab]').forEach((el) => el.addEventListener('click', () => { state.audiencias.tab = el.dataset.audTab; render(); }));
   camOn('aud-account', 'change', (e) => { state.audiencias.accountId = e.target.value; });
@@ -17979,6 +19477,31 @@ function handleAction(action) {
     case 'camp-detail-html': downloadCampanaDetailHtml(); break;
     case 'camp-go-pacing': state.page = 'pacing'; render(); break;
     case 'cambios-load': loadCambios(); break;
+    case 'nua-mcc-load': nuaLoadMccGroups(); break;
+    case 'nua-mcc-clear': nuaClearMcc(); break;
+    case 'nua-acc-all': nuaSelectAccounts(true); break;
+    case 'nua-acc-none': nuaSelectAccounts(false); break;
+    case 'nua-add-head': nuaAddText('headlines'); break;
+    case 'nua-add-desc': nuaAddText('descriptions'); break;
+    case 'nua-prepare': nuaPrepareTargets(); break;
+    case 'nua-suggest': nuaSuggestByName(); break;
+    case 'nua-validate': nuaSubmit(true); break;
+    case 'nua-create': nuaSubmit(false); break;
+    case 'nua-new-batch': nuaNewBatch(); break;
+    case 'nul-read': nulRead(); break;
+    case 'nul-validate': nulSubmit(true); break;
+    case 'nul-apply': nulSubmit(false); break;
+    case 'nul-new-batch': nulNewBatch(); break;
+    case 'nul-sched-create': nulSchedCreate(); break;
+    case 'nul-sched-reload': nulSchedLoad(); break;
+    case 'nut-prepare': nutPrepareTargets(); break;
+    case 'nut-validate': nutSubmit(true); break;
+    case 'nut-create': nutSubmit(false); break;
+    case 'nut-new-batch': nutNewBatch(); break;
+    case 'nut-save': nutSaveTemplate(); break;
+    case 'nut-delete': nutDeleteTemplate(); break;
+    case 'nut-add-var': nutState().variables.push({ key: '', value: '' }); nutResetRun(); render(); break;
+    case 'nut-del-lang': { const t = nutState(); t.langOrder = t.langOrder.filter((l) => l !== t.activeLang); delete t.langs[t.activeLang]; t.activeLang = t.langOrder[0]; nutResetRun(); render(); break; }
     case 'aud-load': loadAudiencias(); break;
     case 'aud-more-lists': state.audiencias.listLimit += AUD_PAGE_SIZE; render(); break;
     case 'aud-more-uso': state.audiencias.usoLimit += 40; render(); break;
@@ -18539,6 +20062,8 @@ fetch('/api/me').then((r) => r.json()).then((data) => {
   if (navCampanas) navCampanas.style.display = ''; // abierta a todos desde 2026-11-18
   const navAudiencias = document.getElementById('nav-audiencias');
   if (navAudiencias && currentUser.isSuperAdmin) navAudiencias.style.display = '';
+  const navAnuncios = document.getElementById('nav-anuncios');
+  if (navAnuncios && currentUser.isSuperAdmin) navAnuncios.style.display = '';
   const navCambios = document.getElementById('nav-cambios');
   if (navCambios) navCambios.style.display = '';
   const navHoteles = document.getElementById('nav-hoteles');
