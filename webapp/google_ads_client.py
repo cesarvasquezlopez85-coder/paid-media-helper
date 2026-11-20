@@ -1980,14 +1980,21 @@ RSA_DESCRIPTIONS_RANGE = (2, 4)
 AD_FINAL_URL_MAX = 2000
 
 
-def clean_rsa_texts(headlines, descriptions, path1="", path2=""):
-    """Valida y limpia los textos de un anuncio adaptable. Devuelve (títulos, descripciones, ruta1, ruta2) o lanza
-    ValueError con un mensaje en español."""
-    def _clean(items, kind, one, maxlen, rng):
+# Posiciones que se pueden fijar (pin) en un anuncio adaptable: título 1 o 2 y descripción 1 o 2. 0 = sin fijar.
+RSA_PIN_FIELDS = {"headlines": {1: "HEADLINE_1", 2: "HEADLINE_2"}, "descriptions": {1: "DESCRIPTION_1", 2: "DESCRIPTION_2"}}
+
+
+def clean_rsa_texts_with_pins(headlines, descriptions, path1="", path2="", head_pins=None, desc_pins=None):
+    """Valida y limpia los textos de un anuncio adaptable y sus posiciones fijadas. `head_pins` y `desc_pins` van alineadas
+    con las listas recibidas (0, vacío o None = sin fijar; 1 o 2 = esa posición). Devuelve (títulos, descripciones, ruta1,
+    ruta2, pines de títulos, pines de descripciones) o lanza ValueError con un mensaje en español."""
+    def _clean(items, pins, kind, one, maxlen, rng, fields):
         if not isinstance(items, list):
             raise ValueError(f"Faltan los {kind}.")
-        out, seen = [], set()
-        for raw in items:
+        if pins is not None and (not isinstance(pins, list) or len(pins) > len(items)):
+            raise ValueError("Las posiciones fijadas no coinciden con los textos.")
+        out, out_pins, seen = [], [], set()
+        for idx, raw in enumerate(items):
             text = " ".join(str(raw or "").split())
             if not text:
                 continue
@@ -1999,13 +2006,21 @@ def clean_rsa_texts(headlines, descriptions, path1="", path2=""):
             if key in seen:
                 raise ValueError(f"Hay {one[0].lower()}{one[1]} repetid{one[2]}: «{text[:40]}».")
             seen.add(key)
+            pin = pins[idx] if pins is not None and idx < len(pins) else 0
+            if pin in (None, "", False):
+                pin = 0
+            if isinstance(pin, str) and pin.isdigit():
+                pin = int(pin)
+            if pin != 0 and (isinstance(pin, bool) or pin not in fields):
+                raise ValueError(f"La posición fijada de un texto de {kind} debe ser 1 o 2.")
             out.append(text)
+            out_pins.append(int(pin))
         if len(out) < rng[0] or len(out) > rng[1]:
             raise ValueError(f"Se necesitan entre {rng[0]} y {rng[1]} {kind} (hay {len(out)}).")
-        return out
+        return out, out_pins
 
-    heads = _clean(headlines, "títulos", ("Un ", "título", "o"), RSA_HEADLINE_MAX, RSA_HEADLINES_RANGE)
-    descs = _clean(descriptions, "descripciones", ("Una ", "descripción", "a"), RSA_DESCRIPTION_MAX, RSA_DESCRIPTIONS_RANGE)
+    heads, hpins = _clean(headlines, head_pins, "títulos", ("Un ", "título", "o"), RSA_HEADLINE_MAX, RSA_HEADLINES_RANGE, RSA_PIN_FIELDS["headlines"])
+    descs, dpins = _clean(descriptions, desc_pins, "descripciones", ("Una ", "descripción", "a"), RSA_DESCRIPTION_MAX, RSA_DESCRIPTIONS_RANGE, RSA_PIN_FIELDS["descriptions"])
     paths = []
     for raw in (path1, path2):
         text = str(raw or "").strip()
@@ -2014,7 +2029,26 @@ def clean_rsa_texts(headlines, descriptions, path1="", path2=""):
         paths.append(text)
     if paths[1] and not paths[0]:
         raise ValueError("La segunda ruta visible necesita la primera.")
-    return heads, descs, paths[0], paths[1]
+    return heads, descs, paths[0], paths[1], hpins, dpins
+
+
+def clean_rsa_texts(headlines, descriptions, path1="", path2=""):
+    """Valida y limpia los textos de un anuncio adaptable (sin posiciones fijadas). Devuelve (títulos, descripciones,
+    ruta1, ruta2) o lanza ValueError con un mensaje en español."""
+    return clean_rsa_texts_with_pins(headlines, descriptions, path1, path2)[:4]
+
+
+def _rsa_assets(texts, pins, kind):
+    """Textos como assets de la API; los fijados llevan pinnedField (HEADLINE_1, DESCRIPTION_2…)."""
+    fields = RSA_PIN_FIELDS[kind]
+    out = []
+    for i, t in enumerate(texts):
+        asset = {"text": t}
+        pin = pins[i] if pins and i < len(pins) else 0
+        if pin in fields:
+            asset["pinnedField"] = fields[pin]
+        out.append(asset)
+    return out
 
 
 def normalize_final_url(url):
@@ -2130,9 +2164,9 @@ def _build_ad_targets(structure, cost_by_group, url_by_group, url_overall):
     }
 
 
-def _create_rsa(customer_id, ad_group_id, heads, descs, path1, path2, final_url, validate_only):
+def _create_rsa(customer_id, ad_group_id, heads, descs, path1, path2, final_url, validate_only, head_pins=None, desc_pins=None):
     url = f"{BASE_URL}/customers/{customer_id}/adGroupAds:mutate"
-    rsa = {"headlines": [{"text": t} for t in heads], "descriptions": [{"text": t} for t in descs]}
+    rsa = {"headlines": _rsa_assets(heads, head_pins, "headlines"), "descriptions": _rsa_assets(descs, desc_pins, "descriptions")}
     if path1:
         rsa["path1"] = path1
     if path2:
@@ -2165,7 +2199,7 @@ def _check_ad_url_rule(final_url, reference_urls, url_confirmed):
 
 
 def create_responsive_search_ad(customer_id, ad_group_id, headlines, descriptions, path1, path2, final_url,
-                                url_confirmed=False, validate_only=True):
+                                url_confirmed=False, validate_only=True, head_pins=None, desc_pins=None):
     """Crea (o solo valida, con validate_only=True) un anuncio de búsqueda adaptable PAUSADO en un grupo de anuncios.
     Relee en vivo el grupo y su campaña y exige que sean Search y estén activos; la URL debe ser del dominio que ya
     usa la cuenta. Los textos ya deben venir limpios (clean_rsa_texts)."""
@@ -2186,7 +2220,7 @@ def create_responsive_search_ad(customer_id, ad_group_id, headlines, description
         raise ValueError("La campaña y el grupo de anuncios deben estar activos.")
     _, overall = _search_ads_final_urls(customer_id)
     known = _check_ad_url_rule(final_url, list(overall), url_confirmed)
-    resource = _create_rsa(customer_id, ad_group_id, headlines, descriptions, path1, path2, final_url, validate_only)
+    resource = _create_rsa(customer_id, ad_group_id, headlines, descriptions, path1, path2, final_url, validate_only, head_pins, desc_pins)
     return {
         "validate_only": validate_only, "applied": not validate_only, "campaign_id": str(c.get("id")),
         "campaign_name": c.get("name") or "", "ad_group_name": g.get("name") or "", "resource_name": resource,
@@ -2306,8 +2340,8 @@ def _mutate_rsa_batch(customer_id, ads, validate_only):
             "adGroup": f"customers/{customer_id}/adGroups/{a['ad_group_id']}",
             "status": "PAUSED",
             "ad": {"finalUrls": [a["final_url"]], "responsiveSearchAd": {
-                "headlines": [{"text": t} for t in a["headlines"]],
-                "descriptions": [{"text": t} for t in a["descriptions"]],
+                "headlines": _rsa_assets(a["headlines"], a.get("head_pins"), "headlines"),
+                "descriptions": _rsa_assets(a["descriptions"], a.get("desc_pins"), "descriptions"),
             }},
         }} for a in chunk]
         try:
@@ -4159,7 +4193,7 @@ def simulated_ad_targets(customer_id):
 
 
 def simulated_create_responsive_search_ad(customer_id, ad_group_id, headlines, descriptions, path1, path2, final_url,
-                                          url_confirmed=False, validate_only=True):
+                                          url_confirmed=False, validate_only=True, head_pins=None, desc_pins=None):
     """Misma validación que create_responsive_search_ad, sin tocar Google: sirve para probar el flujo en modo simulado."""
     if not str(ad_group_id).isdigit():
         raise ValueError("Falta o es inválido el grupo de anuncios.")

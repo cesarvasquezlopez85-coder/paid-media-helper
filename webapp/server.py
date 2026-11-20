@@ -523,6 +523,12 @@ def init_db():
             )
             """
         )
+        # Posiciones fijadas (pin) de cada anuncio creado, como JSON {"h": [0, 1, ...], "d": [...]}; las bases que ya
+        # existían (producción) necesitan la migración explícita.
+        try:
+            conn.execute("ALTER TABLE ad_creation_log ADD COLUMN pins TEXT")
+        except sqlite3.OperationalError:
+            pass  # ya existe, de un arranque anterior
         # Activar o pausar anuncios por etiqueta (Anuncios nuevos): una fila por anuncio cambiado.
         conn.execute(
             """
@@ -777,15 +783,22 @@ def store_campaign_status_change(user_id, customer_id, campaign_id, campaign_nam
         conn.close()
 
 
-def store_ad_creation(user_id, customer_id, result, ad_group_id, final_url, headlines, descriptions):
+def _pins_json(head_pins, desc_pins):
+    """JSON de las posiciones fijadas, o None si el anuncio no fija ninguna."""
+    if any(head_pins or []) or any(desc_pins or []):
+        return json.dumps({"h": list(head_pins or []), "d": list(desc_pins or [])})
+    return None
+
+
+def store_ad_creation(user_id, customer_id, result, ad_group_id, final_url, headlines, descriptions, head_pins=None, desc_pins=None):
     conn = get_db()
     try:
         conn.execute(
             "INSERT INTO ad_creation_log (created_at, user_id, customer_id, campaign_id, campaign_name, ad_group_id, "
-            "ad_group_name, ad_id, final_url, headlines, descriptions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "ad_group_name, ad_id, final_url, headlines, descriptions, pins) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (time.time(), user_id, str(customer_id), str(result.get("campaign_id") or ""), (result.get("campaign_name") or "")[:200],
              str(ad_group_id), (result.get("ad_group_name") or "")[:200], str(result.get("ad_id") or ""), (final_url or "")[:2000],
-             json.dumps(headlines, ensure_ascii=False), json.dumps(descriptions, ensure_ascii=False)),
+             json.dumps(headlines, ensure_ascii=False), json.dumps(descriptions, ensure_ascii=False), _pins_json(head_pins, desc_pins)),
         )
         conn.commit()
     finally:
@@ -799,11 +812,11 @@ def store_ad_creation_bulk(user_id, customer_id, rows, label):
         now = time.time()
         conn.executemany(
             "INSERT INTO ad_creation_log (created_at, user_id, customer_id, campaign_id, campaign_name, ad_group_id, "
-            "ad_group_name, ad_id, final_url, headlines, descriptions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "ad_group_name, ad_id, final_url, headlines, descriptions, pins) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [(now, user_id, str(customer_id), str(r["result"].get("campaign_id") or ""), (r["result"].get("campaign_name") or "")[:200],
               str(r["ad_group_id"]), (r["result"].get("ad_group_name") or "")[:200], str(r["result"].get("ad_id") or ""),
               (r["final_url"] or "")[:2000], json.dumps(r["headlines"], ensure_ascii=False),
-              json.dumps(r["descriptions"], ensure_ascii=False)) for r in rows],
+              json.dumps(r["descriptions"], ensure_ascii=False), _pins_json(r.get("head_pins"), r.get("desc_pins"))) for r in rows],
         )
         conn.commit()
     finally:
@@ -3334,8 +3347,9 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(400, {"error": f"Máximo {AD_CREATE_MAX_ACCOUNTS} cuentas por vez."})
             return
         try:
-            heads, descs, path1, path2 = google_ads_client.clean_rsa_texts(
-                payload.get("headlines"), payload.get("descriptions"), payload.get("path1"), payload.get("path2"))
+            heads, descs, path1, path2, head_pins, desc_pins = google_ads_client.clean_rsa_texts_with_pins(
+                payload.get("headlines"), payload.get("descriptions"), payload.get("path1"), payload.get("path2"),
+                payload.get("headline_pins"), payload.get("description_pins"))
         except ValueError as e:
             self._send_json(400, {"error": str(e)})
             return
@@ -3378,7 +3392,7 @@ class Handler(SimpleHTTPRequestHandler):
             it = items[i]
             try:
                 r = fn(it["customer_id"], it["ad_group_id"], heads, descs, path1, path2, it["final_url"],
-                       url_confirmed=it["url_confirmed"], validate_only=validate_only)
+                       url_confirmed=it["url_confirmed"], validate_only=validate_only, head_pins=head_pins, desc_pins=desc_pins)
                 return i, {"customer_id": it["customer_id"], "ok": True, "campaign_name": r.get("campaign_name"),
                            "ad_group_name": r.get("ad_group_name"), "ad_id": r.get("ad_id"), "url_known": r.get("url_known"), "_r": r}
             except Exception as e:  # noqa: BLE001 — un fallo en una cuenta no debe frenar a las demás
@@ -3395,7 +3409,7 @@ class Handler(SimpleHTTPRequestHandler):
             r = res.pop("_r", None)
             if r and not validate_only:
                 try:
-                    store_ad_creation(user["id"], items[i]["customer_id"], r, items[i]["ad_group_id"], items[i]["final_url"], heads, descs)
+                    store_ad_creation(user["id"], items[i]["customer_id"], r, items[i]["ad_group_id"], items[i]["final_url"], heads, descs, head_pins, desc_pins)
                 except Exception as e:  # noqa: BLE001 — el anuncio ya quedó en Google Ads; un fallo del registro no debe ocultarlo
                     print(f"[ad-creation-log] {e}", flush=True)
             out.append(res)
@@ -3475,11 +3489,13 @@ class Handler(SimpleHTTPRequestHandler):
                     self._send_json(400, {"error": "Cada anuncio necesita su grupo de anuncios."})
                     return
                 try:
-                    heads, descs, _p1, _p2 = google_ads_client.clean_rsa_texts(a.get("headlines"), a.get("descriptions"))
+                    heads, descs, _p1, _p2, hpins, dpins = google_ads_client.clean_rsa_texts_with_pins(
+                        a.get("headlines"), a.get("descriptions"), "", "", a.get("headline_pins"), a.get("description_pins"))
                 except ValueError as e:
                     self._send_json(400, {"error": str(e)})
                     return
-                ads.append({"ad_group_id": gid, "final_url": str(a.get("final_url") or "").strip(), "headlines": heads, "descriptions": descs})
+                ads.append({"ad_group_id": gid, "final_url": str(a.get("final_url") or "").strip(), "headlines": heads, "descriptions": descs,
+                            "head_pins": hpins, "desc_pins": dpins})
             accounts.append({"customer_id": cid, "ads": ads})
         simulated = not google_ads_client.is_configured()
         members = None
@@ -3525,7 +3541,8 @@ class Handler(SimpleHTTPRequestHandler):
             error_count += sum(1 for x in items if not x.get("ok"))
             if not validate_only:
                 logged = [{"result": it, "ad_group_id": accounts[i]["ads"][j]["ad_group_id"], "final_url": accounts[i]["ads"][j]["final_url"],
-                           "headlines": accounts[i]["ads"][j]["headlines"], "descriptions": accounts[i]["ads"][j]["descriptions"]}
+                           "headlines": accounts[i]["ads"][j]["headlines"], "descriptions": accounts[i]["ads"][j]["descriptions"],
+                           "head_pins": accounts[i]["ads"][j]["head_pins"], "desc_pins": accounts[i]["ads"][j]["desc_pins"]}
                           for j, it in enumerate(items) if it.get("ok")]
                 if logged:
                     try:

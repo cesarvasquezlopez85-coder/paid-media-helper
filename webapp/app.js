@@ -295,12 +295,13 @@ const state = {
   nuevosAnuncios: {
     mcc: { status: 'idle', groups: [], filter: '', selectedId: '', selectedName: '', error: null },
     accountsStatus: 'idle', accounts: [], accountFilter: '', selected: [],
-    headlines: ['', '', ''], descriptions: ['', ''], path1: '', path2: '', matchText: '',
+    headlines: ['', '', ''], descriptions: ['', ''], headPins: [0, 0, 0], descPins: [0, 0], path1: '', path2: '', matchText: '',
     targetsStatus: 'idle', rows: {}, check: null, run: { status: 'idle', error: null, results: {}, applied: false },
     simulated: false,
     ai: { brief: '', lang: 'es', status: 'idle', error: '', result: null },
     pacingHotels: { status: 'idle', msgs: [] }, // «Marcar los hoteles de Ritmo de consumo»
-    mode: 'simple', tpl: null, lab: null, // 'simple' | 'plantilla' | 'etiqueta'; tpl y lab se crean al entrar a cada modo (nutState, nulState)
+    accountsOpen: true, lastCreateMode: 'plantilla', // accountsOpen: paso 1 desplegado o plegado a una línea
+    mode: 'plantilla', tpl: null, lab: null, // 'simple' | 'plantilla' | 'etiqueta' (pestaña «Crear»: plantilla o simple; «Activar, pausar y programar»: etiqueta); tpl y lab se crean al entrar a cada modo (nutState, nulState)
   },
   // IA Max (AI Max for Search) — a diferencia de "Ask Advisor", sí tiene
   // API real (Campaign.ai_max_setting, desde v25). Tres sub-vistas sobre
@@ -527,7 +528,7 @@ const PLUS_JAKARTA_HREF = 'https://fonts.googleapis.com/css2?family=Plus+Jakarta
 const PAGE_META = {
   anuncios: {
     title: 'Anuncios nuevos',
-    caption: 'Crea el mismo anuncio de búsqueda adaptable en varias cuentas de un mismo MCC. Cada cuenta usa la URL que ya tienen sus anuncios y el anuncio queda pausado, para que lo revises y lo actives.',
+    caption: 'Crea anuncios de búsqueda adaptables en varias cuentas de un mismo MCC (siempre quedan pausados, con la URL que ya usa cada cuenta) y luego actívalos, páusalos o prográmalos por etiqueta.',
   },
   audiencias: {
     title: 'Audiencias',
@@ -16173,8 +16174,10 @@ const NUA_LIMITS = { headMax: 30, headMin: 3, headCap: 15, descMax: 90, descMin:
 
 function nuaTexts() {
   const s = state.nuevosAnuncios;
-  const clean = (list) => list.map((x) => String(x || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
-  return { heads: clean(s.headlines), descs: clean(s.descriptions), path1: s.path1.trim(), path2: s.path2.trim() };
+  // Las posiciones fijadas (0 = sin fijar, 1 o 2) van alineadas con los textos que quedan tras quitar los vacíos.
+  const withPins = (list, pins) => { const texts = [], out = []; list.forEach((x, i) => { const v = String(x || '').replace(/\s+/g, ' ').trim(); if (v) { texts.push(v); out.push(pins[i] || 0); } }); return [texts, out]; };
+  const [heads, hpins] = withPins(s.headlines, s.headPins), [descs, dpins] = withPins(s.descriptions, s.descPins);
+  return { heads, descs, hpins, dpins, path1: s.path1.trim(), path2: s.path2.trim() };
 }
 
 // Mismas reglas que el servidor (google_ads_client.clean_rsa_texts), para avisar antes de enviar. Devuelve '' si está bien.
@@ -16272,7 +16275,7 @@ function nuaLoadMccGroups(fromRender) {
 function nuaPickMcc(groupId, groupName) {
   const s = state.nuevosAnuncios;
   s.mcc.selectedId = groupId; s.mcc.selectedName = groupName; s.mcc.error = null;
-  s.accountsStatus = 'loading'; s.accounts = []; s.selected = []; s.rows = {}; s.targetsStatus = 'idle'; s.check = null; s.pacingHotels = { status: 'idle', msgs: [] };
+  s.accountsStatus = 'loading'; s.accounts = []; s.selected = []; s.rows = {}; s.targetsStatus = 'idle'; s.check = null; s.pacingHotels = { status: 'idle', msgs: [] }; s.accountsOpen = true;
   s.run = { status: 'idle', error: null, results: {}, applied: false };
   nutResetTargets();
   render();
@@ -16291,7 +16294,7 @@ function nuaPickMcc(groupId, groupName) {
 function nuaClearMcc() {
   const s = state.nuevosAnuncios;
   s.mcc.selectedId = ''; s.mcc.selectedName = ''; s.mcc.filter = '';
-  s.accountsStatus = 'idle'; s.accounts = []; s.selected = []; s.rows = {}; s.targetsStatus = 'idle'; s.check = null; s.pacingHotels = { status: 'idle', msgs: [] };
+  s.accountsStatus = 'idle'; s.accounts = []; s.selected = []; s.rows = {}; s.targetsStatus = 'idle'; s.check = null; s.pacingHotels = { status: 'idle', msgs: [] }; s.accountsOpen = true;
   s.run = { status: 'idle', error: null, results: {}, applied: false };
   nutResetTargets();
   render();
@@ -16342,13 +16345,13 @@ function nuaSelectAccounts(all) {
 function nuaAddText(kind) {
   const s = state.nuevosAnuncios;
   const cap = kind === 'headlines' ? NUA_LIMITS.headCap : NUA_LIMITS.descCap;
-  if (s[kind].length < cap) { s[kind].push(''); nuaInvalidate(); render(); }
+  if (s[kind].length < cap) { s[kind].push(''); (kind === 'headlines' ? s.headPins : s.descPins).push(0); nuaInvalidate(); render(); }
 }
 
 function nuaRemoveText(kind, idx) {
   const s = state.nuevosAnuncios;
   const min = kind === 'headlines' ? NUA_LIMITS.headMin : NUA_LIMITS.descMin;
-  if (s[kind].length > min) { s[kind].splice(idx, 1); s.check = null; s.run = { status: 'idle', error: null, results: {}, applied: false }; render(); }
+  if (s[kind].length > min) { s[kind].splice(idx, 1); (kind === 'headlines' ? s.headPins : s.descPins).splice(idx, 1); s.check = null; s.run = { status: 'idle', error: null, results: {}, applied: false }; render(); }
 }
 
 function nuaPickGroup(row, campaignId, adGroupId) {
@@ -16407,7 +16410,7 @@ function nuaSuggestByName() {
 
 function nuaNewBatch() {
   const s = state.nuevosAnuncios;
-  s.headlines = ['', '', '']; s.descriptions = ['', '']; s.path1 = ''; s.path2 = ''; s.matchText = '';
+  s.headlines = ['', '', '']; s.descriptions = ['', '']; s.headPins = [0, 0, 0]; s.descPins = [0, 0]; s.path1 = ''; s.path2 = ''; s.matchText = '';
   s.selected = []; s.rows = {}; s.targetsStatus = 'idle'; s.check = null;
   s.run = { status: 'idle', error: null, results: {}, applied: false };
   render();
@@ -16431,7 +16434,7 @@ function nuaSubmit(validateOnly) {
   fetch('/api/google-ads/ads-create', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ validate_only: validateOnly, mcc_id: s.mcc.selectedId, headlines: t.heads, descriptions: t.descs, path1: t.path1, path2: t.path2, items: nuaItems(rows) }),
+    body: JSON.stringify({ validate_only: validateOnly, mcc_id: s.mcc.selectedId, headlines: t.heads, descriptions: t.descs, headline_pins: t.hpins, description_pins: t.dpins, path1: t.path1, path2: t.path2, items: nuaItems(rows) }),
   })
     .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
     .then(({ ok, data }) => {
@@ -16482,6 +16485,7 @@ function nuaTextRows(kind, max, cap, minRows, label) {
       ${list.map((v, i) => `
         <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
           <input type="text" id="nua-${key}-${i}" data-nua-${key}="${i}" value="${escapeHtml(v)}" style="flex:1" autocomplete="off" />
+          <select data-nua-${key}-pin="${i}" title="Fijar este texto en una posición del anuncio" style="max-width:150px">${adPinOptions((key === 'head' ? s.headPins : s.descPins)[i] || 0)}</select>
           ${nuaCounter(v.length, max)}
           ${list.length > minRows ? `<button class="btn-link" data-nua-del-${key}="${i}" title="Quitar">✕</button>` : '<span style="width:20px"></span>'}
         </div>`).join('')}
@@ -16494,6 +16498,23 @@ function nuaTextRows(kind, max, cap, minRows, label) {
 // indicaciones); los textos quedan editables y, como siempre, el anuncio se valida con Google antes de crearse.
 const AD_AI_LANGS = { es: 'Español', en: 'Inglés', pt: 'Portugués', de: 'Alemán', fr: 'Francés', it: 'Italiano', nl: 'Neerlandés' };
 const AD_AI_BRIEF_MIN = 15;
+
+// Fijar textos (pin) en el anuncio adaptable: título 1 o 2 y descripción 1 o 2.
+const AD_PIN_HINT = 'Fijar un texto lo obliga a salir siempre en esa posición: reduce las combinaciones que Google puede probar y puede bajar la calidad del anuncio. Fija solo lo necesario.';
+
+function adPinOptions(current) {
+  return `<option value="0" ${current === 0 ? 'selected' : ''}>Sin fijar</option><option value="1" ${current === 1 ? 'selected' : ''}>Fijar en la posición 1</option><option value="2" ${current === 2 ? 'selected' : ''}>Fijar en la posición 2</option>`;
+}
+
+// Avisos: Google recomienda fijar al menos dos textos por posición para poder alternar.
+function adPinNotes(hpins, dpins) {
+  const notes = [];
+  [1, 2].forEach((pos) => {
+    if (hpins.filter((x) => x === pos).length === 1) notes.push(`Hay un solo título fijado en la posición ${pos}: conviene fijar al menos dos para que Google pueda alternar.`);
+    if (dpins.filter((x) => x === pos).length === 1) notes.push(`Hay una sola descripción fijada en la posición ${pos}: conviene fijar al menos dos para que Google pueda alternar.`);
+  });
+  return notes;
+}
 
 function renderAdAiBox(prefix, ai, withLang, langLabel) {
   const loading = ai.status === 'loading';
@@ -16549,13 +16570,17 @@ function adAiGenerate(mode) {
       const heads = data.titulares || [], descs = data.descripciones || [];
       if (!heads.length && !descs.length) throw new Error('La IA no devolvió textos válidos. Ajusta las indicaciones e intenta de nuevo.');
       if (t) {
-        t.langs[t.activeLang].headlines = heads.join('\n');
-        t.langs[t.activeLang].descriptions = descs.join('\n');
+        const pines = data.pines || {};
+        const withPin = (list, pins) => list.map((x, i) => ((pins || [])[i] ? `[${pins[i]}] ` : '') + x);
+        t.langs[t.activeLang].headlines = withPin(heads, pines.titulares).join('\n');
+        t.langs[t.activeLang].descriptions = withPin(descs, pines.descripciones).join('\n');
         nutResetRun();
       } else {
+        const pines = data.pines || {};
         s.headlines = heads.slice(); s.descriptions = descs.slice();
-        while (s.headlines.length < NUA_LIMITS.headMin) s.headlines.push('');
-        while (s.descriptions.length < NUA_LIMITS.descMin) s.descriptions.push('');
+        s.headPins = heads.map((_x, i) => (pines.titulares || [])[i] || 0); s.descPins = descs.map((_x, i) => (pines.descripciones || [])[i] || 0);
+        while (s.headlines.length < NUA_LIMITS.headMin) { s.headlines.push(''); s.headPins.push(0); }
+        while (s.descriptions.length < NUA_LIMITS.descMin) { s.descriptions.push(''); s.descPins.push(0); }
         s.check = null; s.run = { status: 'idle', error: null, results: {}, applied: false };
       }
       ai.status = 'ready'; ai.result = { h: heads.length, d: descs.length, missH: (data.faltan || {}).titulares || 0, missD: (data.faltan || {}).descripciones || 0 };
@@ -16583,6 +16608,14 @@ function renderNuaStepAccounts() {
   const s = state.nuevosAnuncios;
   const m = s.mcc;
   const head = (inner) => `<div class="card" style="margin-bottom:16px"><h3 style="margin:0 0 10px;font-size:14px">1. MCC y cuentas</h3>${inner}</div>`;
+  if (m.selectedId && s.accountsStatus === 'ready' && !s.accountsOpen && s.selected.length) {
+    return `<div class="card" style="margin-bottom:16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <strong style="font-size:14px">1. MCC y cuentas</strong>
+      <span class="delta-badge neutral">${escapeHtml(m.selectedName)}</span>
+      <span class="field-hint">Cuentas marcadas: ${s.selected.length}</span>
+      <button class="btn-link" data-action="nua-acc-open">Cambiar cuentas</button>
+    </div>`;
+  }
   if (m.status === 'idle' || m.status === 'loading') return head('<p class="footnote">Cargando los MCC…</p>');
   if (m.status === 'error') return head(`<div class="error-panel">${escapeHtml(m.error)}</div><button class="btn-outline sm" data-action="nua-mcc-load" style="margin-top:8px">Reintentar</button>`);
   if (!m.selectedId) {
@@ -16615,6 +16648,7 @@ function renderNuaStepAccounts() {
       <button class="btn-outline sm" data-action="nua-acc-none">Quitar las visibles</button>
       <button class="btn-outline sm" data-action="nua-acc-pacing" ${s.pacingHotels.status === 'loading' ? 'disabled' : ''}>Marcar los hoteles de Ritmo de consumo</button>
       <span class="field-hint">${s.selected.length} de máximo 40 marcadas</span>
+      ${s.selected.length ? '<button class="btn-accent sm" data-action="nua-acc-done">Listo: usar estas cuentas</button>' : ''}
     </div>
     ${s.pacingHotels.msgs.length ? `<div style="margin:0 0 8px">${s.pacingHotels.msgs.map((m) => `<p class="field-hint" style="margin:2px 0;${s.pacingHotels.status === 'error' ? 'color:var(--color-danger,#b3261e)' : ''}">${escapeHtml(m)}</p>`).join('')}</div>` : ''}
     <div class="table-scroll" style="max-height:280px"><table><tbody>
@@ -16638,6 +16672,7 @@ function renderNuaStepTexts() {
         <div class="field"><label>Ruta visible 1 (opcional)</label><input type="text" id="nua-path1" value="${escapeHtml(s.path1)}" style="width:160px" maxlength="15" autocomplete="off" /></div>
         <div class="field"><label>Ruta visible 2 (opcional)</label><input type="text" id="nua-path2" value="${escapeHtml(s.path2)}" style="width:160px" maxlength="15" autocomplete="off" /></div>
       </div>
+      ${(() => { const t = nuaTexts(); const notes = adPinNotes(t.hpins, t.dpins); return `<p class="field-hint" style="margin-top:8px">${AD_PIN_HINT}</p>${notes.map((n) => `<p class="field-hint" style="margin:2px 0;color:var(--color-danger,#b3261e)">${escapeHtml(n)}</p>`).join('')}`; })()}
       <p id="nua-texts-hint" class="field-hint" style="margin-top:8px;color:var(--color-danger,#b3261e)">${escapeHtml(err)}</p>
       <p class="field-hint" style="margin-top:8px">El mismo texto se usa en todas las cuentas: conviene que sean del mismo idioma. La URL no se escribe aquí: cada cuenta usa la suya.</p>
     </div>`;
@@ -16715,7 +16750,8 @@ function bindNuevosAnuncios() {
     nutResetTargets();
     render();
   }));
-  document.querySelectorAll('[data-nua-mode]').forEach((el) => el.addEventListener('click', () => { s.mode = el.dataset.nuaMode; render(); }));
+  document.querySelectorAll('[data-nua-mode]').forEach((el) => el.addEventListener('click', () => { s.mode = el.dataset.nuaMode; if (s.mode !== 'etiqueta') s.lastCreateMode = s.mode; render(); }));
+  document.querySelectorAll('[data-nua-tab]').forEach((el) => el.addEventListener('click', () => { s.mode = el.dataset.nuaTab === 'gestionar' ? 'etiqueta' : (s.lastCreateMode || 'plantilla'); render(); }));
   if (s.mode === 'plantilla') bindNutemplate();
   if (s.mode === 'etiqueta') bindNulabel();
   if (s.mode === 'simple') bindAdAiBox('nua', s.ai);
@@ -16725,6 +16761,10 @@ function bindNuevosAnuncios() {
       const counter = el.parentElement.querySelector('.nua-count');
       if (counter) { counter.textContent = `${e.target.value.length}/${max}`; counter.style.color = e.target.value.length > max ? 'var(--color-danger,#b3261e)' : ''; }
       nuaInvalidate();
+    }));
+    document.querySelectorAll(`[data-nua-${key}-pin]`).forEach((el) => el.addEventListener('change', (e) => {
+      (kind === 'headlines' ? s.headPins : s.descPins)[Number(el.dataset[`nua${key[0].toUpperCase()}${key.slice(1)}Pin`])] = Number(e.target.value);
+      nuaInvalidate(); render();
     }));
     document.querySelectorAll(`[data-nua-del-${key}]`).forEach((el) => el.addEventListener('click', () => nuaRemoveText(kind, Number(el.dataset[`nuaDel${key[0].toUpperCase()}${key.slice(1)}`]))));
   });
@@ -16754,7 +16794,7 @@ function nutNewState() {
   return {
     name: '', loadedId: '', label: '', variables: [],
     langOrder: ['es'], activeLang: 'es', langs: { es: { headlines: '', descriptions: '' } },
-    campaignFilter: '', ai: { brief: '', status: 'idle', error: '', result: null },
+    advOpen: null, pinsOpen: null, campaignFilter: '', ai: { brief: '', status: 'idle', error: '', result: null },
     templates: [], templatesStatus: 'idle', templateMsg: '', templateError: '', templateBusy: false,
     rows: {}, targetsStatus: 'idle', targetsLabel: '', excluded: {}, previewKey: '', check: null,
     run: { status: 'idle', error: null, results: {}, applied: false },
@@ -16809,6 +16849,8 @@ function nutTemplateError() {
     if (descs.length < NUA_LIMITS.descMin) return `El idioma «${l}» necesita al menos ${NUA_LIMITS.descMin} descripciones.`;
     if (heads.length > 60 || descs.length > 60) return `El idioma «${l}» tiene demasiadas líneas (máximo 60 por lista).`;
     for (const line of [...heads, ...descs]) {
+      if (/^\[\d+\]/.test(line) && !/^\[[12]\]/.test(line)) return 'Solo se puede fijar en la posición 1 o 2: escribe [1] o [2] al inicio de la línea.';
+      if (/^\[[12]\]\s*$/.test(line)) return 'Hay una línea con [1] o [2] sin texto.';
       for (const m of line.matchAll(/\{([^{}]*)\}/g)) {
         if (!keys.has(nutVarKey(m[1]))) return `Un texto de «${l}» usa la variable «${m[1]}» y no está definida.`;
       }
@@ -16840,18 +16882,30 @@ function nutRenderLine(line, vars, hotel) {
   return empty ? null : text.replace(/\s+/g, ' ').trim();
 }
 
-// Toma, en orden, los primeros textos que caben (max caracteres) sin repetirse, hasta `limit`.
-function nutPick(lines, vars, hotel, max, limit) {
-  const out = [], seen = new Set();
-  for (const line of lines) {
-    const x = nutRenderLine(line, vars, hotel);
-    if (!x || x.length > max) continue;
+// «[1] Texto» fija el texto en la posición 1 y «[2] Texto» en la 2 (títulos o descripciones); sin prefijo, sin fijar.
+function nutPinLine(line) {
+  const m = String(line || '').match(/^\[([12])\]\s*(.*)$/);
+  return m ? { pin: Number(m[1]), text: m[2].trim() } : { pin: 0, text: String(line || '').trim() };
+}
+
+function nutPinItems(text) { return nutLines(text).map(nutPinLine); }
+
+// Toma los textos que caben (max caracteres) sin repetirse, hasta `limit`: primero los fijados y luego, en orden, los demás.
+// Devuelve los textos y sus posiciones fijadas (0 = sin fijar), en el orden original de la plantilla.
+function nutPick(items, vars, hotel, max, limit) {
+  const cands = [], seen = new Set();
+  items.forEach((it, idx) => {
+    const x = nutRenderLine(it.text, vars, hotel);
+    if (!x || x.length > max) return;
     const key = x.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key); out.push(x);
-    if (out.length >= limit) break;
-  }
-  return out;
+    if (seen.has(key)) return;
+    seen.add(key); cands.push({ idx, text: x, pin: it.pin });
+  });
+  const chosen = new Set();
+  cands.filter((c) => c.pin).slice(0, limit).forEach((c) => chosen.add(c.idx));
+  cands.forEach((c) => { if (!c.pin && chosen.size < limit) chosen.add(c.idx); });
+  const picked = cands.filter((c) => chosen.has(c.idx));
+  return { texts: picked.map((c) => c.text), pins: picked.map((c) => c.pin) };
 }
 
 // «Hotel - ES:es - BRND» → { hotel: 'Hotel', lang: 'es' } (null si el nombre no sigue ese formato).
@@ -16875,7 +16929,7 @@ function nutComputeAccount(accRow) {
     if (filter && !c.name.toLowerCase().includes(filter)) return;
     const parsed = nutParseCampaignName(c.name);
     c.ad_groups.forEach((g) => {
-      const row = { key: `${accRow.id}:${g.id}`, accId: accRow.id, campaignName: c.name, groupId: g.id, groupName: g.name, hotel: parsed ? parsed.hotel : '', lang: parsed ? parsed.lang : '', url: g.url, reason: '', heads: [], descs: [] };
+      const row = { key: `${accRow.id}:${g.id}`, accId: accRow.id, campaignName: c.name, groupId: g.id, groupName: g.name, hotel: parsed ? parsed.hotel : '', lang: parsed ? parsed.lang : '', url: g.url, reason: '', heads: [], descs: [], hpins: [], dpins: [] };
       const tpl = parsed ? t.langs[parsed.lang] : null;
       if (!parsed) row.reason = 'Nombre de campaña sin hotel e idioma (Hotel - MERCADO:idioma - TIPO)';
       else if (!tpl || !(nutLines(tpl.headlines).length && nutLines(tpl.descriptions).length)) row.reason = `La plantilla no tiene textos en «${parsed.lang}»`;
@@ -16883,8 +16937,9 @@ function nutComputeAccount(accRow) {
       else if (g.rsa_enabled >= 3) row.reason = 'Ya tiene 3 anuncios adaptables activos';
       else if (!g.url) row.reason = 'Sin anuncio activo del que tomar la URL';
       else {
-        row.heads = nutPick(nutLines(tpl.headlines), vars, parsed.hotel, NUA_LIMITS.headMax, NUA_LIMITS.headCap);
-        row.descs = nutPick(nutLines(tpl.descriptions), vars, parsed.hotel, NUA_LIMITS.descMax, NUA_LIMITS.descCap);
+        const hp = nutPick(nutPinItems(tpl.headlines), vars, parsed.hotel, NUA_LIMITS.headMax, NUA_LIMITS.headCap);
+        const dp = nutPick(nutPinItems(tpl.descriptions), vars, parsed.hotel, NUA_LIMITS.descMax, NUA_LIMITS.descCap);
+        row.heads = hp.texts; row.hpins = hp.pins; row.descs = dp.texts; row.dpins = dp.pins;
         if (row.heads.length < NUA_LIMITS.headMin || row.descs.length < NUA_LIMITS.descMin) row.reason = 'Pocos textos caben tras sustituir las variables';
       }
       out.push(row);
@@ -16910,7 +16965,7 @@ function nutPayload(rows) {
   const by = new Map();
   rows.forEach((r) => {
     if (!by.has(r.accId)) by.set(r.accId, []);
-    by.get(r.accId).push({ ad_group_id: r.groupId, final_url: r.url, headlines: r.heads, descriptions: r.descs });
+    by.get(r.accId).push({ ad_group_id: r.groupId, final_url: r.url, headlines: r.heads, descriptions: r.descs, headline_pins: r.hpins, description_pins: r.dpins });
   });
   return [...by].map(([customer_id, ads]) => ({ customer_id, ads }));
 }
@@ -17135,13 +17190,13 @@ function nutPreviewHtml() {
   const [accId] = t.previewKey.split(':');
   const row = nutComputeAccount(t.rows[accId]).find((r) => r.key === t.previewKey);
   if (!row || row.reason) return '';
-  const list = (items, max) => items.map((x) => `<li>${escapeHtml(x)} <span class="field-hint">${x.length}/${max}</span></li>`).join('');
+  const list = (items, max, pins) => items.map((x, i) => `<li>${escapeHtml(x)} <span class="field-hint">${x.length}/${max}</span>${pins[i] ? ` <span class="delta-badge neutral"><span>Fijado en la posición</span> <span>${pins[i]}</span></span>` : ''}</li>`).join('');
   return `<div class="ok-panel" style="margin:12px 0">
     <strong>${escapeHtml(row.hotel)}</strong> · <span>${escapeHtml(row.campaignName)}</span> › <span>${escapeHtml(row.groupName)}</span><br>
     <span class="field-hint">URL final:</span> <span style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(row.url)}</span>
     <div style="display:flex;gap:28px;flex-wrap:wrap;margin-top:8px">
-      <div><strong>Títulos (${row.heads.length})</strong><ol style="margin:4px 0 0 18px;padding:0">${list(row.heads, NUA_LIMITS.headMax)}</ol></div>
-      <div><strong>Descripciones (${row.descs.length})</strong><ol style="margin:4px 0 0 18px;padding:0">${list(row.descs, NUA_LIMITS.descMax)}</ol></div>
+      <div><strong>Títulos (${row.heads.length})</strong><ol style="margin:4px 0 0 18px;padding:0">${list(row.heads, NUA_LIMITS.headMax, row.hpins)}</ol></div>
+      <div><strong>Descripciones (${row.descs.length})</strong><ol style="margin:4px 0 0 18px;padding:0">${list(row.descs, NUA_LIMITS.descMax, row.dpins)}</ol></div>
     </div>
   </div>`;
 }
@@ -17188,8 +17243,52 @@ function nutRefreshSoon() {
 function nutTemplateEdited() {
   const t = nutState();
   if (t.check || t.run.applied || Object.keys(t.run.results).length) { nutResetRun(); render(); return; }
+  nutRefreshPinPanel();
   nutSyncButtons();
   nutRefreshSoon();
+}
+
+function renderNutPinPanel(hItems, dItems, pinsOpen) {
+  const open = pinsOpen !== null ? pinsOpen : (hItems.some((x) => x.pin) || dItems.some((x) => x.pin));
+  const col = (kind, label, items) => `<div style="flex:1;min-width:300px"><strong style="font-size:12px">${label}</strong>
+      ${items.map((it, i) => `<div style="display:flex;gap:6px;align-items:center;margin:3px 0"><select data-nut-pin="${kind}:${i}" style="max-width:170px">${adPinOptions(it.pin)}</select><span class="field-hint" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(it.text)}</span></div>`).join('') || '<p class="footnote">Sin textos todavía.</p>'}</div>`;
+  const notes = adPinNotes(hItems.map((x) => x.pin), dItems.map((x) => x.pin));
+  return `<details id="nut-pins" style="margin-top:10px" ${open ? 'open' : ''}>
+      <summary style="cursor:pointer;font-weight:600;font-size:13px">Fijar textos en una posición (opcional)</summary>
+      <p class="field-hint" style="margin:6px 0">${AD_PIN_HINT}</p>
+      <p class="field-hint" style="margin:0 0 6px">También puedes escribir [1] o [2] al inicio de una línea para fijarla en esa posición.</p>
+      <div style="display:flex;gap:20px;flex-wrap:wrap">${col('h', 'Títulos', hItems)}${col('d', 'Descripciones', dItems)}</div>
+      ${notes.map((n) => `<p class="field-hint" style="margin:4px 0 0;color:var(--color-danger,#b3261e)">${escapeHtml(n)}</p>`).join('')}
+    </details>`;
+}
+
+function bindNutPinPanel() {
+  const t = nutState();
+  const det = document.getElementById('nut-pins');
+  if (det) det.addEventListener('toggle', (e) => { t.pinsOpen = e.target.open; });
+  document.querySelectorAll('[data-nut-pin]').forEach((el) => el.addEventListener('change', () => { const [kind, idx] = el.dataset.nutPin.split(':'); nutSetPin(kind, Number(idx), Number(el.value)); }));
+}
+
+// Mientras se escribe en las cajas de texto, la lista de textos fijables se vuelve a dibujar sin tocar el resto de la pantalla.
+function nutRefreshPinPanel() {
+  const wrap = document.getElementById('nut-pins-wrap');
+  if (!wrap) return;
+  const t = nutState();
+  const lang = t.langs[t.activeLang];
+  wrap.innerHTML = renderNutPinPanel(nutPinItems(lang.headlines), nutPinItems(lang.descriptions), t.pinsOpen);
+  bindNutPinPanel();
+}
+
+// Cambia la posición fijada de la línea `idx` (entre las no vacías) de los títulos ('h') o las descripciones ('d') del idioma activo.
+function nutSetPin(kind, idx, pin) {
+  const t = nutState();
+  const lang = t.langs[t.activeLang];
+  const key = kind === 'h' ? 'headlines' : 'descriptions';
+  const lines = nutLines(lang[key]);
+  if (!lines[idx]) return;
+  lines[idx] = (pin ? `[${pin}] ` : '') + nutPinLine(lines[idx]).text;
+  lang[key] = lines.join('\n');
+  nutResetRun(); render();
 }
 
 function renderNutStepTemplate() {
@@ -17199,30 +17298,17 @@ function renderNutStepTemplate() {
   const active = t.langs[t.activeLang] || { headlines: '', descriptions: '' };
   const addable = Object.keys(NUT_LANG_NAMES).filter((l) => !t.langOrder.includes(l));
   const hL = nutLines(active.headlines), dL = nutLines(active.descriptions);
+  // «Avanzado» se abre solo si la plantilla ya usa variables, filtro o una plantilla guardada; después manda lo que elija la persona.
+  const advOpen = t.advOpen !== null ? t.advOpen : (t.variables.length > 0 || !!t.campaignFilter.trim() || !!t.loadedId);
   return `
     <div class="card" style="margin-bottom:16px">
-      <h3 style="margin:0 0 10px;font-size:14px">2. Plantilla: etiqueta, variables y textos por idioma</h3>
-      <div style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+      <h3 style="margin:0 0 10px;font-size:14px">2. Etiqueta y textos por idioma</h3>
+      <div style="display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap;margin-bottom:12px">
         <div class="field"><label>Plantilla guardada</label>
           <select id="nut-tpl-select" style="min-width:220px"><option value="">— Nueva / sin cargar —</option>${t.templates.map((x) => `<option value="${x.id}" ${String(x.id) === t.loadedId ? 'selected' : ''}>${escapeHtml(x.name)}</option>`).join('')}</select></div>
-        <div class="field"><label>Nombre para guardarla</label><input type="text" id="nut-tpl-name" value="${escapeHtml(t.name)}" style="width:220px" maxlength="80" autocomplete="off" /></div>
-        <button class="btn-outline sm" data-action="nut-save" ${t.templateBusy ? 'disabled' : ''}>Guardar plantilla</button>
-        ${t.loadedId ? '<button class="btn-link" data-action="nut-delete">Borrar la cargada</button>' : ''}
-        ${t.templateMsg ? `<span class="field-hint" style="color:var(--color-success,#1d6b41)">${escapeHtml(t.templateMsg)}</span>` : ''}
-        ${t.templateError ? `<span class="field-hint" style="color:var(--color-danger,#b3261e)">${escapeHtml(t.templateError)}</span>` : ''}
-      </div>
-      <div style="display:flex;gap:16px;flex-wrap:wrap">
         <div class="field"><label>Etiqueta de la tanda</label><input type="text" id="nut-label" value="${escapeHtml(t.label)}" style="width:220px" maxlength="80" placeholder="ej. BF2026" autocomplete="off" />
           <span class="field-hint" style="display:block;max-width:300px">Marca los anuncios que se crean y evita crearlos dos veces en el mismo grupo.</span></div>
-        <div class="field"><label>Solo campañas cuyo nombre contenga (opcional)</label><input type="text" id="nut-filter" value="${escapeHtml(t.campaignFilter)}" style="width:240px" placeholder="ej. BRND" autocomplete="off" /></div>
       </div>
-      <div style="margin:10px 0 4px"><strong style="font-size:13px">Variables</strong>
-        <span class="field-hint">En los textos escribe {HOTEL} (sale del nombre de la campaña) o tus propias variables, como {DESCUENTO}. Una variable vacía descarta los textos que la usan. Cada cuenta puede cambiar su valor más abajo.</span></div>
-      ${t.variables.map((v, i) => `<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
-          <span>{</span><input type="text" data-nut-vkey="${i}" value="${escapeHtml(v.key)}" style="width:130px" maxlength="20" placeholder="NOMBRE" autocomplete="off" /><span>}</span>
-          <input type="text" data-nut-vval="${i}" value="${escapeHtml(v.value)}" style="width:240px" placeholder="valor por defecto" autocomplete="off" />
-          <button class="btn-link" data-nut-vdel="${i}" title="Quitar">✕</button></div>`).join('')}
-      <button class="btn-outline sm" data-action="nut-add-var">Agregar variable</button>
       <div style="margin:14px 0 6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <strong style="font-size:13px">Idiomas</strong>
         ${t.langOrder.map((l) => `<button class="${l === t.activeLang ? 'btn-accent' : 'btn-outline'} sm" data-nut-lang="${l}">${escapeHtml(NUT_LANG_NAMES[l] || l)} (${l})</button>`).join('')}
@@ -17237,7 +17323,33 @@ function renderNutStepTemplate() {
         <div class="field" style="flex:1;min-width:300px"><label>Descripciones <span class="field-hint">(<span id="nut-dcount">${dL.length}</span>)</span></label>
           <textarea id="nut-descs" rows="9" style="width:100%;font-family:inherit">${escapeHtml(active.descriptions)}</textarea></div>
       </div>
+      <div id="nut-pins-wrap">${renderNutPinPanel(nutPinItems(active.headlines), nutPinItems(active.descriptions), t.pinsOpen)}</div>
+      <p class="field-hint" style="margin-top:8px">Usa {HOTEL} donde va el nombre del hotel (sale del nombre de la campaña); otras variables, en «Avanzado».</p>
       <p id="nut-template-hint" class="field-hint" style="margin-top:8px;color:var(--color-danger,#b3261e)">${escapeHtml(err)}</p>
+
+      <details id="nut-adv" style="margin-top:12px" ${advOpen ? 'open' : ''}>
+        <summary style="cursor:pointer;font-weight:600;font-size:13px">Avanzado: variables, filtro de campañas y guardar la plantilla</summary>
+        <div style="margin-top:10px">
+          <div style="display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;margin-bottom:12px">
+        <div class="field"><label>Nombre para guardarla</label><input type="text" id="nut-tpl-name" value="${escapeHtml(t.name)}" style="width:220px" maxlength="80" autocomplete="off" /></div>
+        <button class="btn-outline sm" data-action="nut-save" ${t.templateBusy ? 'disabled' : ''}>Guardar plantilla</button>
+        ${t.loadedId ? '<button class="btn-link" data-action="nut-delete">Borrar la cargada</button>' : ''}
+        ${t.templateMsg ? `<span class="field-hint" style="color:var(--color-success,#1d6b41)">${escapeHtml(t.templateMsg)}</span>` : ''}
+        ${t.templateError ? `<span class="field-hint" style="color:var(--color-danger,#b3261e)">${escapeHtml(t.templateError)}</span>` : ''}
+      </div>
+
+          <div style="display:flex;gap:16px;flex-wrap:wrap">
+        <div class="field"><label>Solo campañas cuyo nombre contenga (opcional)</label><input type="text" id="nut-filter" value="${escapeHtml(t.campaignFilter)}" style="width:240px" placeholder="ej. BRND" autocomplete="off" /></div>
+          </div>
+      <div style="margin:10px 0 4px"><strong style="font-size:13px">Variables</strong>
+        <span class="field-hint">En los textos escribe {HOTEL} (sale del nombre de la campaña) o tus propias variables, como {DESCUENTO}. Una variable vacía descarta los textos que la usan. Cada cuenta puede cambiar su valor más abajo.</span></div>
+      ${t.variables.map((v, i) => `<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px">
+          <span>{</span><input type="text" data-nut-vkey="${i}" value="${escapeHtml(v.key)}" style="width:130px" maxlength="20" placeholder="NOMBRE" autocomplete="off" /><span>}</span>
+          <input type="text" data-nut-vval="${i}" value="${escapeHtml(v.value)}" style="width:240px" placeholder="valor por defecto" autocomplete="off" />
+          <button class="btn-link" data-nut-vdel="${i}" title="Quitar">✕</button></div>`).join('')}
+      <button class="btn-outline sm" data-action="nut-add-var">Agregar variable</button>
+        </div>
+      </details>
     </div>`;
 }
 
@@ -17278,12 +17390,17 @@ function renderNutStepTargets() {
 
 function renderNuaModeSwitch() {
   const s = state.nuevosAnuncios;
-  const btn = (mode, label, hint) => `<button class="${s.mode === mode ? 'btn-accent' : 'btn-outline'}" data-nua-mode="${mode}" title="${escapeHtml(hint)}">${label}</button>`;
-  return `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
-    ${btn('simple', 'Un anuncio, un grupo por cuenta', 'Los mismos textos en un grupo que eliges en cada cuenta')}
-    ${btn('plantilla', 'Por plantilla, todos los grupos', 'Textos por idioma y variables por hotel en todos los grupos activos')}
-    ${btn('etiqueta', 'Activar o pausar por etiqueta', 'Activa o pausa, con vista previa, los anuncios de una tanda creada por plantilla')}
-  </div>`;
+  const gestionar = s.mode === 'etiqueta';
+  const tab = (key, label, active) => `<button class="${active ? 'btn-accent' : 'btn-outline'}" data-nua-tab="${key}">${label}</button>`;
+  const opt = (mode, label, hint) => `<button class="${s.mode === mode ? 'btn-accent' : 'btn-outline'} sm" data-nua-mode="${mode}" title="${escapeHtml(hint)}">${label}</button>`;
+  return `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:${gestionar ? '12' : '8'}px">
+    ${tab('crear', 'Crear anuncios', !gestionar)}
+    ${tab('gestionar', 'Activar, pausar y programar', gestionar)}
+  </div>${gestionar ? '' : `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+    <span class="field-hint">Dónde se crea:</span>
+    ${opt('plantilla', 'En todos los grupos activos', 'Textos por idioma y variables por hotel en todos los grupos activos de campañas Search activas')}
+    ${opt('simple', 'En un grupo por cuenta', 'Los mismos textos en un grupo que eliges en cada cuenta, con la URL que quieras de la cuenta')}
+  </div>`}`;
 }
 
 function bindNutTargets() {
@@ -17298,6 +17415,8 @@ function bindNutemplate() {
   const t = nutState();
   const on = (id, ev, fn) => { const el = document.getElementById(id); if (el) el.addEventListener(ev, fn); };
   bindAdAiBox('nut', t.ai);
+  on('nut-adv', 'toggle', (e) => { t.advOpen = e.target.open; });
+  bindNutPinPanel();
   on('nut-tpl-select', 'change', (e) => { const x = t.templates.find((y) => String(y.id) === e.target.value); if (x) nutApplyTemplate(x); else { t.loadedId = ''; } render(); });
   on('nut-tpl-name', 'input', (e) => { t.name = e.target.value; });
   on('nut-label', 'input', (e) => { t.label = e.target.value; nutTemplateEdited(); });
@@ -19595,6 +19714,8 @@ function handleAction(action) {
     case 'nua-mcc-clear': nuaClearMcc(); break;
     case 'nua-acc-all': nuaSelectAccounts(true); break;
     case 'nua-acc-pacing': nuaMarkPacingHotels(); break;
+    case 'nua-acc-done': state.nuevosAnuncios.accountsOpen = false; render(); break;
+    case 'nua-acc-open': state.nuevosAnuncios.accountsOpen = true; render(); break;
     case 'nua-acc-none': nuaSelectAccounts(false); break;
     case 'nua-add-head': nuaAddText('headlines'); break;
     case 'nua-add-desc': nuaAddText('descriptions'); break;

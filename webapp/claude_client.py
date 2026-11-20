@@ -458,16 +458,22 @@ ADTEXT_SYSTEM_PROMPT = (
     "palabras.\n"
     "4. Escribe en el idioma pedido, sin mezclar idiomas (salvo nombres propios), con ortografía y tildes correctas, en "
     "un tono cálido y directo.\n"
-    "5. Responde SOLO con un objeto JSON válido, sin texto antes ni después ni bloques de código, con esta forma: "
-    "{\"grupos\": {\"titulares\": [\"texto\", ...], \"descripciones\": [\"texto\", ...]}}."
+    "5. Posiciones fijadas (pin): cada texto lleva \"posicion\" 0 (sin fijar, lo normal), 1 o 2. Usa 1 o 2 SOLO si las "
+    "indicaciones piden explícitamente fijar un texto en el título o la descripción 1 o 2 (por ejemplo: \"el título 1 "
+    "debe ser el nombre del hotel\"). Si fijas, entrega al menos 2 textos distintos para esa posición para que Google "
+    "pueda alternar, y el resto con posicion 0.\n"
+    "6. Responde SOLO con un objeto JSON válido, sin texto antes ni después ni bloques de código, con esta forma: "
+    "{\"grupos\": {\"titulares\": [{\"texto\": \"...\", \"posicion\": 0}, ...], \"descripciones\": [{\"texto\": \"...\", \"posicion\": 0}, ...]}}."
 )
 
 ADTEXT_MAX_TOKENS = 4000
+_ADTEXT_ITEM = {"type": "object", "properties": {"texto": {"type": "string"}, "posicion": {"type": "integer"}},
+                "required": ["texto", "posicion"], "additionalProperties": False}
 ADTEXT_SCHEMA = {
     "type": "object",
     "properties": {"grupos": {"type": "object", "properties": {
-        "titulares": {"type": "array", "items": {"type": "string"}},
-        "descripciones": {"type": "array", "items": {"type": "string"}}},
+        "titulares": {"type": "array", "items": _ADTEXT_ITEM},
+        "descripciones": {"type": "array", "items": _ADTEXT_ITEM}},
         "required": ["titulares", "descripciones"], "additionalProperties": False}},
     "required": ["grupos"], "additionalProperties": False,
 }
@@ -496,7 +502,8 @@ def _adtext_vars_ok(text, variables, mode):
 
 
 def generar_textos_anuncio(indicaciones, idioma="es", mode="simple", variables=None):
-    """Devuelve {"titulares": [...], "descripciones": [...], "faltan": {"titulares": n, "descripciones": n}}.
+    """Devuelve {"titulares": [...], "descripciones": [...], "pines": {"titulares": [0|1|2, ...], "descripciones": [...]},
+    "faltan": {"titulares": n, "descripciones": n}}; los pines van alineados con los textos (0 = sin fijar).
     `mode`: «simple» (15 títulos y 4 descripciones, sin variables) o «plantilla» (20 títulos y 6 descripciones; pueden
     usar {HOTEL} y las variables dadas, que el servidor sustituye por cada hotel). Pide de más, valida y, si falta, repite
     una vez solo lo que falta."""
@@ -519,6 +526,7 @@ def generar_textos_anuncio(indicaciones, idioma="es", mode="simple", variables=N
     ]
     corpus = brief.lower() + " " + " ".join(str(v).lower() for v in (variables or {}).values())
     accepted = {g["key"]: [] for g in groups}
+    pins = {g["key"]: [] for g in groups}
     var_rule = ""
     if plantilla:
         names = ", ".join("{" + k + "}" for k in vars_ok)
@@ -560,8 +568,11 @@ def generar_textos_anuncio(indicaciones, idioma="es", mode="simple", variables=N
         grupos = ask(needed)
         for g, _n in needed:
             seen = {t.lower() for t in accepted[g["key"]]}
-            for raw in grupos.get(g["key"], []) or []:
-                text = " ".join(str(raw).split()).strip().strip('"').strip()
+            for raw_item in grupos.get(g["key"], []) or []:
+                raw = raw_item.get("texto") if isinstance(raw_item, dict) else raw_item
+                pin = raw_item.get("posicion") if isinstance(raw_item, dict) else 0
+                pin = pin if pin in (1, 2) else 0
+                text = " ".join(str(raw or "").split()).strip().strip('"').strip()
                 if not text or text.lower() in seen:
                     continue
                 measured = _adtext_vars_ok(text, vars_ok, mode)
@@ -572,7 +583,9 @@ def generar_textos_anuncio(indicaciones, idioma="es", mode="simple", variables=N
                     continue
                 seen.add(text.lower())
                 accepted[g["key"]].append(text)
+                pins[g["key"]].append(pin)
     out = {g["key"]: accepted[g["key"]][:g["count"]] for g in groups}
+    out["pines"] = {g["key"]: pins[g["key"]][:g["count"]] for g in groups}
     out["faltan"] = {g["key"]: max(0, g["count"] - len(out[g["key"]])) for g in groups}
     return out
 
