@@ -2378,25 +2378,25 @@ def _mutate_rsa_batch(customer_id, ads, validate_only):
     return out
 
 
-def _ensure_label(customer_id, label):
+def _ensure_label(customer_id, label, description="Anuncios creados desde Paid Media Helper"):
     """Resource name de la etiqueta de la cuenta (la crea si no existe)."""
     rows = _search(customer_id, f"SELECT label.resource_name, label.name FROM label WHERE label.name = '{_gaql_quote(label)}' AND label.status = 'ENABLED'")
     if rows:
         return (rows[0].get("label") or {}).get("resourceName", "")
     payload = _post_json(f"{BASE_URL}/customers/{customer_id}/labels:mutate", {"operations": [{"create": {
-        "name": label, "textLabel": {"description": "Anuncios creados desde Paid Media Helper", "backgroundColor": "#FFB300"},
+        "name": label, "textLabel": {"description": description, "backgroundColor": "#FFB300"},
     }}]})
     return ((payload.get("results") or [{}])[0] or {}).get("resourceName", "")
 
 
-def _apply_label(customer_id, label_resource, ad_resources):
+def _apply_label(customer_id, label_resource, ad_resources, validate_only=False):
     """Etiqueta los anuncios creados. Devuelve {resource_name del anuncio: mensaje de error} (vacío si todo salió bien)."""
     failed = {}
     for start in range(0, len(ad_resources), AD_BULK_CHUNK):
         chunk = ad_resources[start:start + AD_BULK_CHUNK]
         ops = [{"create": {"adGroupAd": rn, "label": label_resource}} for rn in chunk]
         try:
-            payload = _post_json(f"{BASE_URL}/customers/{customer_id}/adGroupAdLabels:mutate", {"operations": ops, "partialFailure": True})
+            payload = _post_json(f"{BASE_URL}/customers/{customer_id}/adGroupAdLabels:mutate", {"operations": ops, "partialFailure": True, "validateOnly": validate_only})
         except Exception as e:  # noqa: BLE001
             for rn in chunk:
                 failed[rn] = google_error_text(e)
@@ -2593,6 +2593,74 @@ def set_label_ads_status(customer_id, items, label, status, validate_only=True):
 
 
 # ---------------------------------------------------------------------------
+# Etiquetar anuncios que ya existen y están activos (para luego pausarlos o activarlos por etiqueta). Solo anuncios
+# adaptables ACTIVOS de campañas y grupos activos de búsqueda; no cambia el estado de ningún anuncio.
+# ---------------------------------------------------------------------------
+def fetch_labelable_ads(customer_id, label):
+    """Anuncios adaptables activos de campañas Search activas, con `labeled` = ya llevan la etiqueta."""
+    label = clean_ad_label(label)
+    rows = _search(customer_id, """
+        SELECT ad_group.id, ad_group.name, ad_group_ad.ad.id, ad_group_ad.status, campaign.id, campaign.name
+        FROM ad_group_ad
+        WHERE ad_group_ad.ad.type = 'RESPONSIVE_SEARCH_AD' AND ad_group_ad.status = 'ENABLED'
+          AND campaign.status = 'ENABLED' AND ad_group.status = 'ENABLED' AND campaign.advertising_channel_type = 'SEARCH'
+    """)
+    labeled = {(a["ad_group_id"], a["ad_id"]) for a in _labeled_ads_detail(customer_id, label)}
+    ads = []
+    for r in rows:
+        g, c, aga = r.get("adGroup") or {}, r.get("campaign") or {}, r.get("adGroupAd") or {}
+        gid, aid = str(g.get("id")), str((aga.get("ad") or {}).get("id"))
+        ads.append({"ad_group_id": gid, "ad_group_name": g.get("name") or "", "ad_id": aid, "status": aga.get("status") or "",
+                    "campaign_id": str(c.get("id")), "campaign_name": c.get("name") or "", "active_context": True, "labeled": (gid, aid) in labeled})
+    ads.sort(key=lambda x: (x["campaign_name"].lower(), x["ad_group_name"].lower(), x["ad_id"]))
+    return {"ads": ads, "rsa_enabled": {}}
+
+
+def _check_labelable(row):
+    if not row:
+        raise ValueError("El anuncio ya no está activo o ya no es de una campaña de búsqueda activa.")
+    if row["labeled"]:
+        raise ValueError("El anuncio ya tiene esa etiqueta.")
+
+
+LABEL_NEW_NOTE = "La etiqueta todavía no existe en esta cuenta: se creará al aplicar (Google no puede validar ese paso de antemano)."
+
+
+def add_label_to_ads(customer_id, items, label, validate_only=True):
+    """Pone la etiqueta (o solo valida) a anuncios activos que ya existen. `items` = [{ad_group_id, ad_id}]. Relee en vivo.
+    Devuelve (lista alineada con `items`, nota de la cuenta)."""
+    label = clean_ad_label(label)
+    live = {(a["ad_group_id"], a["ad_id"]): a for a in fetch_labelable_ads(customer_id, label)["ads"]}
+    results = [None] * len(items)
+    to_send, idx = [], []
+    for i, it in enumerate(items):
+        key = (str(it["ad_group_id"]), str(it["ad_id"]))
+        row = live.get(key)
+        try:
+            _check_labelable(row)
+        except ValueError as e:
+            results[i] = {"ok": False, "error": str(e), "skipped": True}
+            continue
+        results[i] = {"ok": True, "campaign_name": row["campaign_name"], "ad_group_name": row["ad_group_name"], "ad_id": key[1], "old_status": row["status"]}
+        to_send.append(f"customers/{customer_id}/adGroupAds/{key[0]}~{key[1]}")
+        idx.append(i)
+    note = ""
+    if to_send:
+        rows = _search(customer_id, f"SELECT label.resource_name FROM label WHERE label.name = '{_gaql_quote(label)}' AND label.status = 'ENABLED'")
+        label_rn = ((rows[0].get("label") or {}).get("resourceName", "")) if rows else ""
+        if validate_only and not label_rn:
+            failed, note = {}, LABEL_NEW_NOTE
+        else:
+            if not label_rn:
+                label_rn = _ensure_label(customer_id, label, "Etiqueta creada desde Paid Media Helper")
+            failed = _apply_label(customer_id, label_rn, to_send, validate_only=validate_only)
+        for i, rn in zip(idx, to_send):
+            if rn in failed:
+                results[i] = {"ok": False, "error": "Google Ads rechazó la etiqueta: " + failed[rn]}
+    return results, note
+
+
+# ---------------------------------------------------------------------------
 # Eliminar por etiqueta (irreversible). Solo anuncios adaptables PAUSADOS que el servidor vuelve a encontrar con la etiqueta.
 # Después, si ya no queda nada con esa etiqueta en la cuenta (ni anuncios, ni campañas, ni grupos, ni palabras clave), se
 # elimina también la etiqueta; ante cualquier duda se deja.
@@ -2748,7 +2816,7 @@ def _simulated_label_ads_detail(customer_id, label):
         if cid != str(customer_id):
             continue
         for gid, info in by_group.items():
-            if info["status"] == "ENABLED" and gid in enabled:
+            if info["status"] == "ENABLED" and gid in enabled and not info.get("existing"):
                 enabled[gid] += 1
     for gid, info in (_SIMULATED_LABELED.get((str(customer_id), label), {}) or {}).items():
         r = groups.get(gid)
@@ -2796,6 +2864,47 @@ def simulated_set_label_ads_status(customer_id, items, label, status, validate_o
             _SIMULATED_LABELED[(str(customer_id), label)][key[0]]["status"] = status
         results.append({"ok": True, "campaign_name": row["campaign_name"], "ad_group_name": row["ad_group_name"], "ad_id": key[1], "old_status": row["status"]})
     return results
+
+
+def _simulated_labelable_ads(customer_id, label):
+    raw = _simulated_ad_targets_raw(customer_id)
+    if raw is None:
+        return []
+    structure, url_by_group = raw[0], raw[2]
+    labeled = _SIMULATED_LABELED.get((str(customer_id), label), {}) or {}
+    out = []
+    for r in structure:
+        gid = r["adGroup"]["id"]
+        if not url_by_group.get(gid):
+            continue
+        out.append({"ad_group_id": gid, "ad_group_name": r["adGroup"]["name"], "ad_id": "8" + gid, "status": "ENABLED",
+                    "campaign_id": r["campaign"]["id"], "campaign_name": r["campaign"]["name"], "active_context": True, "labeled": gid in labeled})
+    out.sort(key=lambda x: (x["campaign_name"].lower(), x["ad_group_name"].lower(), x["ad_id"]))
+    return out
+
+
+def simulated_labelable_ads(customer_id, label):
+    return {"ads": _simulated_labelable_ads(customer_id, clean_ad_label(label)), "rsa_enabled": {}}
+
+
+def simulated_add_label_to_ads(customer_id, items, label, validate_only=True):
+    label = clean_ad_label(label)
+    live = {(a["ad_group_id"], a["ad_id"]): a for a in _simulated_labelable_ads(customer_id, label)}
+    results, any_ok = [], False
+    for it in items:
+        key = (str(it["ad_group_id"]), str(it["ad_id"]))
+        row = live.get(key)
+        try:
+            _check_labelable(row)
+        except ValueError as e:
+            results.append({"ok": False, "error": str(e), "skipped": True})
+            continue
+        any_ok = True
+        if not validate_only:
+            _SIMULATED_LABELED.setdefault((str(customer_id), label), {})[key[0]] = {"ad_id": key[1], "status": "ENABLED", "existing": True}
+        results.append({"ok": True, "campaign_name": row["campaign_name"], "ad_group_name": row["ad_group_name"], "ad_id": key[1], "old_status": row["status"]})
+    note = LABEL_NEW_NOTE if (validate_only and any_ok and (str(customer_id), label) not in _SIMULATED_LABELED) else ""
+    return results, note
 
 
 def simulated_remove_label_ads(customer_id, items, label, validate_only=True):

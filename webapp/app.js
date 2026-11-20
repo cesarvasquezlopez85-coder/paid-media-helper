@@ -16354,7 +16354,7 @@ function renderNuevosAnunciosPage() {
   const ready = s.mcc.selectedId && s.accountsStatus === 'ready';
   if (s.mode === 'etiqueta') {
     if (ready && nulState().sched.status === 'idle') nulSchedLoad();
-    return `${sim}${renderNuaModeSwitch()}${renderNuaStepAccounts()}${ready ? renderNulStepLabel() : ''}${ready && s.selected.length ? renderNulStepRows() : ''}${ready && s.selected.length && nulState().action !== 'DELETE' ? renderNulSchedForm() : ''}${ready ? renderNulSchedList() : ''}`;
+    return `${sim}${renderNuaModeSwitch()}${renderNuaStepAccounts()}${ready ? renderNulStepLabel() : ''}${ready && s.selected.length ? renderNulStepRows() : ''}${ready && s.selected.length && ['ENABLED', 'PAUSED'].includes(nulState().action) ? renderNulSchedForm() : ''}${ready ? renderNulSchedList() : ''}`;
   }
   return `${sim}${renderNuaModeSwitch()}${renderNuaStepAccounts()}${ready ? renderNutStepTemplate() : ''}${s.selected.length && s.mcc.selectedId ? renderNutStepTargets() : ''}`;
 }
@@ -17116,7 +17116,7 @@ function bindNutemplate() {
 const NUL_MAX_ENABLED_RSA = 3;
 
 function nulNewState() {
-  return { label: '', action: 'ENABLED', rows: {}, status: 'idle', readLabel: '', excluded: {}, check: null, run: { status: 'idle', error: null, results: {}, applied: false },
+  return { label: '', action: 'ENABLED', filter: '', rows: {}, status: 'idle', readLabel: '', excluded: {}, check: null, run: { status: 'idle', error: null, results: {}, applied: false },
     sched: { list: [], status: 'idle', error: null, date: '', time: '09:00', run: { status: 'idle', error: null, done: false }, open: {} } };
 }
 
@@ -17143,16 +17143,26 @@ function nulSelectedRows() {
   return s.selected.map((id) => l.rows[id]).filter(Boolean);
 }
 
+// Al etiquetar anuncios existentes se puede filtrar por parte del nombre de la campaña.
+function nulVisibleAds(accRow) {
+  const l = nulState();
+  const f = l.filter.trim().toLowerCase();
+  if (l.action !== 'LABEL' || !f) return accRow.ads;
+  return accRow.ads.filter((a) => (a.campaign_name || '').toLowerCase().includes(f));
+}
+
 // Una fila por anuncio con la etiqueta: si se puede aplicar la acción elegida o por qué no.
 function nulCompute(accRow) {
   const l = nulState();
   if (!accRow || accRow.status !== 'ready') return [];
   const planned = {};
-  return accRow.ads.map((a) => {
+  return nulVisibleAds(accRow).map((a) => {
     const key = `${accRow.id}:${a.ad_group_id}:${a.ad_id}`;
     const row = { key, accId: accRow.id, adGroupId: a.ad_group_id, adId: a.ad_id, campaignName: a.campaign_name, groupName: a.ad_group_name, current: a.status, reason: '' };
     if (a.status === 'REMOVED') row.reason = 'Eliminado';
-    else if (l.action === 'DELETE') {
+    else if (l.action === 'LABEL') {
+      if (a.labeled) row.reason = 'Ya tiene la etiqueta';
+    } else if (l.action === 'DELETE') {
       if (a.status !== 'PAUSED') row.reason = 'Solo se eliminan anuncios pausados: pausa primero este anuncio';
     } else if (l.action === 'ENABLED') {
       if (a.status !== 'PAUSED') row.reason = 'Ya está activo';
@@ -17215,7 +17225,7 @@ function nulRead() {
     const id = queue.shift();
     if (!id) return Promise.resolve();
     const row = l.rows[id];
-    return fetch(`/api/google-ads/label-ads?customer_id=${encodeURIComponent(id)}&label=${encodeURIComponent(label)}`)
+    return fetch(`/api/google-ads/${l.action === 'LABEL' ? 'label-candidates' : 'label-ads'}?customer_id=${encodeURIComponent(id)}&label=${encodeURIComponent(label)}`)
       .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
       .then(({ ok, data }) => {
         if (!ok) throw new Error(data.error || 'Error desconocido.');
@@ -17241,6 +17251,8 @@ function nulSubmit(validateOnly) {
     const accounts = new Set(rows.map((r) => r.accId)).size;
     if (l.action === 'DELETE') {
       if (!window.confirm(`Se ELIMINARÁN ${rows.length} anuncios pausados con la etiqueta «${nulCleanLabel()}» en ${accounts} cuentas del MCC «${s.mcc.selectedName}». Esto NO se puede deshacer. Después, la etiqueta se eliminará de las cuentas donde ya no se use. ¿Continuar?`)) return;
+    } else if (l.action === 'LABEL') {
+      if (!window.confirm(`Se pondrá la etiqueta «${nulCleanLabel()}» a ${rows.length} anuncios activos en ${accounts} cuentas del MCC «${s.mcc.selectedName}». No cambia el estado de los anuncios. ¿Continuar?`)) return;
     } else {
       const verb = l.action === 'ENABLED' ? 'activarán' : 'pausarán';
       if (!window.confirm(`Se ${verb} ${rows.length} anuncios con la etiqueta «${nulCleanLabel()}» en ${accounts} cuentas del MCC «${s.mcc.selectedName}». ¿Continuar?`)) return;
@@ -17253,9 +17265,10 @@ function nulSubmit(validateOnly) {
   l.run = { status: 'loading', error: null, results: {}, applied: false };
   render();
   const removing = l.action === 'DELETE';
-  fetch(removing ? '/api/google-ads/label-ads-remove' : '/api/google-ads/label-ads-status', {
+  const labeling = l.action === 'LABEL';
+  fetch(removing ? '/api/google-ads/label-ads-remove' : labeling ? '/api/google-ads/label-ads-add' : '/api/google-ads/label-ads-status', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(removing
+    body: JSON.stringify(removing || labeling
       ? { validate_only: validateOnly, mcc_id: s.mcc.selectedId, label: nulCleanLabel(), accounts }
       : { validate_only: validateOnly, mcc_id: s.mcc.selectedId, label: nulCleanLabel(), status: l.action, accounts }),
   })
@@ -17272,6 +17285,7 @@ function nulSubmit(validateOnly) {
         });
       });
       const notes = {};
+      if (labeling) (data.results || []).forEach((res, i) => { const sent = accounts[i]; if (sent && res.ok && res.label_note) notes[sent.customer_id] = res.label_note; });
       if (removing && !validateOnly) (data.results || []).forEach((res, i) => { const sent = accounts[i]; if (sent && res.ok && 'label_deleted' in res) notes[sent.customer_id] = res.label_deleted ? 'Etiqueta eliminada de la cuenta.' : (res.label_note || ''); });
       l.run = { status: 'ready', error: null, results, applied: !validateOnly, notes };
       if (validateOnly) {
@@ -17285,6 +17299,7 @@ function nulSubmit(validateOnly) {
             const acc = l.rows[r.accId];
             const ad = acc && acc.ads.find((x) => x.ad_group_id === r.adGroupId && x.ad_id === r.adId);
             if (ad && removing) ad.status = 'REMOVED';
+            else if (ad && labeling) ad.labeled = true;
             else if (ad) {
               ad.status = l.action;
               acc.rsaEnabled[r.adGroupId] = Math.max(0, (acc.rsaEnabled[r.adGroupId] || 0) + (l.action === 'ENABLED' ? 1 : -1));
@@ -17313,15 +17328,15 @@ function nulResultCell(row) {
   if (!r) return '';
   if (!r.ok) return `<span style="color:var(--color-danger,#b3261e)">✕ ${escapeHtml(r.error || 'Error')}</span>`;
   if (!l.run.applied) return '<span style="color:var(--color-success,#1d6b41);font-weight:700">✓ Google lo validó</span>';
-  return `<span style="color:var(--color-success,#1d6b41);font-weight:700">${l.action === 'DELETE' ? '✓ Eliminado' : l.action === 'ENABLED' ? '✓ Activado' : '✓ Pausado'}</span>`;
+  return `<span style="color:var(--color-success,#1d6b41);font-weight:700">${l.action === 'DELETE' ? '✓ Eliminado' : l.action === 'LABEL' ? '✓ Etiquetado' : l.action === 'ENABLED' ? '✓ Activado' : '✓ Pausado'}</span>`;
 }
 
 function nulAccountBody(accRow) {
   const l = nulState();
-  if (accRow.status === 'loading') return '<p class="footnote">Leyendo los anuncios con la etiqueta…</p>';
+  if (accRow.status === 'loading') return `<p class="footnote">${l.action === 'LABEL' ? 'Leyendo los anuncios activos…' : 'Leyendo los anuncios con la etiqueta…'}</p>`;
   if (accRow.status === 'error') return `<p style="color:var(--color-danger,#b3261e);margin:6px 0">${escapeHtml(accRow.error)}</p>`;
   const rows = nulCompute(accRow);
-  if (!rows.length) return '<p class="footnote">Ningún anuncio de esta cuenta lleva esa etiqueta.</p>';
+  if (!rows.length) return `<p class="footnote">${l.action === 'LABEL' ? (l.filter.trim() ? 'Ninguna campaña activa de esta cuenta coincide con el filtro.' : 'Esta cuenta no tiene anuncios adaptables activos en campañas de búsqueda activas.') : 'Ningún anuncio de esta cuenta lleva esa etiqueta.'}</p>`;
   const ready = rows.filter((r) => !r.reason);
   const marked = ready.filter((r) => !l.excluded[r.key]).length;
   const trs = rows.map((r) => `<tr>
@@ -17338,7 +17353,7 @@ function nulAccountBody(accRow) {
       <button class="btn-outline xs" data-nul-all="${escapeHtml(accRow.id)}">Marcar todos</button>
       <button class="btn-outline xs" data-nul-none="${escapeHtml(accRow.id)}">Quitar todos</button>
     </div>
-    ${l.run.applied && l.run.notes && l.run.notes[accRow.id] ? `<p class="field-hint" style="margin:0 0 6px">${escapeHtml(l.run.notes[accRow.id])}</p>` : ''}
+    ${l.run.notes && l.run.notes[accRow.id] && (l.run.applied || l.action === 'LABEL') ? `<p class="field-hint" style="margin:0 0 6px">${escapeHtml(l.run.notes[accRow.id])}</p>` : ''}
     <div class="table-scroll" style="max-height:300px"><table>
       <thead><tr><th></th><th>Campaña</th><th>Grupo de anuncios</th><th>ID del anuncio</th><th>Estado actual</th><th>Motivo</th><th>Resultado</th></tr></thead>
       <tbody>${trs}</tbody>
@@ -17353,8 +17368,10 @@ function renderNulStepLabel() {
       <div style="display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap">
         <div class="field"><label>Etiqueta de la tanda</label><input type="text" id="nul-label" value="${escapeHtml(l.label)}" style="width:220px" maxlength="80" placeholder="ej. BF2026" autocomplete="off" /></div>
         <div class="field"><label>Qué hacer con los anuncios de la etiqueta</label>
-          <select id="nul-action"><option value="ENABLED" ${l.action === 'ENABLED' ? 'selected' : ''}>Activar los anuncios pausados</option><option value="PAUSED" ${l.action === 'PAUSED' ? 'selected' : ''}>Pausar los anuncios activos</option><option value="DELETE" ${l.action === 'DELETE' ? 'selected' : ''}>Eliminar los anuncios pausados (no se puede deshacer)</option></select></div>
+          <select id="nul-action"><option value="ENABLED" ${l.action === 'ENABLED' ? 'selected' : ''}>Activar los anuncios pausados</option><option value="PAUSED" ${l.action === 'PAUSED' ? 'selected' : ''}>Pausar los anuncios activos</option><option value="DELETE" ${l.action === 'DELETE' ? 'selected' : ''}>Eliminar los anuncios pausados (no se puede deshacer)</option><option value="LABEL" ${l.action === 'LABEL' ? 'selected' : ''}>Poner la etiqueta a anuncios activos que ya existen</option></select></div>
+        ${l.action === 'LABEL' ? `<div class="field"><label>Solo campañas cuyo nombre contenga (opcional)</label><input type="text" id="nul-filter" value="${escapeHtml(l.filter)}" style="width:240px" maxlength="80" placeholder="ej. Colombia" autocomplete="off" /></div>` : ''}
       </div>
+      ${l.action === 'LABEL' ? '<p class="field-hint" style="margin:8px 0 0">Pone la etiqueta a los anuncios adaptables ACTIVOS de campañas y grupos de búsqueda activos que aún no la llevan. No cambia el estado de ningún anuncio. Después puedes pausarlos o activarlos (o programarlo) con esa misma etiqueta. Usa un nombre claro: si luego eliges «Pausar» con esta etiqueta, se pausarán de verdad estos anuncios activos. Si la etiqueta no existe en una cuenta, se crea al aplicar.</p>' : ''}
       <p class="field-hint" style="margin:8px 0 0">Solo se tocan los anuncios adaptables que llevan esa etiqueta (los creados con «Por plantilla»). Activar exige que la campaña y el grupo estén activos y que el grupo no pase de 3 anuncios adaptables activos. Primero se valida con Google sin cambiar nada.</p>
       ${l.action === 'DELETE' ? '<p class="field-hint" style="margin:8px 0 0;color:var(--color-danger,#b3261e);font-weight:700">Eliminar es irreversible: solo se eliminan los anuncios pausados que lleven la etiqueta, hayan sido creados desde la plataforma o no. Si después ya nada usa la etiqueta en la cuenta, también se elimina. Para borrar un anuncio activo, pausa primero. No se puede programar.</p>' : ''}
       <p id="nul-label-hint" class="field-hint" style="margin-top:8px;color:var(--color-danger,#b3261e)">${nutLabelValid(l.label) ? '' : 'Escribe la etiqueta (hasta 80 caracteres: letras, números, espacios, guion y guion bajo).'}</p>
@@ -17365,7 +17382,7 @@ function renderNulStepRows() {
   const l = nulState();
   const prepared = Object.keys(l.rows).length > 0;
   const okKeys = l.check ? l.check.okKeys : [];
-  const verbBtn = l.action === 'DELETE' ? 'Eliminar' : l.action === 'ENABLED' ? 'Activar' : 'Pausar';
+  const verbBtn = l.action === 'DELETE' ? 'Eliminar' : l.action === 'LABEL' ? 'Etiquetar' : l.action === 'ENABLED' ? 'Activar' : 'Pausar';
   const accounts = nulSelectedRows();
   const body = prepared ? `
       ${accounts.map((a) => `
@@ -17382,12 +17399,12 @@ function renderNulStepRows() {
         <span id="nul-summary" class="field-hint">${nulReadyRows().length} anuncios aplicables</span>
         ${l.status === 'ready' && l.readLabel !== nulCleanLabel() ? '<span style="color:var(--color-danger,#b3261e)">La etiqueta cambió: lee de nuevo los anuncios.</span>' : ''}
       </div>
-      <p class="field-hint" style="margin-top:8px">${l.run.applied ? (l.action === 'DELETE' ? 'Eliminación aplicada. Cada anuncio eliminado queda registrado.' : 'Cambio aplicado. Cada anuncio cambiado queda registrado.') : 'El botón de aplicar se habilita solo con lo que Google validó y se bloquea si cambias la etiqueta, la acción o las marcas.'}</p>` : '';
+      <p class="field-hint" style="margin-top:8px">${l.run.applied ? (l.action === 'DELETE' ? 'Eliminación aplicada. Cada anuncio eliminado queda registrado.' : l.action === 'LABEL' ? 'Etiqueta aplicada. Cada anuncio etiquetado queda registrado.' : 'Cambio aplicado. Cada anuncio cambiado queda registrado.') : 'El botón de aplicar se habilita solo con lo que Google validó y se bloquea si cambias la etiqueta, la acción o las marcas.'}</p>` : '';
   return `
     <div class="card" style="margin-bottom:16px">
-      <h3 style="margin:0 0 10px;font-size:14px">3. Anuncios con la etiqueta</h3>
+      <h3 style="margin:0 0 10px;font-size:14px">${l.action === 'LABEL' ? '3. Anuncios activos que se pueden etiquetar' : '3. Anuncios con la etiqueta'}</h3>
       ${l.status === 'loading' ? '<p class="footnote">Leyendo los anuncios de cada cuenta…</p>' : ''}
-      <button class="btn-accent" id="nul-read" data-action="nul-read" ${l.status === 'loading' || !nutLabelValid(l.label) ? 'disabled' : ''}>${prepared ? 'Leer de nuevo los anuncios' : 'Leer los anuncios con la etiqueta'}</button>
+      <button class="btn-accent" id="nul-read" data-action="nul-read" ${l.status === 'loading' || !nutLabelValid(l.label) ? 'disabled' : ''}>${prepared ? 'Leer de nuevo los anuncios' : l.action === 'LABEL' ? 'Leer los anuncios activos' : 'Leer los anuncios con la etiqueta'}</button>
       ${body}
     </div>`;
 }
@@ -17408,7 +17425,8 @@ function bindNulabel() {
   const l = nulState();
   const on = (id, ev, fn) => { const el = document.getElementById(id); if (el) el.addEventListener(ev, fn); };
   on('nul-label', 'input', (e) => { l.label = e.target.value; nulResetRun(); nulSyncButtons(); });
-  on('nul-action', 'change', (e) => { l.action = e.target.value; nulResetRun(); render(); });
+  on('nul-action', 'change', (e) => { const was = l.action === 'LABEL'; l.action = e.target.value; if (was !== (l.action === 'LABEL')) nulResetTargets(); else nulResetRun(); render(); });
+  on('nul-filter', 'change', (e) => { l.filter = e.target.value; l.excluded = {}; nulResetRun(); render(); });
   document.querySelectorAll('[data-nul-inc]').forEach((el) => el.addEventListener('change', () => { if (el.checked) delete l.excluded[el.dataset.nulInc]; else l.excluded[el.dataset.nulInc] = true; nulResetRun(); render(); }));
   document.querySelectorAll('[data-nul-all]').forEach((el) => el.addEventListener('click', () => { nulCompute(l.rows[el.dataset.nulAll]).forEach((r) => { delete l.excluded[r.key]; }); nulResetRun(); render(); }));
   document.querySelectorAll('[data-nul-none]').forEach((el) => el.addEventListener('click', () => { nulCompute(l.rows[el.dataset.nulNone]).forEach((r) => { if (!r.reason) l.excluded[r.key] = true; }); nulResetRun(); render(); }));
@@ -17432,7 +17450,7 @@ function nulSchedTimeOk() {
 
 function nulSchedCanCreate() {
   const l = nulState();
-  return l.action !== 'DELETE' && l.status === 'ready' && l.readLabel === nulCleanLabel() && nutLabelValid(l.label) && nulSchedAccounts().length > 0
+  return ['ENABLED', 'PAUSED'].includes(l.action) && l.status === 'ready' && l.readLabel === nulCleanLabel() && nutLabelValid(l.label) && nulSchedAccounts().length > 0
     && nulSchedTimeOk() && l.sched.run.status !== 'loading';
 }
 
