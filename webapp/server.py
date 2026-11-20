@@ -1555,6 +1555,11 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_super_admin_json():
                 return
             self._handle_google_ads_label_ads_status(payload)
+        elif path == "/api/google-ads/label-ads-remove":
+            # Eliminar (irreversible) anuncios pausados por etiqueta, con vista previa: solo super admin.
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_label_ads_remove(payload)
         elif path == "/api/ad-schedules":
             if not self._require_super_admin_json():
                 return
@@ -3687,6 +3692,118 @@ class Handler(SimpleHTTPRequestHandler):
                     except Exception as e:  # noqa: BLE001 — el cambio ya quedó en Google Ads; un fallo del registro no debe ocultarlo
                         print(f"[ad-status-log] {e}", flush=True)
         self._send_json(200, {"validate_only": validate_only, "simulated": simulated, "label": label, "status": status, "results": results,
+                              "ok_count": ok_count, "error_count": error_count})
+
+    def _handle_google_ads_label_ads_remove(self, payload):
+        # ELIMINA (o solo valida) anuncios PAUSADOS que llevan la etiqueta, en varias cuentas de un MCC. Es irreversible; después, si
+        # la etiqueta ya no la usa nada en la cuenta, también se elimina.
+        user = self._get_current_user()
+        validate_only = payload.get("validate_only", True) is not False
+        mcc_id = str(payload.get("mcc_id") or "").strip()
+        raw_accounts = payload.get("accounts")
+        if not mcc_id.isdigit():
+            self._send_json(400, {"error": "Elige primero el MCC."})
+            return
+        try:
+            label = google_ads_client.clean_ad_label(payload.get("label"))
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        if not isinstance(raw_accounts, list) or not raw_accounts:
+            self._send_json(400, {"error": "Elige al menos una cuenta."})
+            return
+        if len(raw_accounts) > AD_CREATE_MAX_ACCOUNTS:
+            self._send_json(400, {"error": f"Máximo {AD_CREATE_MAX_ACCOUNTS} cuentas por vez."})
+            return
+        accounts, seen_acc, total = [], set(), 0
+        for acc in raw_accounts:
+            acc = acc if isinstance(acc, dict) else {}
+            cid = str(acc.get("customer_id") or "").strip()
+            raw_ads = acc.get("ads")
+            if not cid.isdigit() or not isinstance(raw_ads, list) or not raw_ads:
+                self._send_json(400, {"error": "Cada cuenta necesita al menos un anuncio."})
+                return
+            if cid in seen_acc:
+                self._send_json(400, {"error": "Una cuenta no puede repetirse en la misma tanda."})
+                return
+            seen_acc.add(cid)
+            if len(raw_ads) > AD_BULK_MAX_PER_ACCOUNT:
+                self._send_json(400, {"error": f"Máximo {AD_BULK_MAX_PER_ACCOUNT} anuncios por cuenta en cada tanda."})
+                return
+            total += len(raw_ads)
+            if total > AD_BULK_MAX_TOTAL:
+                self._send_json(400, {"error": f"Máximo {AD_BULK_MAX_TOTAL} anuncios por tanda."})
+                return
+            ads, seen_ads = [], set()
+            for a in raw_ads:
+                a = a if isinstance(a, dict) else {}
+                gid, aid = str(a.get("ad_group_id") or "").strip(), str(a.get("ad_id") or "").strip()
+                if not gid.isdigit() or not aid.isdigit():
+                    self._send_json(400, {"error": "Cada anuncio necesita su grupo de anuncios y su ID."})
+                    return
+                if (gid, aid) in seen_ads:
+                    self._send_json(400, {"error": "Un anuncio no puede repetirse en la misma tanda."})
+                    return
+                seen_ads.add((gid, aid))
+                ads.append({"ad_group_id": gid, "ad_id": aid})
+            accounts.append({"customer_id": cid, "ads": ads})
+        simulated = not google_ads_client.is_configured()
+        members = None
+        if not simulated:
+            members = get_mcc_member_ids(mcc_id)
+            if members is None:
+                self._send_json(502, {"error": "No se pudo leer las cuentas de ese MCC. Intenta de nuevo."})
+                return
+        results = [None] * len(accounts)
+        to_run = []
+        for i, acc in enumerate(accounts):
+            cid = acc["customer_id"]
+            if members is not None and cid not in members:
+                results[i] = {"customer_id": cid, "ok": False, "error": "Esta cuenta no pertenece al MCC elegido."}
+            elif not simulated and not self._user_can_access_account(user, cid):
+                results[i] = {"customer_id": cid, "ok": False, "error": "No tienes acceso a esta cuenta de Google Ads."}
+            elif not validate_only and not _write_limiter.allow(f"user:{user['id']}:ads", *AD_WRITE_RATE_LIMIT):
+                results[i] = {"customer_id": cid, "ok": False, "error": "Demasiadas escrituras seguidas: espera un minuto y vuelve a intentar con esta cuenta."}
+            else:
+                to_run.append(i)
+        fn = google_ads_client.simulated_remove_label_ads if simulated else google_ads_client.remove_label_ads
+        label_fn = google_ads_client.simulated_delete_label_if_unused if simulated else google_ads_client.delete_label_if_unused
+
+        def run(i):
+            acc = accounts[i]
+            try:
+                items = fn(acc["customer_id"], acc["ads"], label, validate_only=validate_only)
+                out = {"customer_id": acc["customer_id"], "ok": True, "items": items}
+                if not validate_only and any(x.get("ok") for x in items):
+                    out["label_deleted"], out["label_note"] = label_fn(acc["customer_id"], label)
+                return i, out
+            except Exception as e:  # noqa: BLE001 — un fallo en una cuenta no debe frenar a las demás
+                if not isinstance(e, ValueError):
+                    print(f"[google-ads-error] label-ads-remove {' '.join(str(e).split())[:300]}", flush=True)
+                return i, {"customer_id": acc["customer_id"], "ok": False, "error": google_ads_client.google_error_text(e)}
+
+        if to_run:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                for i, res in pool.map(run, to_run):
+                    results[i] = res
+        ok_count = error_count = 0
+        for i, res in enumerate(results):
+            if not res.get("ok"):
+                error_count += len(accounts[i]["ads"])
+                continue
+            items = res["items"]
+            ok_count += sum(1 for x in items if x.get("ok"))
+            error_count += sum(1 for x in items if not x.get("ok"))
+            if not validate_only:
+                changed = [{"ad_group_id": accounts[i]["ads"][j]["ad_group_id"], "ad_id": accounts[i]["ads"][j]["ad_id"],
+                            "campaign_name": it.get("campaign_name"), "ad_group_name": it.get("ad_group_name"), "old_status": it.get("old_status")}
+                           for j, it in enumerate(items) if it.get("ok")]
+                if changed:
+                    try:
+                        store_ad_status_changes(user["id"], accounts[i]["customer_id"], changed, label, "REMOVED")
+                    except Exception as e:  # noqa: BLE001 — el cambio ya quedó en Google Ads; un fallo del registro no debe ocultarlo
+                        print(f"[ad-status-log] {e}", flush=True)
+        self._send_json(200, {"validate_only": validate_only, "simulated": simulated, "label": label, "results": results,
                               "ok_count": ok_count, "error_count": error_count})
 
     def _handle_ad_schedule_create(self, payload):

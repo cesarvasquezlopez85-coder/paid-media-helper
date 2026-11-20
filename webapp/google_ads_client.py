@@ -2380,7 +2380,7 @@ def _mutate_rsa_batch(customer_id, ads, validate_only):
 
 def _ensure_label(customer_id, label):
     """Resource name de la etiqueta de la cuenta (la crea si no existe)."""
-    rows = _search(customer_id, f"SELECT label.resource_name, label.name FROM label WHERE label.name = '{_gaql_quote(label)}'")
+    rows = _search(customer_id, f"SELECT label.resource_name, label.name FROM label WHERE label.name = '{_gaql_quote(label)}' AND label.status = 'ENABLED'")
     if rows:
         return (rows[0].get("label") or {}).get("resourceName", "")
     payload = _post_json(f"{BASE_URL}/customers/{customer_id}/labels:mutate", {"operations": [{"create": {
@@ -2592,6 +2592,89 @@ def set_label_ads_status(customer_id, items, label, status, validate_only=True):
     return results
 
 
+# ---------------------------------------------------------------------------
+# Eliminar por etiqueta (irreversible). Solo anuncios adaptables PAUSADOS que el servidor vuelve a encontrar con la etiqueta.
+# Después, si ya no queda nada con esa etiqueta en la cuenta (ni anuncios, ni campañas, ni grupos, ni palabras clave), se
+# elimina también la etiqueta; ante cualquier duda se deja.
+# ---------------------------------------------------------------------------
+def _check_label_ad_remove(row):
+    if row["status"] != "PAUSED":
+        raise ValueError("Solo se eliminan anuncios pausados: pausa primero este anuncio.")
+
+
+def _mutate_ad_remove_batch(customer_id, resources, validate_only):
+    """Elimina (o solo valida) anuncios (resource names). Devuelve una lista alineada: {"ok": True} o {"ok": False, "error"}."""
+    url = f"{BASE_URL}/customers/{customer_id}/adGroupAds:mutate"
+    out = []
+    for start in range(0, len(resources), AD_BULK_CHUNK):
+        chunk = resources[start:start + AD_BULK_CHUNK]
+        ops = [{"remove": rn} for rn in chunk]
+        try:
+            payload = _post_json(url, {"operations": ops, "partialFailure": True, "validateOnly": validate_only})
+        except Exception as e:  # noqa: BLE001 — un lote que falla entero se reporta en cada anuncio del lote
+            msg = google_error_text(e)
+            out.extend({"ok": False, "error": msg} for _ in chunk)
+            continue
+        errors = _partial_failure_errors(payload)
+        for i in range(len(chunk)):
+            out.append({"ok": False, "error": "Google Ads rechazó la eliminación: " + errors[i]} if i in errors else {"ok": True})
+    return out
+
+
+def remove_label_ads(customer_id, items, label, validate_only=True):
+    """Elimina (o solo valida) anuncios que llevan la etiqueta. `items` = [{ad_group_id, ad_id}]. Relee en vivo qué anuncios
+    llevan la etiqueta y su estado; solo se eliminan los PAUSADOS. Devuelve una lista alineada con `items`."""
+    label = clean_ad_label(label)
+    live = {(a["ad_group_id"], a["ad_id"]): a for a in _labeled_ads_detail(customer_id, label)}
+    results = [None] * len(items)
+    to_send, idx = [], []
+    for i, it in enumerate(items):
+        key = (str(it["ad_group_id"]), str(it["ad_id"]))
+        row = live.get(key)
+        try:
+            if not row:
+                raise ValueError("El anuncio ya no tiene esa etiqueta o fue eliminado.")
+            _check_label_ad_remove(row)
+        except ValueError as e:
+            results[i] = {"ok": False, "error": str(e), "skipped": True}
+            continue
+        results[i] = {"ok": True, "campaign_name": row["campaign_name"], "ad_group_name": row["ad_group_name"], "ad_id": key[1], "old_status": row["status"]}
+        to_send.append(f"customers/{customer_id}/adGroupAds/{key[0]}~{key[1]}")
+        idx.append(i)
+    sent = _mutate_ad_remove_batch(customer_id, to_send, validate_only) if to_send else []
+    for i, res in zip(idx, sent):
+        if not res["ok"]:
+            results[i] = {"ok": False, "error": res["error"]}
+    return results
+
+
+def delete_label_if_unused(customer_id, label):
+    """Elimina la etiqueta de la cuenta si nada la usa. Devuelve (eliminada, nota): la nota explica por qué se dejó."""
+    label = clean_ad_label(label)
+    q = _gaql_quote(label)
+    try:
+        rows = _search(customer_id, f"SELECT label.resource_name FROM label WHERE label.name = '{q}' AND label.status = 'ENABLED'")
+        resources = [(r.get("label") or {}).get("resourceName") for r in rows if (r.get("label") or {}).get("resourceName")]
+        if not resources:
+            return False, "La etiqueta ya no existía."
+        in_list = ", ".join("'" + _gaql_quote(rn) + "'" for rn in resources)
+        checks = [
+            ("anuncios", f"SELECT ad_group_ad.resource_name FROM ad_group_ad_label WHERE label.name = '{q}' AND ad_group_ad.status != 'REMOVED'"),
+            ("campañas", f"SELECT campaign.id FROM campaign_label WHERE label.name = '{q}' AND campaign.status != 'REMOVED'"),
+            ("grupos de anuncios", f"SELECT ad_group.id FROM ad_group_label WHERE label.name = '{q}' AND ad_group.status != 'REMOVED'"),
+            ("palabras clave", f"SELECT ad_group_criterion.resource_name FROM ad_group_criterion_label WHERE label.name = '{q}' AND ad_group_criterion.status != 'REMOVED'"),
+            # customer_label no admite filtrar por label.name: se filtra por el recurso de la etiqueta.
+            ("la cuenta", f"SELECT customer_label.resource_name FROM customer_label WHERE customer_label.label IN ({in_list})"),
+        ]
+        for what, gaql in checks:
+            if _search(customer_id, gaql):
+                return False, f"La etiqueta se dejó: todavía la usan {what}."
+        _post_json(f"{BASE_URL}/customers/{customer_id}/labels:mutate", {"operations": [{"remove": rn} for rn in resources]})
+        return True, ""
+    except Exception as e:  # noqa: BLE001 — los anuncios ya se eliminaron; no poder borrar la etiqueta no debe ocultarlo
+        return False, "La etiqueta se dejó: no se pudo comprobar o eliminar (" + google_error_text(e, 120) + ")."
+
+
 # Estado en memoria del modo simulado: por (cuenta, etiqueta), {id del grupo: {ad_id, status}} de los anuncios creados.
 _SIMULATED_LABELED = {}
 
@@ -2713,6 +2796,35 @@ def simulated_set_label_ads_status(customer_id, items, label, status, validate_o
             _SIMULATED_LABELED[(str(customer_id), label)][key[0]]["status"] = status
         results.append({"ok": True, "campaign_name": row["campaign_name"], "ad_group_name": row["ad_group_name"], "ad_id": key[1], "old_status": row["status"]})
     return results
+
+
+def simulated_remove_label_ads(customer_id, items, label, validate_only=True):
+    label = clean_ad_label(label)
+    ads, _enabled = _simulated_label_ads_detail(customer_id, label)
+    live = {(a["ad_group_id"], a["ad_id"]): a for a in ads}
+    results = []
+    for it in items:
+        key = (str(it["ad_group_id"]), str(it["ad_id"]))
+        row = live.get(key)
+        try:
+            if not row:
+                raise ValueError("El anuncio ya no tiene esa etiqueta o fue eliminado.")
+            _check_label_ad_remove(row)
+        except ValueError as e:
+            results.append({"ok": False, "error": str(e), "skipped": True})
+            continue
+        if not validate_only:
+            _SIMULATED_LABELED[(str(customer_id), label)].pop(key[0], None)
+        results.append({"ok": True, "campaign_name": row["campaign_name"], "ad_group_name": row["ad_group_name"], "ad_id": key[1], "old_status": row["status"]})
+    return results
+
+
+def simulated_delete_label_if_unused(customer_id, label):
+    label = clean_ad_label(label)
+    if _SIMULATED_LABELED.get((str(customer_id), label)):
+        return False, "La etiqueta se dejó: todavía la usan anuncios."
+    _SIMULATED_LABELED.pop((str(customer_id), label), None)
+    return True, ""
 
 
 RECOMMENDATION_SUBSCRIPTION_STATUS_VALUES = ("ENABLED", "PAUSED")
