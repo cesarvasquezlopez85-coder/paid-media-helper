@@ -34,7 +34,9 @@ https://developers.google.com/google-ads/api/fields/latest/metrics.
 
 import calendar
 import datetime
+import base64
 import json
+import struct
 import os
 import re
 import time
@@ -2593,6 +2595,320 @@ def set_label_ads_status(customer_id, items, label, status, validate_only=True):
 
 
 # ---------------------------------------------------------------------------
+# Performance Max: UN grupo de recursos nuevo (textos, imágenes y videos) en una campaña PMax que ya existe y está activa
+# en cada cuenta. Reglas que no se rompen: el grupo se crea siempre PAUSADO, la campaña se relee en vivo (activa y PMax),
+# la URL final sale de los grupos de recursos que esa campaña ya tiene, y todo (recursos, grupo y vínculos) viaja en UNA
+# sola petición atómica `googleAds:mutate`: si Google rechaza algo, no se crea nada en esa cuenta. La vista previa usa
+# `validateOnly` sobre esa misma petición.
+# ---------------------------------------------------------------------------
+PMAX_HEADLINE_MAX, PMAX_HEADLINES_RANGE = 30, (3, 15)
+PMAX_LONG_HEADLINE_MAX, PMAX_LONG_HEADLINES_RANGE = 90, (1, 5)
+PMAX_DESCRIPTION_MAX, PMAX_DESCRIPTIONS_RANGE, PMAX_SHORT_DESCRIPTION_MAX = 90, (2, 5), 60
+PMAX_BUSINESS_NAME_MAX = 25
+PMAX_GROUP_NAME_MAX = 128
+PMAX_MAX_VIDEOS = 5
+PMAX_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+PMAX_MAX_MARKETING_IMAGES = 20
+PMAX_MAX_LOGOS = 5
+PMAX_IMAGE_TOTAL_MAX_BYTES = 24 * 1024 * 1024
+PMAX_RATIO_TOLERANCE = 0.02
+# tipo -> (campo de la API, proporción ancho/alto, tamaño mínimo (ancho, alto), nombre en español, obligatorio)
+PMAX_IMAGE_KINDS = {
+    "landscape": ("MARKETING_IMAGE", 1.91, (600, 314), "imagen horizontal 1,91:1", True),
+    "square": ("SQUARE_MARKETING_IMAGE", 1.0, (300, 300), "imagen cuadrada 1:1", True),
+    "portrait": ("PORTRAIT_MARKETING_IMAGE", 0.8, (480, 600), "imagen vertical 4:5", False),
+    "logo": ("LOGO", 1.0, (128, 128), "logo cuadrado 1:1", False),
+    "logo_wide": ("LANDSCAPE_LOGO", 4.0, (512, 128), "logo horizontal 4:1", False),
+}
+
+
+def _image_size(raw):
+    """(tipo, ancho, alto) de un PNG o JPEG a partir de sus bytes, o None si no es ninguno de los dos."""
+    if raw[:8] == b"\x89PNG\r\n\x1a\n" and len(raw) >= 24:
+        return "png", struct.unpack(">I", raw[16:20])[0], struct.unpack(">I", raw[20:24])[0]
+    if raw[:2] == b"\xff\xd8":
+        i = 2
+        while i + 9 < len(raw):
+            if raw[i] != 0xFF:
+                i += 1
+                continue
+            marker = raw[i + 1]
+            if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+                i += 2
+                continue
+            seglen = struct.unpack(">H", raw[i + 2:i + 4])[0]
+            if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                return "jpeg", struct.unpack(">H", raw[i + 7:i + 9])[0], struct.unpack(">H", raw[i + 5:i + 7])[0]
+            i += 2 + seglen
+    return None
+
+
+def clean_pmax_images(images):
+    """Valida las imágenes del grupo de recursos: {tipo: [{name, data (base64)}]}. Devuelve una lista de
+    {kind, field, name, data} con los bytes en base64 ya comprobados (PNG o JPEG, tamaño, proporción y mínimos),
+    o lanza ValueError con un mensaje en español. Obligatorias: horizontal y cuadrada. El logo cuadrado solo es obligatorio si la campaña no usa Brand Guidelines."""
+    if not isinstance(images, dict):
+        images = {}
+    out, total_bytes = [], 0
+    for kind, (field, ratio, minimum, label, required) in PMAX_IMAGE_KINDS.items():
+        items = images.get(kind) or []
+        if not isinstance(items, list):
+            raise ValueError("Las imágenes llegaron en un formato inválido.")
+        if required and not items:
+            raise ValueError(f"Falta una imagen obligatoria: {label}.")
+        for it in items:
+            it = it if isinstance(it, dict) else {}
+            name = " ".join(str(it.get("name") or "imagen").split())[:60] or "imagen"
+            try:
+                raw = base64.b64decode(str(it.get("data") or ""), validate=True)
+            except (ValueError, TypeError):
+                raise ValueError(f"«{name}» no se pudo leer como imagen.")
+            if not raw or len(raw) > PMAX_IMAGE_MAX_BYTES:
+                raise ValueError(f"«{name}» pesa más de {PMAX_IMAGE_MAX_BYTES // (1024 * 1024)} MB o está vacía.")
+            total_bytes += len(raw)
+            info = _image_size(raw)
+            if not info:
+                raise ValueError(f"«{name}» debe ser PNG o JPEG.")
+            _fmt, w, h = info
+            if w < minimum[0] or h < minimum[1]:
+                raise ValueError(f"«{name}» mide {w}×{h}: para «{label}» se necesita al menos {minimum[0]}×{minimum[1]}.")
+            if abs((w / h) / ratio - 1) > PMAX_RATIO_TOLERANCE:
+                raise ValueError(f"«{name}» mide {w}×{h}: no tiene la proporción de «{label}».")
+            out.append({"kind": kind, "field": field, "name": name, "data": base64.b64encode(raw).decode("ascii")})
+    marketing = sum(1 for x in out if x["kind"] in ("landscape", "square", "portrait"))
+    if marketing > PMAX_MAX_MARKETING_IMAGES:
+        raise ValueError(f"Máximo {PMAX_MAX_MARKETING_IMAGES} imágenes (horizontales, cuadradas y verticales juntas).")
+    if sum(1 for x in out if x["kind"] == "logo") > PMAX_MAX_LOGOS or sum(1 for x in out if x["kind"] == "logo_wide") > PMAX_MAX_LOGOS:
+        raise ValueError(f"Máximo {PMAX_MAX_LOGOS} logos de cada tipo.")
+    if total_bytes > PMAX_IMAGE_TOTAL_MAX_BYTES:
+        raise ValueError(f"Las imágenes pesan más de {PMAX_IMAGE_TOTAL_MAX_BYTES // (1024 * 1024)} MB en total.")
+    return out
+
+
+def parse_youtube_id(value):
+    """ID de 11 caracteres de un video de YouTube a partir de un enlace o del ID suelto; lanza ValueError si no se reconoce."""
+    text = str(value or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", text):
+        return text
+    try:
+        parts = urllib.parse.urlsplit(text if "//" in text else "https://" + text)
+    except ValueError:
+        parts = None
+    host = (parts.hostname or "").lower() if parts else ""
+    vid = ""
+    if host in ("youtu.be", "www.youtu.be") and parts:
+        vid = parts.path.strip("/").split("/")[0]
+    elif host.endswith("youtube.com") and parts:
+        segs = [x for x in parts.path.split("/") if x]
+        if segs and segs[0] in ("shorts", "embed", "live", "v") and len(segs) > 1:
+            vid = segs[1]
+        else:
+            vid = (urllib.parse.parse_qs(parts.query).get("v") or [""])[0]
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", vid):
+        raise ValueError(f"«{text[:60]}» no es un enlace de YouTube válido.")
+    return vid
+
+
+def clean_pmax_videos(values):
+    if values is None:
+        return []
+    if not isinstance(values, list):
+        raise ValueError("Los videos llegaron en un formato inválido.")
+    ids = []
+    for v in values:
+        if not str(v or "").strip():
+            continue
+        vid = parse_youtube_id(v)
+        if vid not in ids:
+            ids.append(vid)
+    if len(ids) > PMAX_MAX_VIDEOS:
+        raise ValueError(f"Máximo {PMAX_MAX_VIDEOS} videos.")
+    return ids
+
+
+def clean_pmax_texts(name, business_name, headlines, long_headlines, descriptions):
+    """Valida los textos ya armados de un grupo de recursos. Devuelve (nombre, nombre del negocio, títulos, títulos
+    largos, descripciones) o lanza ValueError con un mensaje en español."""
+    def _list(items, kind, maxlen, rng, noun):
+        if not isinstance(items, list):
+            raise ValueError(f"Faltan los {kind}.")
+        out, seen = [], set()
+        for raw in items:
+            text = " ".join(str(raw or "").split())
+            if not text:
+                continue
+            if len(text) > maxlen:
+                raise ValueError(f"{noun} pasa de {maxlen} caracteres: «{text[:40]}…».")
+            if any(ord(ch) < 32 for ch in text):
+                raise ValueError(f"{noun} trae caracteres no permitidos.")
+            if text.lower() in seen:
+                raise ValueError(f"Hay textos repetidos en {kind}: «{text[:40]}».")
+            seen.add(text.lower())
+            out.append(text)
+        if len(out) < rng[0] or len(out) > rng[1]:
+            raise ValueError(f"Se necesitan entre {rng[0]} y {rng[1]} {kind} (hay {len(out)}).")
+        return out
+    gname = " ".join(str(name or "").split())
+    if not gname or len(gname) > PMAX_GROUP_NAME_MAX:
+        raise ValueError(f"El nombre del grupo de recursos es obligatorio y admite hasta {PMAX_GROUP_NAME_MAX} caracteres.")
+    biz = " ".join(str(business_name or "").split())
+    if len(biz) > PMAX_BUSINESS_NAME_MAX:
+        raise ValueError(f"El nombre del negocio admite hasta {PMAX_BUSINESS_NAME_MAX} caracteres.")
+    heads = _list(headlines, "títulos", PMAX_HEADLINE_MAX, PMAX_HEADLINES_RANGE, "Un título")
+    longs = _list(long_headlines, "títulos largos", PMAX_LONG_HEADLINE_MAX, PMAX_LONG_HEADLINES_RANGE, "Un título largo")
+    descs = _list(descriptions, "descripciones", PMAX_DESCRIPTION_MAX, PMAX_DESCRIPTIONS_RANGE, "Una descripción")
+    if not any(len(d) <= PMAX_SHORT_DESCRIPTION_MAX for d in descs):
+        raise ValueError(f"Al menos una descripción debe tener {PMAX_SHORT_DESCRIPTION_MAX} caracteres o menos.")
+    return gname, biz, heads, longs, descs
+
+
+def fetch_pmax_campaigns(customer_id):
+    """Campañas Performance Max ACTIVAS de la cuenta, cada una con la URL de sus grupos de recursos (la más usada entre los
+    activos) y los nombres de los grupos que ya tiene (para no repetir el nombre)."""
+    camps = _search(customer_id, """
+        SELECT campaign.id, campaign.name, campaign.brand_guidelines_enabled
+        FROM campaign
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX' AND campaign.status = 'ENABLED'
+    """)
+    groups = _search(customer_id, """
+        SELECT campaign.id, asset_group.id, asset_group.name, asset_group.status, asset_group.final_urls
+        FROM asset_group
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX' AND campaign.status = 'ENABLED' AND asset_group.status != 'REMOVED'
+    """)
+    return _build_pmax_campaigns(
+        [((r.get("campaign") or {}).get("id"), (r.get("campaign") or {}).get("name"), bool((r.get("campaign") or {}).get("brandGuidelinesEnabled"))) for r in camps],
+        [(str((r.get("campaign") or {}).get("id")), (r.get("assetGroup") or {}).get("name") or "", (r.get("assetGroup") or {}).get("status") or "",
+          list((r.get("assetGroup") or {}).get("finalUrls") or [])) for r in groups])
+
+
+def _build_pmax_campaigns(camps, groups):
+    by = {}
+    for cid, name, brand in camps:
+        by[str(cid)] = {"id": str(cid), "name": name or f"Campaña {cid}", "brand_guidelines": bool(brand), "asset_group_names": [], "_urls": Counter(), "_urls_enabled": Counter()}
+    for cid, gname, gstatus, urls in groups:
+        c = by.get(str(cid))
+        if not c:
+            continue
+        c["asset_group_names"].append(gname)
+        for u in urls[:1]:
+            c["_urls"][u] += 1
+            if gstatus == "ENABLED":
+                c["_urls_enabled"][u] += 1
+    out, hosts = [], Counter()
+    for c in by.values():
+        pool = c.pop("_urls_enabled") or c["_urls"]
+        c.pop("_urls", None)
+        c["url"] = pool.most_common(1)[0][0] if pool else ""
+        if c["url"] and url_host(c["url"]):
+            hosts[url_host(c["url"])] += 1
+        out.append(c)
+    out.sort(key=lambda c: c["name"].lower())
+    return {"campaigns": out, "hosts": sorted(hosts)}
+
+
+def _check_pmax_target(campaigns, campaign_id, group_name, business_name="", images=()):
+    """La campaña elegida y su URL, o ValueError con el motivo."""
+    camp = next((c for c in campaigns if c["id"] == str(campaign_id)), None)
+    if not camp:
+        raise ValueError("La campaña ya no está activa o ya no es de Performance Max.")
+    if not camp["url"]:
+        raise ValueError("La campaña no tiene grupos de recursos de los que tomar la URL final.")
+    if group_name.lower() in {n.lower() for n in camp["asset_group_names"]}:
+        raise ValueError("Ya existe un grupo de recursos con ese nombre en la campaña.")
+    if not camp.get("brand_guidelines") and (not business_name or not any(i["kind"] == "logo" for i in images)):
+        raise ValueError("Esta campaña no usa Brand Guidelines: el grupo necesita el nombre del negocio y un logo cuadrado.")
+    return camp
+
+
+def _pmax_operations(customer_id, campaign_id, name, url, business_name, heads, longs, descs, images, video_ids, brand_guidelines=False):
+    """Operaciones de UNA petición `googleAds:mutate`: recursos con ID temporal negativo, el grupo y los vínculos."""
+    ops, next_id = [], [0]
+
+    def tmp(kind):
+        next_id[0] -= 1
+        return f"customers/{customer_id}/{kind}/{next_id[0]}"
+    ag = tmp("assetGroups")
+    links = []
+    text_assets = {}
+
+    def text_asset(text):
+        if text not in text_assets:
+            rn = tmp("assets")
+            text_assets[text] = rn
+            ops.append({"assetOperation": {"create": {"resourceName": rn, "textAsset": {"text": text}}}})
+        return text_assets[text]
+    ops.append({"assetGroupOperation": {"create": {"resourceName": ag, "campaign": f"customers/{customer_id}/campaigns/{campaign_id}",
+                                                   "name": name, "finalUrls": [url], "status": "PAUSED"}}})
+    # Con Brand Guidelines, el nombre del negocio y los logos viven en la campaña: el grupo no los vincula.
+    groups = [("HEADLINE", heads), ("LONG_HEADLINE", longs), ("DESCRIPTION", descs)]
+    if not brand_guidelines:
+        groups.append(("BUSINESS_NAME", [business_name]))
+    for field, texts in groups:
+        for t in texts:
+            links.append((field, text_asset(t)))
+    for n, img in enumerate(images, 1):
+        if brand_guidelines and img["field"] in ("LOGO", "LANDSCAPE_LOGO"):
+            continue
+        rn = tmp("assets")
+        ops.append({"assetOperation": {"create": {"resourceName": rn, "name": f"{name} · {img['kind']} {n}"[:120], "imageAsset": {"data": img["data"]}}}})
+        links.append((img["field"], rn))
+    for vid in video_ids:
+        rn = tmp("assets")
+        ops.append({"assetOperation": {"create": {"resourceName": rn, "youtubeVideoAsset": {"youtubeVideoId": vid}}}})
+        links.append(("YOUTUBE_VIDEO", rn))
+    for field, rn in links:
+        ops.append({"assetGroupAssetOperation": {"create": {"assetGroup": ag, "asset": rn, "fieldType": field}}})
+    return ops
+
+
+def create_pmax_asset_group(customer_id, campaign_id, name, business_name, heads, longs, descs, images, video_ids, validate_only=True):
+    """Crea (o solo valida) un grupo de recursos PAUSADO en una campaña Performance Max activa. Devuelve
+    {campaign_id, campaign_name, asset_group_id, url}."""
+    camps = fetch_pmax_campaigns(customer_id)["campaigns"]
+    camp = _check_pmax_target(camps, campaign_id, name, business_name, images)
+    ops = _pmax_operations(customer_id, camp["id"], name, camp["url"], business_name, heads, longs, descs, images, video_ids, camp.get("brand_guidelines", False))
+    payload = _post_json(f"{BASE_URL}/customers/{customer_id}/googleAds:mutate", {"mutateOperations": ops, "validateOnly": validate_only}, timeout=120)
+    group_id = ""
+    for r in payload.get("mutateOperationResponses") or []:
+        rn = (r.get("assetGroupResult") or {}).get("resourceName", "")
+        if rn:
+            group_id = rn.rsplit("/", 1)[-1]
+    return {"campaign_id": camp["id"], "campaign_name": camp["name"], "asset_group_id": group_id, "url": camp["url"]}
+
+
+SIMULATED_PMAX = {
+    "1111111111": [("9101", "Estelar Hoteles - CO:es - PMAX", "https://www.estelar-demo.example/reservas", ["Evergreen"]),
+                   ("9102", "Estelar Hoteles - Eventos - PMAX", "https://www.estelar-demo.example/eventos", [])],
+    "2222222222": [("9201", "Click Clack - ES:es - PMAX", "https://www.clickclack-demo.example/", ["Base"])],
+}
+_SIMULATED_PMAX_CREATED = {}
+
+
+def simulated_pmax_campaigns(customer_id):
+    spec = SIMULATED_PMAX.get(str(customer_id), [])
+    camps = [(cid, name, cid != "9201") for cid, name, _u, _g in spec]
+    groups = []
+    for cid, _name, url, names in spec:
+        for n in names:
+            groups.append((cid, n, "ENABLED", [url]))
+        for n in _SIMULATED_PMAX_CREATED.get((str(customer_id), cid), []):
+            groups.append((cid, n, "PAUSED", [url]))
+    out = _build_pmax_campaigns(camps, groups)
+    return out
+
+
+def simulated_create_pmax_asset_group(customer_id, campaign_id, name, business_name, heads, longs, descs, images, video_ids, validate_only=True):
+    camps = simulated_pmax_campaigns(customer_id)["campaigns"]
+    camp = _check_pmax_target(camps, campaign_id, name, business_name, images)
+    if any("rechazar" in t.lower() for t in heads):
+        raise RuntimeError("Google Ads API respondió 400: simulado, un título con «rechazar» se rechaza.")
+    if not validate_only:
+        _SIMULATED_PMAX_CREATED.setdefault((str(customer_id), camp["id"]), []).append(name)
+    return {"campaign_id": camp["id"], "campaign_name": camp["name"], "asset_group_id": "" if validate_only else "7" + camp["id"], "url": camp["url"]}
+
+
+
+# ---------------------------------------------------------------------------
 # Etiquetar anuncios que ya existen y están activos (para luego pausarlos o activarlos por etiqueta). Solo anuncios
 # adaptables ACTIVOS de campañas y grupos activos de búsqueda; no cambia el estado de ningún anuncio.
 # ---------------------------------------------------------------------------
@@ -4198,12 +4514,12 @@ def _units_to_micros(v):
     return None if v in (None, "") else int(round(float(v) * MICROS))
 
 
-def _post_json(url, body):
+def _post_json(url, body, timeout=None):
     req = urllib.request.Request(
         url, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
     )
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+        with urllib.request.urlopen(req, timeout=timeout or TIMEOUT_SECONDS) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")

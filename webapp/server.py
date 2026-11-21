@@ -186,6 +186,7 @@ def get_mcc_member_ids(mcc_customer_id):
 WRITE_RATE_LIMIT = (30, 60)
 # Anuncios nuevos: cuentas por tanda (cada una es una escritura real al aplicar, y el tope por minuto es AD_WRITE_RATE_LIMIT).
 AD_CREATE_MAX_ACCOUNTS = 40
+MAX_REQUEST_BYTES = 48 * 1024 * 1024  # las imágenes de Performance Max viajan en base64 dentro del JSON
 # Los anuncios tienen su propio tope de escrituras (una por cuenta): una tanda de 40 cuentas cabe con margen y el resto de
 # escrituras de la plataforma sigue con WRITE_RATE_LIMIT.
 AD_WRITE_RATE_LIMIT = (60, 60)
@@ -523,6 +524,28 @@ def init_db():
             )
             """
         )
+        # Grupos de recursos de Performance Max creados desde Anuncios nuevos (siempre pausados): una fila por cuenta.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pmax_creation_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at REAL NOT NULL,
+                user_id INTEGER,
+                customer_id TEXT NOT NULL,
+                campaign_id TEXT,
+                campaign_name TEXT,
+                asset_group_id TEXT,
+                asset_group_name TEXT,
+                final_url TEXT,
+                headlines TEXT,
+                long_headlines TEXT,
+                descriptions TEXT,
+                business_name TEXT,
+                images INTEGER,
+                videos INTEGER
+            )
+            """
+        )
         # Posiciones fijadas (pin) de cada anuncio creado, como JSON {"h": [0, 1, ...], "d": [...]}; las bases que ya
         # existían (producción) necesitan la migración explícita.
         try:
@@ -799,6 +822,21 @@ def store_ad_creation(user_id, customer_id, result, ad_group_id, final_url, head
             (time.time(), user_id, str(customer_id), str(result.get("campaign_id") or ""), (result.get("campaign_name") or "")[:200],
              str(ad_group_id), (result.get("ad_group_name") or "")[:200], str(result.get("ad_id") or ""), (final_url or "")[:2000],
              json.dumps(headlines, ensure_ascii=False), json.dumps(descriptions, ensure_ascii=False), _pins_json(head_pins, desc_pins)),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def store_pmax_creation(user_id, customer_id, result, name, business_name, heads, longs, descs, n_images, n_videos):
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT INTO pmax_creation_log (created_at, user_id, customer_id, campaign_id, campaign_name, asset_group_id, asset_group_name, "
+            "final_url, headlines, long_headlines, descriptions, business_name, images, videos) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (time.time(), user_id, str(customer_id), str(result.get("campaign_id") or ""), (result.get("campaign_name") or "")[:200],
+             str(result.get("asset_group_id") or ""), name[:200], (result.get("url") or "")[:2000], json.dumps(heads, ensure_ascii=False),
+             json.dumps(longs, ensure_ascii=False), json.dumps(descs, ensure_ascii=False), business_name, n_images, n_videos),
         )
         conn.commit()
     finally:
@@ -1341,6 +1379,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_label_ads(parse_qs(parsed.query))
             return
 
+        if path == "/api/google-ads/pmax-campaigns":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_pmax_campaigns(parse_qs(parsed.query))
+            return
+
         if path == "/api/google-ads/label-candidates":
             if not self._require_super_admin_json():
                 return
@@ -1481,6 +1525,9 @@ class Handler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         length = int(self.headers.get("Content-Length", 0) or 0)
+        if length > MAX_REQUEST_BYTES:
+            self._send_json(413, {"error": "La petición es demasiado grande."})
+            return
         raw = self.rfile.read(length) if length else b""
         try:
             payload = json.loads(raw.decode("utf-8")) if raw else {}
@@ -1561,6 +1608,11 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_super_admin_json():
                 return
             self._handle_google_ads_label_ads_status(payload)
+        elif path == "/api/google-ads/pmax-create":
+            # Crear un grupo de recursos de Performance Max (siempre pausado), con vista previa: solo super admin.
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_pmax_create(payload)
         elif path == "/api/google-ads/label-ads-add":
             # Poner una etiqueta a anuncios activos que ya existen (no cambia su estado), con vista previa: solo super admin.
             if not self._require_super_admin_json():
@@ -3594,6 +3646,115 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_google_ads_error(e)
             return
         self._send_json(200, {**data, "simulated": False})
+
+    def _handle_google_ads_pmax_campaigns(self, query):
+        # Campañas Performance Max activas de una cuenta, con la URL de sus grupos de recursos y los nombres que ya usan.
+        user = self._get_current_user()
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not google_ads_client.is_configured():
+            self._send_json(200, {**google_ads_client.simulated_pmax_campaigns(customer_id), "simulated": True})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+        try:
+            data = google_ads_client.fetch_pmax_campaigns(customer_id)
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+            return
+        self._send_json(200, {**data, "simulated": False})
+
+    def _handle_google_ads_pmax_create(self, payload):
+        # Crea (o valida sin crear) UN grupo de recursos PAUSADO de Performance Max en una campaña ya activa de cada cuenta.
+        user = self._get_current_user()
+        validate_only = payload.get("validate_only", True) is not False
+        mcc_id = str(payload.get("mcc_id") or "").strip()
+        raw_accounts = payload.get("accounts")
+        if not mcc_id.isdigit():
+            self._send_json(400, {"error": "Elige primero el MCC."})
+            return
+        if not isinstance(raw_accounts, list) or not raw_accounts:
+            self._send_json(400, {"error": "Elige al menos una cuenta."})
+            return
+        if len(raw_accounts) > AD_CREATE_MAX_ACCOUNTS:
+            self._send_json(400, {"error": f"Máximo {AD_CREATE_MAX_ACCOUNTS} cuentas por vez."})
+            return
+        try:
+            images = google_ads_client.clean_pmax_images(payload.get("images"))
+            video_ids = google_ads_client.clean_pmax_videos(payload.get("videos"))
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        accounts, seen_acc = [], set()
+        for acc in raw_accounts:
+            acc = acc if isinstance(acc, dict) else {}
+            cid, camp = str(acc.get("customer_id") or "").strip(), str(acc.get("campaign_id") or "").strip()
+            if not cid.isdigit() or not camp.isdigit():
+                self._send_json(400, {"error": "Cada cuenta necesita su campaña de Performance Max."})
+                return
+            if cid in seen_acc:
+                self._send_json(400, {"error": "Una cuenta no puede repetirse en la misma tanda."})
+                return
+            seen_acc.add(cid)
+            try:
+                name, biz, heads, longs, descs = google_ads_client.clean_pmax_texts(
+                    acc.get("name"), acc.get("business_name"), acc.get("headlines"), acc.get("long_headlines"), acc.get("descriptions"))
+            except ValueError as e:
+                self._send_json(400, {"error": f"Cuenta {cid}: {e}"})
+                return
+            accounts.append({"customer_id": cid, "campaign_id": camp, "name": name, "business_name": biz, "heads": heads, "longs": longs, "descs": descs})
+        simulated = not google_ads_client.is_configured()
+        members = None
+        if not simulated:
+            members = get_mcc_member_ids(mcc_id)
+            if members is None:
+                self._send_json(502, {"error": "No se pudo leer las cuentas de ese MCC. Intenta de nuevo."})
+                return
+        results = [None] * len(accounts)
+        to_run = []
+        for i, acc in enumerate(accounts):
+            cid = acc["customer_id"]
+            if members is not None and cid not in members:
+                results[i] = {"customer_id": cid, "ok": False, "error": "Esta cuenta no pertenece al MCC elegido."}
+            elif not simulated and not self._user_can_access_account(user, cid):
+                results[i] = {"customer_id": cid, "ok": False, "error": "No tienes acceso a esta cuenta de Google Ads."}
+            elif not validate_only and not _write_limiter.allow(f"user:{user['id']}:ads", *AD_WRITE_RATE_LIMIT):
+                results[i] = {"customer_id": cid, "ok": False, "error": "Demasiadas escrituras seguidas: espera un minuto y vuelve a intentar con esta cuenta."}
+            else:
+                to_run.append(i)
+        fn = google_ads_client.simulated_create_pmax_asset_group if simulated else google_ads_client.create_pmax_asset_group
+
+        def run(i):
+            acc = accounts[i]
+            try:
+                r = fn(acc["customer_id"], acc["campaign_id"], acc["name"], acc["business_name"], acc["heads"], acc["longs"], acc["descs"],
+                       images, video_ids, validate_only=validate_only)
+                return i, {"customer_id": acc["customer_id"], "ok": True, "campaign_name": r.get("campaign_name"),
+                           "asset_group_id": r.get("asset_group_id"), "url": r.get("url"), "_r": r}
+            except Exception as e:  # noqa: BLE001 — un fallo en una cuenta no debe frenar a las demás
+                if not isinstance(e, ValueError):
+                    print(f"[google-ads-error] pmax-create {' '.join(str(e).split())[:300]}", flush=True)
+                return i, {"customer_id": acc["customer_id"], "ok": False, "error": google_ads_client.google_error_text(e)}
+
+        if to_run:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                for i, res in pool.map(run, to_run):
+                    results[i] = res
+        out = []
+        for i, res in enumerate(results):
+            r = res.pop("_r", None)
+            if r and not validate_only:
+                a = accounts[i]
+                try:
+                    store_pmax_creation(user["id"], a["customer_id"], r, a["name"], a["business_name"], a["heads"], a["longs"], a["descs"], len(images), len(video_ids))
+                except Exception as e:  # noqa: BLE001 — el grupo ya quedó en Google Ads; un fallo del registro no debe ocultarlo
+                    print(f"[pmax-creation-log] {e}", flush=True)
+            out.append(res)
+        self._send_json(200, {"validate_only": validate_only, "simulated": simulated, "results": out,
+                              "ok_count": sum(1 for r in out if r.get("ok")), "error_count": sum(1 for r in out if not r.get("ok"))})
 
     def _handle_google_ads_label_candidates(self, query):
         # Anuncios adaptables ACTIVOS de campañas Search activas de una cuenta, con si ya llevan la etiqueta (para etiquetarlos).
