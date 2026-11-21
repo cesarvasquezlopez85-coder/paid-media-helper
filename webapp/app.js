@@ -17080,6 +17080,7 @@ const PMX_LIM = { head: [3, 15, 30], long: [1, 5, 90], desc: [2, 5, 90], descSho
 function pmxNewState() {
   return { name: 'Black Friday - {HOTEL}', business: '{HOTEL}', heads: '', longs: '', descs: '', videos: '', imgMsg: '', campaignFilter: '',
     images: { landscape: [], square: [], portrait: [], logo: [], logo_wide: [] },
+    ai: { brief: '', idioma: 'es', status: 'idle', error: '', result: null },
     rows: {}, status: 'idle', excluded: {}, check: null, run: { status: 'idle', error: null, results: {}, applied: false } };
 }
 
@@ -17322,6 +17323,56 @@ function renderPmxImageBlock(kind) {
   </div>`;
 }
 
+const PMX_AI_LANGS = [['es', 'Español'], ['en', 'Inglés'], ['pt', 'Portugués'], ['de', 'Alemán'], ['fr', 'Francés'], ['it', 'Italiano'], ['nl', 'Neerlandés']];
+
+function renderPmxAiBox() {
+  const ai = pmxState().ai;
+  const loading = ai.status === 'loading';
+  const r = ai.result;
+  return `
+      <div style="border:1px dashed var(--color-border,#bbb);border-radius:8px;padding:12px;margin:0 0 12px">
+        <strong style="font-size:13px">Redactar con IA</strong>
+        <p class="field-hint" style="margin:4px 0 8px">Escribe solo las indicaciones: la IA redacta los títulos, los títulos largos y las descripciones usando únicamente lo que digas aquí (no inventa precios, ofertas ni servicios) y los deja con {HOTEL} donde va el nombre del hotel. Luego puedes editarlos.</p>
+        <textarea id="pmx-ai-brief" rows="4" maxlength="2000" style="width:100%;font-family:inherit" placeholder="ej. Black Friday: 30 % de descuento reservando del 24 al 30 de noviembre, desayuno incluido, cancelación gratis hasta 48 horas antes, tono cálido y para parejas." ${loading ? 'disabled' : ''}>${escapeHtml(ai.brief)}</textarea>
+        <div style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin-top:8px">
+          <div class="field" style="margin:0"><label>Idioma de los textos</label><select id="pmx-ai-lang" ${loading ? 'disabled' : ''}>${PMX_AI_LANGS.map(([code, name]) => `<option value="${code}" ${ai.idioma === code ? 'selected' : ''}>${name}</option>`).join('')}</select></div>
+          <button class="btn-accent" id="pmx-ai-btn" data-action="pmx-ai-generate" ${loading || String(ai.brief).trim().length < AD_AI_BRIEF_MIN ? 'disabled' : ''}>Generar los textos con IA</button>
+          ${loading ? '<span class="field-hint">Redactando…</span>' : ''}
+        </div>
+        ${ai.error ? `<p class="field-hint" style="margin:8px 0 0;color:var(--color-danger,#b3261e)">${escapeHtml(ai.error)}</p>` : ''}
+        ${r ? `<p class="field-hint" style="margin:8px 0 0;color:var(--color-success,#1d6b41)">Se generaron ${r.h} títulos, ${r.l} títulos largos y ${r.d} descripciones. Revísalos y edítalos antes de crear.</p>` : ''}
+        ${r && (r.missH || r.missL || r.missD) ? `<p class="field-hint" style="margin:4px 0 0;color:var(--color-danger,#b3261e)">La IA no logró completar todos: faltan ${r.missH} títulos, ${r.missL} títulos largos y ${r.missD} descripciones. Puedes generar de nuevo o escribirlos a mano.</p>` : ''}
+        ${r && r.noShort ? '<p class="field-hint" style="margin:4px 0 0;color:var(--color-danger,#b3261e)">Ninguna descripción tiene 60 caracteres o menos: Google exige una. Escribe una a mano o genera de nuevo.</p>' : ''}
+      </div>`;
+}
+
+function pmxAiGenerate() {
+  const p = pmxState();
+  const ai = p.ai;
+  if (ai.status === 'loading' || ai.brief.trim().length < AD_AI_BRIEF_MIN) return;
+  if ((nutLines(p.heads).length || nutLines(p.longs).length || nutLines(p.descs).length) &&
+      !window.confirm('Los títulos, los títulos largos y las descripciones que ya escribiste se reemplazarán por los que genere la IA. ¿Continuar?')) return;
+  ai.status = 'loading'; ai.error = ''; ai.result = null;
+  render();
+  fetch('/api/ai/pmax-textos', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ idioma: ai.idioma, indicaciones: ai.brief }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      const heads = data.titulares || [], longs = data.titulares_largos || [], descs = data.descripciones || [];
+      if (!heads.length && !longs.length && !descs.length) throw new Error('La IA no devolvió textos válidos. Ajusta las indicaciones e intenta de nuevo.');
+      p.heads = heads.join('\n'); p.longs = longs.join('\n'); p.descs = descs.join('\n');
+      pmxResetRun();
+      const f = data.faltan || {};
+      ai.status = 'ready';
+      ai.result = { h: heads.length, l: longs.length, d: descs.length, missH: f.titulares || 0, missL: f.titulares_largos || 0, missD: f.descripciones || 0, noShort: !!data.sin_descripcion_corta };
+      render();
+    })
+    .catch((err) => { ai.status = 'error'; ai.error = err.message || String(err); render(); });
+}
+
 function renderPmxStepBase() {
   const p = pmxState();
   const err = pmxBaseError();
@@ -17333,6 +17384,7 @@ function renderPmxStepBase() {
         <div class="field"><label>Nombre del grupo de recursos</label><input type="text" id="pmx-name" value="${escapeHtml(p.name)}" style="width:300px" maxlength="128" autocomplete="off" /></div>
         <div class="field"><label>Nombre del negocio (hasta ${PMX_LIM.biz}; con Brand Guidelines se usa el de la campaña)</label><input type="text" id="pmx-business" value="${escapeHtml(p.business)}" style="width:240px" maxlength="60" autocomplete="off" /></div>
       </div>
+      ${renderPmxAiBox()}
       <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:8px">
         <div class="field"><label>Títulos (uno por línea, de 3 a 15, hasta 30 caracteres)</label><textarea id="pmx-heads" rows="7" style="width:300px" placeholder="Black Friday {HOTEL}">${escapeHtml(p.heads)}</textarea></div>
         <div class="field"><label>Títulos largos (uno por línea, de 1 a 5, hasta 90)</label><textarea id="pmx-longs" rows="7" style="width:360px">${escapeHtml(p.longs)}</textarea></div>
@@ -17418,6 +17470,14 @@ function pmxSyncButtons() {
 function bindPmx() {
   const p = pmxState();
   const field = (id, key) => { const el = document.getElementById(id); if (el) el.addEventListener('input', (e) => { p[key] = e.target.value; pmxResetRun(); pmxSyncButtons(); }); };
+  const aiBrief = document.getElementById('pmx-ai-brief');
+  if (aiBrief) aiBrief.addEventListener('input', (e) => {
+    p.ai.brief = e.target.value;
+    const b = document.getElementById('pmx-ai-btn');
+    if (b) b.disabled = p.ai.status === 'loading' || p.ai.brief.trim().length < AD_AI_BRIEF_MIN;
+  });
+  const aiLang = document.getElementById('pmx-ai-lang');
+  if (aiLang) aiLang.addEventListener('change', (e) => { p.ai.idioma = e.target.value; });
   field('pmx-name', 'name'); field('pmx-business', 'business'); field('pmx-heads', 'heads'); field('pmx-longs', 'longs'); field('pmx-descs', 'descs'); field('pmx-videos', 'videos');
   const f = document.getElementById('pmx-filter');
   if (f) f.addEventListener('change', (e) => { p.campaignFilter = e.target.value; p.excluded = {}; pmxResetRun(); render(); });
@@ -19792,6 +19852,7 @@ function handleAction(action) {
     case 'nul-validate': nulSubmit(true); break;
     case 'nul-apply': nulSubmit(false); break;
     case 'nul-new-batch': nulNewBatch(); break;
+    case 'pmx-ai-generate': pmxAiGenerate(); break;
     case 'pmx-read': pmxRead(); break;
     case 'pmx-validate': pmxSubmit(true); break;
     case 'pmx-apply': pmxSubmit(false); break;

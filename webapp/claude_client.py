@@ -591,6 +591,137 @@ def generar_textos_anuncio(indicaciones, idioma="es", mode="simple", variables=N
 
 
 # ---------------------------------------------------------------------------
+# Textos de Performance Max con IA: igual que los de Anuncios nuevos (la IA propone y el código valida), pero con los tres
+# grupos de un grupo de recursos: títulos (hasta 30), títulos largos (hasta 90) y descripciones (hasta 90, una de 60 o menos).
+# Siempre es plantilla: pueden llevar {HOTEL}. El idioma de los textos lo elige la persona (`idioma`), por eso aquí no se
+# aplica _con_idioma: pediría los textos en el idioma de la pantalla y chocaría con el idioma pedido.
+# ---------------------------------------------------------------------------
+PMXTEXT_LONG_MAX = 90
+PMXTEXT_SHORT_DESC_MAX = 60
+PMXTEXT_COUNTS = {"titulares": 15, "titulares_largos": 5, "descripciones": 5}
+PMXTEXT_MAX_TOKENS = 5000
+
+PMXTEXT_SYSTEM_PROMPT = (
+    "Eres un redactor publicitario senior de Google Ads especializado en hoteles. Escribes los textos de un grupo de "
+    "recursos de Performance Max (títulos, títulos largos y descripciones) a partir de las indicaciones del equipo.\n\n"
+    "REGLAS ESTRICTAS:\n"
+    "1. Usa SOLO hechos que estén en las indicaciones (hotel, destino, servicios, ofertas, fechas, públicos). No inventes "
+    "precios, descuentos, estrellas, premios, cercanías, políticas ni servicios. Si un dato no está, no lo menciones. "
+    "Si las indicaciones traen una condición (fechas, mínimo de noches, código), respétala tal cual.\n"
+    "2. Prohibido: superlativos y promesas absolutas (mejor, número 1, garantizado, único, líder) salvo que las "
+    "indicaciones los pidan literalmente. Nada de emojis, nada de TODO EN MAYÚSCULAS, sin signos de exclamación en "
+    "los títulos y como máximo uno en una descripción. No nombres a otras marcas.\n"
+    "3. Respeta el límite de caracteres de cada grupo contando espacios. Cada texto debe ser distinto de los demás y "
+    "aportar un ángulo diferente (destino, servicio, oferta, motivo para reservar, llamada a la acción). En Performance "
+    "Max Google combina los textos en cualquier orden y en distintos formatos: cada título debe tener sentido solo y "
+    "combinado con otros; los títulos largos son frases completas que funcionan solos; no repitas la misma idea con "
+    "otras palabras.\n"
+    "4. Escribe en el idioma pedido, sin mezclar idiomas (salvo nombres propios), con ortografía y tildes correctas, en "
+    "un tono cálido y directo.\n"
+    "5. Responde SOLO con un objeto JSON válido, sin texto antes ni después ni bloques de código, con esta forma: "
+    "{\"grupos\": {\"titulares\": [\"...\"], \"titulares_largos\": [\"...\"], \"descripciones\": [\"...\"]}}."
+)
+PMXTEXT_SCHEMA = {
+    "type": "object",
+    "properties": {"grupos": {"type": "object", "properties": {
+        "titulares": {"type": "array", "items": {"type": "string"}},
+        "titulares_largos": {"type": "array", "items": {"type": "string"}},
+        "descripciones": {"type": "array", "items": {"type": "string"}}},
+        "required": ["titulares", "titulares_largos", "descripciones"], "additionalProperties": False}},
+    "required": ["grupos"], "additionalProperties": False,
+}
+
+
+def generar_textos_pmax(indicaciones, idioma="es"):
+    """Devuelve {"titulares": [...], "titulares_largos": [...], "descripciones": [...], "faltan": {clave: n}}.
+    Objetivo: 15 títulos (hasta 30), 5 títulos largos (hasta 90) y 5 descripciones (hasta 90, al menos una de 60 o
+    menos). Todos pueden usar {HOTEL} (el servidor la sustituye por cada hotel). Pide de más, valida y, si falta, repite
+    una vez solo lo que falta."""
+    brief = " ".join(str(indicaciones or "").split())[:ADTEXT_BRIEF_MAX]
+    if len(brief) < 15:
+        raise ValueError("Escribe las indicaciones: qué debe tener en cuenta el grupo de recursos (hotel o destino, oferta, fechas, servicios, público…).")
+    idioma_txt = ADTEXT_LANGUAGES.get(idioma) or f"el idioma con código ISO «{idioma}»"
+    vars_ok = {"HOTEL": ADTEXT_HOTEL_SAMPLE}
+    groups = [
+        {"key": "titulares", "label": "títulos", "count": PMXTEXT_COUNTS["titulares"], "limit": ADTEXT_HEAD_MAX, "kind": "headline"},
+        {"key": "titulares_largos", "label": "títulos largos", "count": PMXTEXT_COUNTS["titulares_largos"], "limit": PMXTEXT_LONG_MAX, "kind": "headline"},
+        {"key": "descripciones", "label": "descripciones", "count": PMXTEXT_COUNTS["descripciones"], "limit": ADTEXT_DESC_MAX, "kind": "description"},
+    ]
+    corpus = brief.lower() + " " + ADTEXT_HOTEL_SAMPLE.lower()
+    accepted = {g["key"]: [] for g in groups}
+    short_desc = []  # descripciones aceptadas de 60 caracteres o menos (medidas con el hotel de muestra)
+    var_rule = (
+        "\nEste texto es una PLANTILLA que se aplica a muchos hoteles: donde haga falta el nombre del hotel escribe {HOTEL} "
+        "(se sustituye por el nombre de cada hotel; no escribas ningún nombre de hotel concreto). No uses ninguna otra "
+        "llave. Pon primero los textos que usan {HOTEL} y deja varios genéricos, sin variables, de reserva (hay hoteles con "
+        "nombres largos y el texto con {HOTEL} puede no caber). Cuenta {HOTEL} como unos 17 caracteres.\n"
+    )
+
+    def ask(needed, need_short):
+        lines = []
+        for g, n in needed:
+            have = accepted[g["key"]]
+            avoid = f" Ya existen (no los repitas): {json.dumps(have, ensure_ascii=False)}." if have else ""
+            extra = ""
+            if g["key"] == "descripciones" and need_short:
+                extra = f" Al menos una de esas descripciones debe tener {PMXTEXT_SHORT_DESC_MAX} caracteres o menos."
+            lines.append(f"- clave \"{g['key']}\" ({g['label']}): {n} textos de máximo {g['limit']} caracteres.{extra}{avoid}")
+        user_content = (
+            f"Idioma de los textos: {idioma_txt}.\n{var_rule}\n"
+            f"Indicaciones del equipo (lo único que puedes afirmar):\n\"\"\"\n{brief}\n\"\"\"\n\n"
+            "Escribe estos grupos:\n" + "\n".join(lines)
+        )
+        data = _hotel_json_call(PMXTEXT_SYSTEM_PROMPT, PMXTEXT_SCHEMA, user_content, max_tokens=PMXTEXT_MAX_TOKENS)
+        grupos = data.get("grupos")
+        if not isinstance(grupos, dict):
+            raise RuntimeError("La respuesta de Claude no trae el campo 'grupos'.")
+        return grupos
+
+    for attempt in range(2):
+        needed = []
+        for g in groups:
+            missing = g["count"] - len(accepted[g["key"]])
+            if missing > 0:
+                needed.append((g, missing + (3 if attempt == 0 else 2)))
+        need_short = len(short_desc) == 0
+        if not needed and not need_short:
+            break
+        if need_short and not any(g["key"] == "descripciones" for g, _n in needed):
+            # La lista de descripciones ya está completa pero ninguna es corta: se piden unas más, con esa condición.
+            needed.append((groups[2], 3))
+        grupos = ask(needed, need_short)
+        for g, _n in needed:
+            seen = {t.lower() for t in accepted[g["key"]]}
+            for raw_item in grupos.get(g["key"], []) or []:
+                raw = raw_item.get("texto") if isinstance(raw_item, dict) else raw_item
+                text = " ".join(str(raw or "").split()).strip().strip('"').strip()
+                if not text or text.lower() in seen:
+                    continue
+                measured = _adtext_vars_ok(text, vars_ok, "plantilla")
+                if measured is None:
+                    continue
+                if not _copy_item_ok(measured, g, corpus):
+                    continue
+                full = len(accepted[g["key"]]) >= g["count"]
+                is_short = g["key"] == "descripciones" and len(measured) <= PMXTEXT_SHORT_DESC_MAX
+                # Con la lista llena solo entra una descripción corta si todavía no hay ninguna (reemplaza a la última).
+                if full:
+                    if is_short and not short_desc:
+                        accepted[g["key"]][-1] = text
+                        short_desc.append(text)
+                        seen.add(text.lower())
+                    continue
+                seen.add(text.lower())
+                accepted[g["key"]].append(text)
+                if is_short:
+                    short_desc.append(text)
+    out = {g["key"]: accepted[g["key"]][:g["count"]] for g in groups}
+    out["faltan"] = {g["key"]: max(0, g["count"] - len(out[g["key"]])) for g in groups}
+    out["sin_descripcion_corta"] = len(short_desc) == 0
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Negativización con IA — Claude decide qué negativizar, qué dejar y qué
 # revisar; negativos_ia.py valida con código lo que devuelve (choques con
 # términos que convierten, marca, palabras genéricas) antes de mostrarlo.

@@ -1721,6 +1721,10 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_super_admin_json():
                 return
             self._handle_ai_anuncios_textos(payload)
+        elif path == "/api/ai/pmax-textos":
+            if not self._require_super_admin_json():
+                return
+            self._handle_ai_pmax_textos(payload)
         elif path == "/api/ai/generar-copys":
             # Solo administradores mientras se afinan los textos (2026-11-01); luego se abre con _require_auth_json.
             if not self._require_admin_json():
@@ -4814,6 +4818,35 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(400, {"error": str(e)})
         except Exception as e:  # noqa: BLE001
             print(f"[claude-error] anuncios-textos: {' '.join(str(e).split())[:300]}", flush=True)
+            self._send_json(502, {"error": "No se pudo generar los textos con IA. Intenta de nuevo en unos minutos."})
+
+    def _handle_ai_pmax_textos(self, payload):
+        # Títulos, títulos largos y descripciones del grupo de recursos de Performance Max redactados por IA.
+        user = self._get_current_user()
+        if not claude_client.is_configured():
+            self._send_json(503, {"error": "La integración con Claude no está configurada en el servidor (falta ANTHROPIC_API_KEY)."})
+            return
+        idioma = str(payload.get("idioma") or "es").lower()
+        if not re.fullmatch(r"[a-z]{2}", idioma):
+            idioma = "es"
+        brief = " ".join(str(payload.get("indicaciones") or "").split())
+        if len(brief) < 15:
+            self._send_json(400, {"error": "Escribe las indicaciones: qué debe tener en cuenta el grupo de recursos (hotel o destino, oferta, fechas, servicios, público…)."})
+            return
+        if len(brief) > claude_client.ADTEXT_BRIEF_MAX:
+            self._send_json(400, {"error": f"Las indicaciones pasan de {claude_client.ADTEXT_BRIEF_MAX} caracteres."})
+            return
+        if not _copy_limiter.allow(f"user:{user['id']}:pmax-ia", *AD_TEXT_AI_RATE_LIMIT):
+            self._send_json(429, {"error": "Alcanzaste el límite de generaciones con IA por esta hora. Intenta más tarde."})
+            return
+        try:
+            with track_ai_usage(user["id"], "anuncios"):
+                result = claude_client.generar_textos_pmax(brief, idioma)
+            self._send_json(200, result)
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+        except Exception as e:  # noqa: BLE001
+            print(f"[claude-error] pmax-textos: {' '.join(str(e).split())[:300]}", flush=True)
             self._send_json(502, {"error": "No se pudo generar los textos con IA. Intenta de nuevo en unos minutos."})
 
     def _handle_ai_generar_copys(self, payload):

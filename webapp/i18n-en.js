@@ -3340,4 +3340,13 @@ export const EN = {
   [`Esta campaña no usa Brand Guidelines: necesita nombre del negocio y logo cuadrado`]: `This campaign does not use Brand Guidelines: it needs the business name and a square logo`,
   [`Esta campaña no usa Brand Guidelines: el grupo necesita el nombre del negocio y un logo cuadrado.`]: `This campaign does not use Brand Guidelines: the group needs the business name and a square logo.`,
   [`Cuenta {n0}: El nombre del negocio admite hasta 25 caracteres.`]: `Account {0}: The business name allows up to 25 characters.`,
+  // ---- Performance Max: textos con IA ----
+  [`Escribe solo las indicaciones: la IA redacta los títulos, los títulos largos y las descripciones usando únicamente lo que digas aquí (no inventa precios, ofertas ni servicios) y los deja con {HOTEL} donde va el nombre del hotel. Luego puedes editarlos.`]: `Write only the instructions: the AI writes the headlines, long headlines and descriptions using only what you say here (it does not invent prices, offers or services) and leaves {HOTEL} where the hotel name goes. You can edit them afterwards.`,
+  [`ej. Black Friday: 30 % de descuento reservando del 24 al 30 de noviembre, desayuno incluido, cancelación gratis hasta 48 horas antes, tono cálido y para parejas.`]: `e.g. Black Friday: 30% off when booking from November 24 to 30, breakfast included, free cancellation up to 48 hours before, warm tone and for couples.`,
+  [`Generar los textos con IA`]: `Generate the texts with AI`,
+  [`Se generaron {n0} títulos, {n1} títulos largos y {n2} descripciones. Revísalos y edítalos antes de crear.`]: `{0} headlines, {1} long headlines and {2} descriptions were generated. Review and edit them before creating.`,
+  [`La IA no logró completar todos: faltan {n0} títulos, {n1} títulos largos y {n2} descripciones. Puedes generar de nuevo o escribirlos a mano.`]: `The AI could not complete them all: {0} headlines, {1} long headlines and {2} descriptions are missing. You can generate again or write them by hand.`,
+  [`Ninguna descripción tiene 60 caracteres o menos: Google exige una. Escribe una a mano o genera de nuevo.`]: `No description has 60 characters or fewer: Google requires one. Write one by hand or generate again.`,
+  [`Los títulos, los títulos largos y las descripciones que ya escribiste se reemplazarán por los que genere la IA. ¿Continuar?`]: `The headlines, long headlines and descriptions you already wrote will be replaced by the ones the AI generates. Continue?`,
+  [`Escribe las indicaciones: qué debe tener en cuenta el grupo de recursos (hotel o destino, oferta, fechas, servicios, público…).`]: `Write the instructions: what the asset group should take into account (hotel or destination, offer, dates, services, audience…).`,
 };
