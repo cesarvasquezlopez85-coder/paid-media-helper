@@ -608,6 +608,31 @@ def init_db():
             )
             """
         )
+        # Programaciones de grupos de recursos de Performance Max: misma tabla, con `kind` ('label' o 'asset_group'); en las de
+        # grupos de recursos, cada cuenta de `accounts` lleva su lista `groups`. Las bases que ya existían necesitan la migración.
+        try:
+            conn.execute("ALTER TABLE ad_schedules ADD COLUMN kind TEXT NOT NULL DEFAULT 'label'")
+        except sqlite3.OperationalError:
+            pass  # ya existe, de un arranque anterior
+        # Activar o pausar grupos de recursos de Performance Max (a mano o programado): una fila por grupo cambiado.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS asset_group_status_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at REAL NOT NULL,
+                user_id INTEGER,
+                customer_id TEXT NOT NULL,
+                campaign_id TEXT,
+                campaign_name TEXT,
+                asset_group_id TEXT NOT NULL,
+                asset_group_name TEXT,
+                old_status TEXT,
+                new_status TEXT NOT NULL,
+                source TEXT,
+                schedule_id INTEGER
+            )
+            """
+        )
         # Plantillas de Anuncios nuevos (textos por idioma, variables y etiqueta): compartidas entre super admins.
         conn.execute(
             """
@@ -861,6 +886,21 @@ def store_ad_creation_bulk(user_id, customer_id, rows, label):
         conn.close()
 
 
+def store_asset_group_status_changes(user_id, customer_id, rows, new_status, source="manual", schedule_id=None):
+    conn = get_db()
+    try:
+        now = time.time()
+        conn.executemany(
+            "INSERT INTO asset_group_status_log (created_at, user_id, customer_id, campaign_id, campaign_name, asset_group_id, asset_group_name, "
+            "old_status, new_status, source, schedule_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(now, user_id, str(customer_id), str(r["campaign_id"]), (r.get("campaign_name") or "")[:200], str(r["asset_group_id"]),
+              (r.get("asset_group_name") or "")[:200], r.get("old_status") or "", new_status, source, schedule_id) for r in rows],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def store_ad_status_changes(user_id, customer_id, rows, label, new_status, source="manual", schedule_id=None):
     conn = get_db()
     try:
@@ -944,6 +984,8 @@ def _schedule_execute_account(sched, acc):
             return "error", 0, 0, 0, "La cuenta ya no pertenece al MCC.", True
         if not _schedule_user_can_access(user, cid):
             return "error", 0, 0, 0, "Quien programó esto ya no tiene acceso a la cuenta.", True
+    if (sched.get("kind") or "label") == "asset_group":
+        return _schedule_execute_asset_groups(sched, acc, simulated)
     fetch = google_ads_client.simulated_label_ads if simulated else google_ads_client.fetch_label_ads
     change = google_ads_client.simulated_set_label_ads_status if simulated else google_ads_client.set_label_ads_status
     data = fetch(cid, sched["label"])
@@ -969,6 +1011,36 @@ def _schedule_execute_account(sched, acc):
                 store_ad_status_changes(sched["user_id"], cid, done_rows, sched["label"], sched["action"], source="programado", schedule_id=sched["id"])
             except Exception as e:  # noqa: BLE001 — el cambio ya quedó en Google Ads; un fallo del registro no debe ocultarlo
                 print(f"[ad-status-log] {e}", flush=True)
+    msg = " · ".join(dict.fromkeys(m for m in failed_msgs if m))[:300]
+    return "done", ok, skipped, len(failed_msgs), msg, False
+
+
+def _schedule_execute_asset_groups(sched, acc, simulated):
+    """Programación de grupos de recursos de Performance Max: los grupos elegidos al programar. Antes de aplicar se valida con
+    Google y solo se cambia lo aplicable en ese momento. Devuelve lo mismo que _schedule_execute_account."""
+    cid = acc["id"]
+    items = [{"campaign_id": g["campaign_id"], "asset_group_id": g["asset_group_id"]} for g in (acc.get("groups") or [])]
+    if not items:
+        return "done", 0, 0, 0, "No había grupos de recursos que cambiar.", False
+    change = google_ads_client.simulated_set_asset_groups_status if simulated else google_ads_client.set_asset_groups_status
+    checked = change(cid, items, sched["action"], validate_only=True)
+    to_apply = [it for it, r in zip(items, checked) if r.get("ok")]
+    skipped = sum(1 for r in checked if not r.get("ok") and r.get("skipped"))
+    failed_msgs = [r.get("error") for r in checked if not r.get("ok") and not r.get("skipped")]
+    ok = 0
+    if to_apply:
+        applied = change(cid, to_apply, sched["action"], validate_only=False)
+        done_rows = [{"campaign_id": it["campaign_id"], "asset_group_id": it["asset_group_id"], "campaign_name": r.get("campaign_name"),
+                      "asset_group_name": r.get("asset_group_name"), "old_status": r.get("old_status")}
+                     for it, r in zip(to_apply, applied) if r.get("ok")]
+        ok = len(done_rows)
+        skipped += sum(1 for r in applied if not r.get("ok") and r.get("skipped"))
+        failed_msgs += [r.get("error") for r in applied if not r.get("ok") and not r.get("skipped")]
+        if done_rows:
+            try:
+                store_asset_group_status_changes(sched["user_id"], cid, done_rows, sched["action"], source="programado", schedule_id=sched["id"])
+            except Exception as e:  # noqa: BLE001 — el cambio ya quedó en Google Ads; un fallo del registro no debe ocultarlo
+                print(f"[asset-group-status-log] {e}", flush=True)
     msg = " · ".join(dict.fromkeys(m for m in failed_msgs if m))[:300]
     return "done", ok, skipped, len(failed_msgs), msg, False
 
@@ -1070,19 +1142,20 @@ def list_ad_schedules(limit=100):
         else:
             overall = "pending"
         out.append({"id": sc["id"], "created_at": sc["created_at"], "mcc_id": sc["mcc_id"], "mcc_name": sc["mcc_name"], "label": sc["label"],
+                    "kind": sc.get("kind") or "label", "targets": sum(len(a.get("groups") or []) for a in accounts),
                     "action": sc["action"], "run_date": sc["run_date"], "run_time": sc["run_time"], "status": overall, "accounts": rows})
     return out
 
 
-def create_ad_schedule(user_id, mcc_id, mcc_name, label, action, run_date, run_time, accounts):
+def create_ad_schedule(user_id, mcc_id, mcc_name, label, action, run_date, run_time, accounts, kind="label"):
     conn = get_db()
     try:
         pending = conn.execute("SELECT COUNT(*) AS n FROM ad_schedules WHERE status = 'pending'").fetchone()["n"]
         if pending >= SCHEDULE_MAX_PENDING:
             raise ValueError(f"Ya hay {SCHEDULE_MAX_PENDING} programaciones pendientes: cancela alguna primero.")
         cur = conn.execute(
-            "INSERT INTO ad_schedules (created_at, user_id, mcc_id, mcc_name, label, action, run_date, run_time, accounts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (time.time(), user_id, mcc_id, mcc_name, label, action, run_date, run_time, json.dumps(accounts, ensure_ascii=False)))
+            "INSERT INTO ad_schedules (created_at, user_id, mcc_id, mcc_name, label, action, run_date, run_time, accounts, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (time.time(), user_id, mcc_id, mcc_name, label, action, run_date, run_time, json.dumps(accounts, ensure_ascii=False), kind))
         conn.commit()
         return cur.lastrowid
     finally:
@@ -1385,6 +1458,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_pmax_campaigns(parse_qs(parsed.query))
             return
 
+        if path == "/api/google-ads/pmax-asset-groups":
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_pmax_asset_groups(parse_qs(parsed.query))
+            return
+
         if path == "/api/google-ads/label-candidates":
             if not self._require_super_admin_json():
                 return
@@ -1613,6 +1692,11 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_super_admin_json():
                 return
             self._handle_google_ads_pmax_create(payload)
+        elif path == "/api/google-ads/pmax-asset-groups-status":
+            # Activar o pausar grupos de recursos de Performance Max (manual, con vista previa): solo super admin.
+            if not self._require_super_admin_json():
+                return
+            self._handle_google_ads_pmax_asset_groups_status(payload)
         elif path == "/api/google-ads/label-ads-add":
             # Poner una etiqueta a anuncios activos que ya existen (no cambia su estado), con vista previa: solo super admin.
             if not self._require_super_admin_json():
@@ -3671,6 +3755,136 @@ class Handler(SimpleHTTPRequestHandler):
             return
         self._send_json(200, {**data, "simulated": False})
 
+    def _handle_google_ads_pmax_asset_groups(self, query):
+        # Grupos de recursos de las campañas PMax activas de una cuenta, con su estado y si los creó la plataforma.
+        user = self._get_current_user()
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        simulated = not google_ads_client.is_configured()
+        if not simulated and not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+        try:
+            data = google_ads_client.simulated_pmax_asset_groups(customer_id) if simulated else google_ads_client.fetch_pmax_asset_groups(customer_id)
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+            return
+        conn = get_db()
+        try:
+            made = {r["asset_group_id"] for r in conn.execute("SELECT asset_group_id FROM pmax_creation_log WHERE customer_id = ? AND asset_group_id != ''", (customer_id,)).fetchall()}
+        finally:
+            conn.close()
+        for g in data["groups"]:
+            g["by_platform"] = g["asset_group_id"] in made
+        self._send_json(200, {**data, "simulated": simulated})
+
+    def _handle_google_ads_pmax_asset_groups_status(self, payload):
+        # Activa o pausa (o solo valida) grupos de recursos de Performance Max, en varias cuentas de un MCC.
+        user = self._get_current_user()
+        validate_only = payload.get("validate_only", True) is not False
+        mcc_id = str(payload.get("mcc_id") or "").strip()
+        status = str(payload.get("status") or "").strip()
+        raw_accounts = payload.get("accounts")
+        if not mcc_id.isdigit():
+            self._send_json(400, {"error": "Elige primero el MCC."})
+            return
+        if status not in google_ads_client.AD_STATUS_VALUES:
+            self._send_json(400, {"error": "Elige si se activan o se pausan los grupos de recursos."})
+            return
+        if not isinstance(raw_accounts, list) or not raw_accounts:
+            self._send_json(400, {"error": "Elige al menos una cuenta."})
+            return
+        if len(raw_accounts) > AD_CREATE_MAX_ACCOUNTS:
+            self._send_json(400, {"error": f"Máximo {AD_CREATE_MAX_ACCOUNTS} cuentas por vez."})
+            return
+        accounts, seen_acc, total = [], set(), 0
+        for acc in raw_accounts:
+            acc = acc if isinstance(acc, dict) else {}
+            cid = str(acc.get("customer_id") or "").strip()
+            raw_groups = acc.get("groups")
+            if not cid.isdigit() or not isinstance(raw_groups, list) or not raw_groups:
+                self._send_json(400, {"error": "Cada cuenta necesita al menos un grupo de recursos."})
+                return
+            if cid in seen_acc:
+                self._send_json(400, {"error": "Una cuenta no puede repetirse en la misma tanda."})
+                return
+            seen_acc.add(cid)
+            if len(raw_groups) > AD_BULK_MAX_PER_ACCOUNT:
+                self._send_json(400, {"error": f"Máximo {AD_BULK_MAX_PER_ACCOUNT} grupos de recursos por cuenta en cada tanda."})
+                return
+            total += len(raw_groups)
+            if total > AD_BULK_MAX_TOTAL:
+                self._send_json(400, {"error": f"Máximo {AD_BULK_MAX_TOTAL} grupos de recursos por tanda."})
+                return
+            groups, seen_g = [], set()
+            for g in raw_groups:
+                g = g if isinstance(g, dict) else {}
+                camp_id, gid = str(g.get("campaign_id") or "").strip(), str(g.get("asset_group_id") or "").strip()
+                if not camp_id.isdigit() or not gid.isdigit():
+                    self._send_json(400, {"error": "Cada grupo de recursos necesita su campaña y su ID."})
+                    return
+                if (camp_id, gid) in seen_g:
+                    self._send_json(400, {"error": "Un grupo de recursos no puede repetirse en la misma tanda."})
+                    return
+                seen_g.add((camp_id, gid))
+                groups.append({"campaign_id": camp_id, "asset_group_id": gid})
+            accounts.append({"customer_id": cid, "groups": groups})
+        simulated = not google_ads_client.is_configured()
+        members = None
+        if not simulated:
+            members = get_mcc_member_ids(mcc_id)
+            if members is None:
+                self._send_json(502, {"error": "No se pudo leer las cuentas de ese MCC. Intenta de nuevo."})
+                return
+        results = [None] * len(accounts)
+        to_run = []
+        for i, acc in enumerate(accounts):
+            cid = acc["customer_id"]
+            if members is not None and cid not in members:
+                results[i] = {"customer_id": cid, "ok": False, "error": "Esta cuenta no pertenece al MCC elegido."}
+            elif not simulated and not self._user_can_access_account(user, cid):
+                results[i] = {"customer_id": cid, "ok": False, "error": "No tienes acceso a esta cuenta de Google Ads."}
+            elif not validate_only and not _write_limiter.allow(f"user:{user['id']}:ads", *AD_WRITE_RATE_LIMIT):
+                results[i] = {"customer_id": cid, "ok": False, "error": "Demasiadas escrituras seguidas: espera un minuto y vuelve a intentar con esta cuenta."}
+            else:
+                to_run.append(i)
+        fn = google_ads_client.simulated_set_asset_groups_status if simulated else google_ads_client.set_asset_groups_status
+
+        def run(i):
+            acc = accounts[i]
+            try:
+                return i, {"customer_id": acc["customer_id"], "ok": True, "items": fn(acc["customer_id"], acc["groups"], status, validate_only=validate_only)}
+            except Exception as e:  # noqa: BLE001 — un fallo en una cuenta no debe frenar a las demás
+                if not isinstance(e, ValueError):
+                    print(f"[google-ads-error] pmax-asset-groups-status {' '.join(str(e).split())[:300]}", flush=True)
+                return i, {"customer_id": acc["customer_id"], "ok": False, "error": google_ads_client.google_error_text(e)}
+
+        if to_run:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                for i, res in pool.map(run, to_run):
+                    results[i] = res
+        ok_count = error_count = 0
+        for i, res in enumerate(results):
+            if not res.get("ok"):
+                error_count += len(accounts[i]["groups"])
+                continue
+            items = res["items"]
+            ok_count += sum(1 for x in items if x.get("ok"))
+            error_count += sum(1 for x in items if not x.get("ok"))
+            if not validate_only:
+                changed = [{"campaign_id": accounts[i]["groups"][j]["campaign_id"], "asset_group_id": accounts[i]["groups"][j]["asset_group_id"],
+                            "campaign_name": it.get("campaign_name"), "asset_group_name": it.get("asset_group_name"), "old_status": it.get("old_status")}
+                           for j, it in enumerate(items) if it.get("ok")]
+                if changed:
+                    try:
+                        store_asset_group_status_changes(user["id"], accounts[i]["customer_id"], changed, status)
+                    except Exception as e:  # noqa: BLE001 — el cambio ya quedó en Google Ads; un fallo del registro no debe ocultarlo
+                        print(f"[asset-group-status-log] {e}", flush=True)
+        self._send_json(200, {"validate_only": validate_only, "simulated": simulated, "status": status, "results": results,
+                              "ok_count": ok_count, "error_count": error_count})
+
     def _handle_google_ads_pmax_create(self, payload):
         # Crea (o valida sin crear) UN grupo de recursos PAUSADO de Performance Max en una campaña ya activa de cada cuenta.
         user = self._get_current_user()
@@ -4130,11 +4344,15 @@ class Handler(SimpleHTTPRequestHandler):
         if action not in google_ads_client.AD_STATUS_VALUES:
             self._send_json(400, {"error": "Elige si se activan o se pausan los anuncios."})
             return
-        try:
-            label = google_ads_client.clean_ad_label(payload.get("label"))
-        except ValueError as e:
-            self._send_json(400, {"error": str(e)})
-            return
+        kind = "asset_group" if payload.get("kind") == "asset_group" else "label"
+        if kind == "asset_group":
+            label = ""
+        else:
+            try:
+                label = google_ads_client.clean_ad_label(payload.get("label"))
+            except ValueError as e:
+                self._send_json(400, {"error": str(e)})
+                return
         try:
             target = _schedule_local_target(run_date, run_time)
         except ValueError:
@@ -4151,7 +4369,7 @@ class Handler(SimpleHTTPRequestHandler):
         if len(raw_accounts) > AD_CREATE_MAX_ACCOUNTS:
             self._send_json(400, {"error": f"Máximo {AD_CREATE_MAX_ACCOUNTS} cuentas por vez."})
             return
-        ids, seen = [], set()
+        ids, seen, groups_by_id = [], set(), {}
         for a in raw_accounts:
             a = a if isinstance(a, dict) else {}
             cid = str(a.get("id") or "").strip()
@@ -4160,6 +4378,24 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             seen.add(cid)
             ids.append((cid, " ".join(str(a.get("name") or "").split())[:120] or cid))
+            if kind == "asset_group":
+                raw_groups = a.get("groups")
+                if not isinstance(raw_groups, list) or not raw_groups:
+                    self._send_json(400, {"error": "Cada cuenta necesita al menos un grupo de recursos."})
+                    return
+                if len(raw_groups) > AD_BULK_MAX_PER_ACCOUNT:
+                    self._send_json(400, {"error": f"Máximo {AD_BULK_MAX_PER_ACCOUNT} grupos de recursos por cuenta."})
+                    return
+                clean_groups, seen_g = [], set()
+                for gr in raw_groups:
+                    gr = gr if isinstance(gr, dict) else {}
+                    camp_id, gid = str(gr.get("campaign_id") or "").strip(), str(gr.get("asset_group_id") or "").strip()
+                    if not camp_id.isdigit() or not gid.isdigit() or (camp_id, gid) in seen_g:
+                        self._send_json(400, {"error": "Los grupos de recursos son inválidos o están repetidos."})
+                        return
+                    seen_g.add((camp_id, gid))
+                    clean_groups.append({"campaign_id": camp_id, "asset_group_id": gid})
+                groups_by_id[cid] = clean_groups
         simulated = not google_ads_client.is_configured()
         if not simulated:
             members = get_mcc_member_ids(mcc_id)
@@ -4191,7 +4427,11 @@ class Handler(SimpleHTTPRequestHandler):
             self._send_json(502, {"error": f"No se pudo leer la zona horaria de {bad} cuenta(s). Intenta de nuevo."})
             return
         try:
-            sid = create_ad_schedule(user["id"], mcc_id, mcc_name, label, action, run_date, run_time, [acc for acc, _ in results])
+            accounts_saved = [acc for acc, _ in results]
+            if kind == "asset_group":
+                for acc in accounts_saved:
+                    acc["groups"] = groups_by_id[acc["id"]]
+            sid = create_ad_schedule(user["id"], mcc_id, mcc_name, label, action, run_date, run_time, accounts_saved, kind=kind)
         except ValueError as e:
             self._send_json(400, {"error": str(e)})
             return

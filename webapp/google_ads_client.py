@@ -2904,8 +2904,122 @@ def simulated_create_pmax_asset_group(customer_id, campaign_id, name, business_n
         raise RuntimeError("Google Ads API respondió 400: simulado, un título con «rechazar» se rechaza.")
     if not validate_only:
         _SIMULATED_PMAX_CREATED.setdefault((str(customer_id), camp["id"]), []).append(name)
-    return {"campaign_id": camp["id"], "campaign_name": camp["name"], "asset_group_id": "" if validate_only else "7" + camp["id"], "url": camp["url"]}
+    return {"campaign_id": camp["id"], "campaign_name": camp["name"],
+            "asset_group_id": "" if validate_only else f"7{camp['id']}{len(_SIMULATED_PMAX_CREATED[(str(customer_id), camp['id'])]) - 1}", "url": camp["url"]}
 
+
+
+# ---------------------------------------------------------------------------
+# Performance Max: activar o pausar grupos de recursos que ya existen (los creados con la plataforma y los de siempre).
+# Solo grupos de campañas PMax ACTIVAS; el servidor relee en vivo el estado de cada grupo antes de cambiarlo. Los grupos
+# de recursos no admiten `partialFailure`, así que cada grupo va en su propia petición (son pocos por cuenta).
+# ---------------------------------------------------------------------------
+def fetch_pmax_asset_groups(customer_id):
+    """Grupos de recursos (no eliminados) de las campañas PMax activas: [{campaign_id, campaign_name, asset_group_id, name, status}]."""
+    rows = _search(customer_id, """
+        SELECT campaign.id, campaign.name, asset_group.id, asset_group.name, asset_group.status
+        FROM asset_group
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX' AND campaign.status = 'ENABLED' AND asset_group.status != 'REMOVED'
+        ORDER BY campaign.name, asset_group.name
+    """)
+    return {"groups": [
+        {"campaign_id": str((r.get("campaign") or {}).get("id")), "campaign_name": (r.get("campaign") or {}).get("name") or "",
+         "asset_group_id": str((r.get("assetGroup") or {}).get("id")), "name": (r.get("assetGroup") or {}).get("name") or "",
+         "status": (r.get("assetGroup") or {}).get("status") or ""} for r in rows]}
+
+
+def _plan_asset_group_status(live, items, status):
+    """Reglas de un cambio de estado de grupos de recursos sobre la lista viva. Devuelve (resultados, índices a enviar).
+    `live` = lista de fetch_pmax_asset_groups. Para pausar avisa si la campaña se queda sin grupos activos."""
+    if status not in AD_STATUS_VALUES:
+        raise ValueError("El estado debe ser ENABLED o PAUSED.")
+    by_key = {(g["campaign_id"], g["asset_group_id"]): g for g in live}
+    enabled_by_camp = Counter(g["campaign_id"] for g in live if g["status"] == "ENABLED")
+    results, idx, seen = [None] * len(items), [], set()
+    paused_now = Counter()
+    for i, it in enumerate(items):
+        key = (str(it["campaign_id"]), str(it["asset_group_id"]))
+        row = by_key.get(key)
+        if key in seen:
+            results[i] = {"ok": False, "error": "El grupo de recursos está repetido.", "skipped": True}
+            continue
+        seen.add(key)
+        if not row:
+            results[i] = {"ok": False, "error": "El grupo de recursos ya no existe o su campaña no está activa.", "skipped": True}
+            continue
+        if row["status"] == status:
+            results[i] = {"ok": False, "error": "El grupo de recursos ya está activo." if status == "ENABLED" else "El grupo de recursos ya está pausado.", "skipped": True}
+            continue
+        res = {"ok": True, "campaign_name": row["campaign_name"], "asset_group_name": row["name"], "old_status": row["status"]}
+        if status == "PAUSED":
+            paused_now[key[0]] += 1
+        results[i] = res
+        idx.append(i)
+    # Aviso de campaña sin grupos activos: se calcula con lo que se pausa en esta misma tanda.
+    for i in idx:
+        if status == "PAUSED":
+            camp = str(items[i]["campaign_id"])
+            if enabled_by_camp[camp] - paused_now[camp] <= 0:
+                results[i]["campaign_without_active"] = True
+    return results, idx
+
+
+def _mutate_asset_group_status(customer_id, campaign_id, asset_group_id, status, validate_only):
+    url = f"{BASE_URL}/customers/{customer_id}/assetGroups:mutate"
+    rn = f"customers/{customer_id}/assetGroups/{asset_group_id}"
+    try:
+        _post_json(url, {"operations": [{"update": {"resourceName": rn, "status": status}, "updateMask": "status"}], "validateOnly": validate_only})
+    except Exception as e:  # noqa: BLE001 — se reporta en ese grupo y no frena a los demás
+        return {"ok": False, "error": "Google Ads rechazó el cambio: " + google_error_text(e)}
+    return {"ok": True}
+
+
+def set_asset_groups_status(customer_id, items, status, validate_only=True):
+    """Activa o pausa (o solo valida) grupos de recursos. `items` = [{campaign_id, asset_group_id}]. Relee en vivo la lista
+    de grupos y su estado. Devuelve una lista alineada con `items`."""
+    live = fetch_pmax_asset_groups(customer_id)["groups"]
+    results, idx = _plan_asset_group_status(live, items, status)
+    for i in idx:
+        sent = _mutate_asset_group_status(customer_id, items[i]["campaign_id"], items[i]["asset_group_id"], status, validate_only)
+        if not sent["ok"]:
+            results[i] = {"ok": False, "error": sent["error"]}
+    return results
+
+
+# Grupos de recursos de ejemplo para el modo simulado (los de siempre, activos, y algunos pausados de temporadas pasadas).
+_SIM_AG_BASE = {
+    "1111111111": [("9101", "Estelar Hoteles - CO:es - PMAX", "910101", "Evergreen", "ENABLED"), ("9101", "Estelar Hoteles - CO:es - PMAX", "910102", "Alta demanda", "ENABLED"),
+                   ("9101", "Estelar Hoteles - CO:es - PMAX", "910103", "Semana Santa", "PAUSED"),
+                   ("9102", "Estelar Hoteles - Eventos - PMAX", "910201", "Eventos", "ENABLED")],
+    "2222222222": [("9201", "Click Clack - ES:es - PMAX", "920101", "Base", "ENABLED"), ("9201", "Click Clack - ES:es - PMAX", "920102", "Verano", "PAUSED")],
+}
+_SIM_AG_STATUS = {}
+
+
+def simulated_pmax_asset_groups(customer_id):
+    cid = str(customer_id)
+    groups = [{"campaign_id": c, "campaign_name": cn, "asset_group_id": gid, "name": n, "status": _SIM_AG_STATUS.get((cid, gid), st)}
+              for c, cn, gid, n, st in _SIM_AG_BASE.get(cid, [])]
+    camp_names = {c: cn for c, cn, *_ in _SIM_AG_BASE.get(cid, [])}
+    for (ccid, camp), names in _SIMULATED_PMAX_CREATED.items():
+        if ccid != cid or camp not in camp_names:
+            continue
+        for k, n in enumerate(names):
+            gid = f"7{camp}{k}"
+            groups.append({"campaign_id": camp, "campaign_name": camp_names[camp], "asset_group_id": gid, "name": n, "status": _SIM_AG_STATUS.get((cid, gid), "PAUSED")})
+    return {"groups": groups}
+
+
+def simulated_set_asset_groups_status(customer_id, items, status, validate_only=True):
+    live = simulated_pmax_asset_groups(customer_id)["groups"]
+    results, idx = _plan_asset_group_status(live, items, status)
+    for i in idx:
+        name = results[i]["asset_group_name"]
+        if "rechazar" in name.lower():
+            results[i] = {"ok": False, "error": "Google Ads rechazó el cambio: simulado, un grupo con «rechazar» en el nombre se rechaza."}
+        elif not validate_only:
+            _SIM_AG_STATUS[(str(customer_id), str(items[i]["asset_group_id"]))] = status
+    return results
 
 
 # ---------------------------------------------------------------------------

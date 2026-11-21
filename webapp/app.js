@@ -16357,7 +16357,8 @@ function renderNuevosAnunciosPage() {
     return `${sim}${renderNuaModeSwitch()}${renderNuaStepAccounts()}${ready ? renderNulStepLabel() : ''}${ready && s.selected.length ? renderNulStepRows() : ''}${ready && s.selected.length && ['ENABLED', 'PAUSED'].includes(nulState().action) ? renderNulSchedForm() : ''}${ready ? renderNulSchedList() : ''}`;
   }
   if (s.mode === 'pmax') {
-    return `${sim}${renderNuaModeSwitch()}${renderNuaStepAccounts()}${ready ? renderPmxStepBase() : ''}${ready && s.selected.length ? renderPmxStepRows() : ''}`;
+    if (ready && nulState().sched.status === 'idle') nulSchedLoad();
+    return `${sim}${renderNuaModeSwitch()}${renderNuaStepAccounts()}${ready ? renderPmxStepBase() : ''}${ready && s.selected.length ? renderPmxStepRows() : ''}${ready && s.selected.length ? renderPagStep() : ''}${ready && s.selected.length && pagSelectedRows().length ? renderPagSchedForm() : ''}${ready ? renderNulSchedList() : ''}`;
   }
   return `${sim}${renderNuaModeSwitch()}${renderNuaStepAccounts()}${ready ? renderNutStepTemplate() : ''}${s.selected.length && s.mcc.selectedId ? renderNutStepTargets() : ''}`;
 }
@@ -17080,7 +17081,7 @@ const PMX_LIM = { head: [3, 15, 30], long: [1, 5, 90], desc: [2, 5, 90], descSho
 function pmxNewState() {
   return { name: 'Black Friday - {HOTEL}', business: '{HOTEL}', heads: '', longs: '', descs: '', videos: '', imgMsg: '', campaignFilter: '',
     images: { landscape: [], square: [], portrait: [], logo: [], logo_wide: [] },
-    ai: { brief: '', idioma: 'es', status: 'idle', error: '', result: null },
+    ai: { brief: '', idioma: 'es', status: 'idle', error: '', result: null }, ag: null,
     rows: {}, status: 'idle', excluded: {}, check: null, run: { status: 'idle', error: null, results: {}, applied: false } };
 }
 
@@ -17091,7 +17092,7 @@ function pmxState() {
 }
 
 function pmxResetRun() { const p = pmxState(); p.check = null; p.run = { status: 'idle', error: null, results: {}, applied: false }; }
-function pmxResetTargets() { const p = pmxState(); p.rows = {}; p.status = 'idle'; p.excluded = {}; pmxResetRun(); }
+function pmxResetTargets() { const p = pmxState(); p.rows = {}; p.status = 'idle'; p.excluded = {}; p.ag = null; pmxResetRun(); }
 
 function pmxYoutubeId(value) {
   const t = String(value || '').trim();
@@ -17469,6 +17470,8 @@ function pmxSyncButtons() {
 
 function bindPmx() {
   const p = pmxState();
+  bindPag();
+  bindNulSchedList();
   const field = (id, key) => { const el = document.getElementById(id); if (el) el.addEventListener('input', (e) => { p[key] = e.target.value; pmxResetRun(); pmxSyncButtons(); }); };
   const aiBrief = document.getElementById('pmx-ai-brief');
   if (aiBrief) aiBrief.addEventListener('input', (e) => {
@@ -17486,6 +17489,296 @@ function bindPmx() {
   document.querySelectorAll('[data-pmx-inc]').forEach((el) => el.addEventListener('change', () => { if (el.checked) delete p.excluded[el.dataset.pmxInc]; else p.excluded[el.dataset.pmxInc] = true; pmxResetRun(); render(); }));
   document.querySelectorAll('[data-pmx-pick]').forEach((el) => el.addEventListener('change', () => { p.rows[el.dataset.pmxPick].pick = el.value; pmxResetRun(); render(); }));
   document.querySelectorAll('[data-pmx-hotel]').forEach((el) => el.addEventListener('change', () => { p.rows[el.dataset.pmxHotel].hotel = el.value.trim(); pmxResetRun(); render(); }));
+}
+
+// ---------------------------------------------------------------------------
+// Performance Max: activar o pausar grupos de recursos que ya existen (los creados con la plataforma y los de siempre), a mano
+// con vista previa (validación de Google sin aplicar) o programado. La persona marca de una lista los grupos de las campañas PMax
+// activas; el servidor vuelve a leer su estado en vivo antes de cambiar nada (y al ejecutar una programación).
+// ---------------------------------------------------------------------------
+function pagNewState() {
+  return { action: 'PAUSED', nameFilter: '', statusFilter: 'all', rows: {}, status: 'idle', sel: {}, check: null,
+    run: { status: 'idle', error: null, results: {}, applied: false }, sched: { date: '', time: '09:00', run: { status: 'idle', error: null, done: false } } };
+}
+
+function pagState() {
+  const p = pmxState();
+  if (!p.ag) p.ag = pagNewState();
+  return p.ag;
+}
+
+function pagResetRun() { const a = pagState(); a.check = null; a.run = { status: 'idle', error: null, results: {}, applied: false }; }
+
+// Todos los grupos leídos de las cuentas marcadas, con su clave y si se pueden cambiar a la acción elegida.
+function pagAllRows() {
+  const s = state.nuevosAnuncios, a = pagState();
+  const out = [];
+  s.selected.forEach((id) => {
+    const acc = a.rows[id];
+    if (!acc || acc.status !== 'ready') return;
+    acc.groups.forEach((g) => {
+      out.push({ key: `${id}:${g.campaign_id}:${g.asset_group_id}`, accId: id, accName: acc.name, campaignId: g.campaign_id, campaignName: g.campaign_name,
+        groupId: g.asset_group_id, name: g.name, status: g.status, byPlatform: !!g.by_platform, changeable: g.status !== a.action });
+    });
+  });
+  return out;
+}
+
+function pagVisibleRows() {
+  const a = pagState();
+  const f = a.nameFilter.trim().toLowerCase();
+  return pagAllRows().filter((r) => (!f || r.name.toLowerCase().includes(f) || r.campaignName.toLowerCase().includes(f))
+    && (a.statusFilter === 'all' || r.status === a.statusFilter));
+}
+
+// Los marcados que todavía se pueden cambiar (aunque el filtro los esconda).
+function pagSelectedRows() {
+  const a = pagState();
+  return pagAllRows().filter((r) => a.sel[r.key] && r.changeable);
+}
+
+// Campañas que se quedarían sin ningún grupo activo si se pausan los marcados.
+function pagEmptiedCampaigns() {
+  const a = pagState();
+  if (a.action !== 'PAUSED') return new Set();
+  const all = pagAllRows(), picked = new Set(pagSelectedRows().map((r) => r.key));
+  const left = {};
+  all.forEach((r) => { const k = `${r.accId}:${r.campaignId}`; if (!(k in left)) left[k] = 0; if (r.status === 'ENABLED' && !picked.has(r.key)) left[k] += 1; });
+  const out = new Set();
+  all.forEach((r) => { const k = `${r.accId}:${r.campaignId}`; if (picked.has(r.key) && left[k] === 0) out.add(k); });
+  return out;
+}
+
+function pagPayload(rows) {
+  const by = new Map();
+  rows.forEach((r) => {
+    if (!by.has(r.accId)) by.set(r.accId, { customer_id: r.accId, groups: [] });
+    by.get(r.accId).groups.push({ campaign_id: r.campaignId, asset_group_id: r.groupId });
+  });
+  return Array.from(by.values());
+}
+
+function pagSignature(rows) { return `${pagState().action}|${rows.map((r) => r.key).sort().join(',')}`; }
+
+function pagRead() {
+  const s = state.nuevosAnuncios, a = pagState();
+  if (!s.selected.length || a.status === 'loading') return;
+  a.status = 'loading'; a.sel = {}; a.rows = {}; pagResetRun();
+  s.selected.forEach((id) => {
+    const acc = s.accounts.find((x) => x.id === id);
+    a.rows[id] = { id, name: acc ? acc.name : id, status: 'loading', error: null, groups: [] };
+  });
+  render();
+  const queue = s.selected.slice();
+  const worker = () => {
+    const id = queue.shift();
+    if (!id) return Promise.resolve();
+    const row = a.rows[id];
+    return fetch(`/api/google-ads/pmax-asset-groups?customer_id=${encodeURIComponent(id)}`)
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Error desconocido.');
+        if (data.simulated) s.simulated = true;
+        row.groups = data.groups || []; row.status = 'ready';
+      })
+      .catch((err) => { row.status = 'error'; row.error = err.message || String(err); })
+      .then(() => worker());
+  };
+  Promise.all([worker(), worker(), worker(), worker()]).then(() => {
+    if (pagState() !== a) return;
+    a.status = 'ready'; render();
+  });
+}
+
+function pagSubmit(validateOnly) {
+  const s = state.nuevosAnuncios, a = pagState();
+  let rows = pagSelectedRows();
+  if (!validateOnly) {
+    if (!a.check) return;
+    rows = rows.filter((r) => a.check.okKeys.includes(r.key));
+    if (!rows.length || a.check.signature !== pagSignature(rows)) return;
+    const accounts = new Set(rows.map((r) => r.accId)).size;
+    const emptied = pagEmptiedCampaigns().size;
+    const verb = a.action === 'ENABLED' ? 'activarán' : 'pausarán';
+    const warn = emptied ? ` ATENCIÓN: ${emptied} campañas se quedarán sin ningún grupo de recursos activo y dejarán de mostrarse.` : '';
+    if (!window.confirm(`Se ${verb} ${rows.length} grupos de recursos en ${accounts} cuentas del MCC «${s.mcc.selectedName}».${warn} ¿Continuar?`)) return;
+  }
+  if (!rows.length) return;
+  const accounts = pagPayload(rows);
+  a.run = { status: 'loading', error: null, results: {}, applied: false };
+  render();
+  fetch('/api/google-ads/pmax-asset-groups-status', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ validate_only: validateOnly, mcc_id: s.mcc.selectedId, status: a.action, accounts }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      if (data.simulated) s.simulated = true;
+      const results = {};
+      (data.results || []).forEach((res, i) => {
+        const sent = accounts[i];
+        (sent ? sent.groups : []).forEach((g, j) => {
+          const key = `${sent.customer_id}:${g.campaign_id}:${g.asset_group_id}`;
+          results[key] = res.ok ? ((res.items || [])[j] || { ok: false, error: 'Sin respuesta.' }) : { ok: false, error: res.error || 'Error' };
+        });
+      });
+      a.run = { status: 'ready', error: null, results, applied: !validateOnly };
+      if (validateOnly) {
+        const okKeys = rows.filter((r) => results[r.key] && results[r.key].ok).map((r) => r.key);
+        a.check = okKeys.length ? { signature: pagSignature(rows.filter((r) => okKeys.includes(r.key))), okKeys } : null;
+      } else {
+        a.check = null;
+        // Refleja en la tabla el estado nuevo de lo que sí se cambió y lo desmarca.
+        rows.forEach((r) => {
+          if (results[r.key] && results[r.key].ok) {
+            const acc = a.rows[r.accId];
+            const g = acc && acc.groups.find((x) => x.campaign_id === r.campaignId && x.asset_group_id === r.groupId);
+            if (g) g.status = a.action;
+            delete a.sel[r.key];
+          }
+        });
+      }
+      render();
+    })
+    .catch((err) => { a.run = { status: 'error', error: err.message || String(err), results: {}, applied: false }; render(); });
+}
+
+function pagSchedTimeOk() { const sc = pagState().sched; return /^\d{4}-\d{2}-\d{2}$/.test(sc.date) && /^\d{2}:\d{2}$/.test(sc.time); }
+
+function pagSchedCanCreate() {
+  const a = pagState();
+  return a.status === 'ready' && pagSelectedRows().length > 0 && pagSchedTimeOk() && a.sched.run.status !== 'loading';
+}
+
+function pagSchedCreate() {
+  const s = state.nuevosAnuncios, a = pagState(), sc = a.sched;
+  if (!pagSchedCanCreate()) return;
+  const rows = pagSelectedRows();
+  const accounts = pagPayload(rows).map((x) => ({ id: x.customer_id, name: (a.rows[x.customer_id] || {}).name || x.customer_id, groups: x.groups }));
+  const when = `${sc.date} ${sc.time}`;
+  const emptied = pagEmptiedCampaigns().size;
+  const warn = emptied ? ` ATENCIÓN: ${emptied} campañas se quedarán sin ningún grupo de recursos activo.` : '';
+  const verb = a.action === 'ENABLED' ? 'la activación' : 'la pausa';
+  if (!window.confirm(`Se programará ${verb} de ${rows.length} grupos de recursos en ${accounts.length} cuentas del MCC «${s.mcc.selectedName}» para el ${when} (hora de cada cuenta).${warn} ¿Continuar?`)) return;
+  sc.run = { status: 'loading', error: null, done: false };
+  render();
+  fetch('/api/ad-schedules', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: 'asset_group', mcc_id: s.mcc.selectedId, mcc_name: s.mcc.selectedName, action: a.action, run_date: sc.date, run_time: sc.time, accounts }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      const list = nulState().sched;
+      list.list = data.schedules || list.list; list.status = 'ready';
+      sc.run = { status: 'ready', error: null, done: true };
+      render();
+    })
+    .catch((err) => { sc.run = { status: 'error', error: err.message || String(err), done: false }; render(); });
+}
+
+function pagResultCell(row) {
+  const a = pagState();
+  const r = a.run.results[row.key];
+  if (!r) return '';
+  if (!r.ok) return `<span style="color:var(--color-danger,#b3261e)">✕ ${escapeHtml(r.error || 'Error')}</span>`;
+  if (!a.run.applied) return '<span style="color:var(--color-success,#1d6b41);font-weight:700">✓ Google lo validó</span>';
+  return `<span style="color:var(--color-success,#1d6b41);font-weight:700">${a.action === 'ENABLED' ? '✓ Activado' : '✓ Pausado'}</span>`;
+}
+
+function renderPagStep() {
+  const s = state.nuevosAnuncios, a = pagState();
+  const prepared = Object.keys(a.rows).length > 0;
+  const emptied = pagEmptiedCampaigns();
+  const selected = pagSelectedRows();
+  const okKeys = a.check ? a.check.okKeys : [];
+  const visible = pagVisibleRows();
+  const accErrors = s.selected.map((id) => a.rows[id]).filter((r) => r && r.status === 'error');
+  const loadingAcc = s.selected.filter((id) => a.rows[id] && a.rows[id].status === 'loading').length;
+  const trs = visible.map((r) => `<tr>
+      <td style="width:28px"><input type="checkbox" data-pag-sel="${escapeHtml(r.key)}" ${a.sel[r.key] && r.changeable ? 'checked' : ''} ${r.changeable ? '' : 'disabled'} /></td>
+      <td>${escapeHtml(r.accName)}</td><td>${escapeHtml(r.campaignName)}</td><td>${escapeHtml(r.name)}</td>
+      <td>${r.status === 'ENABLED' ? 'Activo' : 'Pausado'}</td>
+      <td class="field-hint">${r.byPlatform ? 'Creado con la plataforma' : ''}</td>
+      <td class="field-hint" style="color:var(--color-danger,#b3261e)">${a.sel[r.key] && r.changeable && emptied.has(`${r.accId}:${r.campaignId}`) ? 'La campaña se queda sin grupos activos' : ''}</td>
+      <td>${pagResultCell(r)}</td>
+    </tr>`).join('');
+  const body = prepared ? `
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin:10px 0 6px">
+        <div class="field" style="margin:0"><label>Buscar por grupo o campaña</label><input type="text" id="pag-filter" value="${escapeHtml(a.nameFilter)}" style="width:220px" autocomplete="off" /></div>
+        <div class="field" style="margin:0"><label>Estado</label><select id="pag-sfilter">
+          <option value="all" ${a.statusFilter === 'all' ? 'selected' : ''}>Todos</option>
+          <option value="ENABLED" ${a.statusFilter === 'ENABLED' ? 'selected' : ''}>Solo los activos</option>
+          <option value="PAUSED" ${a.statusFilter === 'PAUSED' ? 'selected' : ''}>Solo los pausados</option></select></div>
+        <button class="btn-outline xs" data-pag-bulk="visible">Marcar los visibles</button>
+        <button class="btn-outline xs" data-pag-bulk="platform">Marcar los creados con la plataforma</button>
+        <button class="btn-outline xs" data-pag-bulk="none">Desmarcar todo</button>
+      </div>
+      ${loadingAcc ? `<p class="footnote">Leyendo los grupos de ${loadingAcc} cuentas…</p>` : ''}
+      ${accErrors.map((r) => `<p class="field-hint" style="color:var(--color-danger,#b3261e)">${escapeHtml(r.name)}: ${escapeHtml(r.error)}</p>`).join('')}
+      ${visible.length ? `<div class="table-scroll" style="max-height:380px"><table>
+        <thead><tr><th></th><th>Cuenta</th><th>Campaña de Performance Max</th><th>Grupo de recursos</th><th>Estado</th><th>Origen</th><th>Aviso</th><th>Resultado</th></tr></thead>
+        <tbody>${trs}</tbody></table></div>` : (loadingAcc ? '' : '<p class="footnote">No hay grupos de recursos que coincidan (solo se listan los de campañas de Performance Max activas).</p>')}
+      ${a.run.status === 'error' ? `<div class="error-panel" style="margin-top:12px">${escapeHtml(a.run.error)}</div>` : ''}
+      ${a.run.status === 'loading' ? '<div class="state-panel loading" style="margin-top:12px"><div class="spinner"></div><p>Trabajando con Google Ads…</p></div>' : ''}
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px">
+        <button class="btn-outline" id="pag-validate" data-action="pag-validate" ${selected.length && a.run.status !== 'loading' ? '' : 'disabled'}>Validar con Google (sin cambiar nada)</button>
+        <button class="btn-accent" id="pag-apply" data-action="pag-apply" ${a.run.status === 'loading' || !a.check || !okKeys.length ? 'disabled' : ''}>${a.check ? `${a.action === 'ENABLED' ? 'Activar' : 'Pausar'} ${okKeys.length} grupo${okKeys.length === 1 ? '' : 's'} de recursos` : (a.action === 'ENABLED' ? 'Activar los grupos de recursos' : 'Pausar los grupos de recursos')}</button>
+        <span id="pag-summary" class="field-hint">${selected.length} marcados</span>
+      </div>
+      ${emptied.size ? `<p class="field-hint" style="margin-top:8px;color:var(--color-danger,#b3261e)">Con lo marcado, ${emptied.size} campañas se quedarían sin ningún grupo de recursos activo y dejarían de mostrarse.</p>` : ''}
+      <p class="field-hint" style="margin-top:8px">El botón de aplicar se habilita solo con lo que Google validó y se bloquea si cambias lo marcado o la acción. Cada cambio queda registrado.</p>` : '';
+  return `
+    <div class="card" style="margin-bottom:16px">
+      <h3 style="margin:0 0 10px;font-size:14px">4. Activar o pausar grupos de recursos que ya existen</h3>
+      <p class="field-hint" style="margin:0 0 10px">Sirve para los grupos que creaste aquí (salen pausados) y para los de siempre. Lee los grupos de las campañas de Performance Max activas de las cuentas marcadas, marca los que quieras cambiar, valida con Google y aplica; o prográmalo para una fecha y hora. Solo se puede pausar lo activo y activar lo pausado.</p>
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
+        <div class="field" style="margin:0"><label>Acción</label><select id="pag-action">
+          <option value="PAUSED" ${a.action === 'PAUSED' ? 'selected' : ''}>Pausar grupos activos</option>
+          <option value="ENABLED" ${a.action === 'ENABLED' ? 'selected' : ''}>Activar grupos pausados</option></select></div>
+        <button class="btn-accent" id="pag-read" data-action="pag-read" ${a.status === 'loading' ? 'disabled' : ''}>${prepared ? 'Leer de nuevo los grupos de recursos' : 'Leer los grupos de recursos'}</button>
+      </div>
+      ${body}
+    </div>`;
+}
+
+function renderPagSchedForm() {
+  const a = pagState(), sc = a.sched;
+  const today = new Date(); const pad = (n) => String(n).padStart(2, '0');
+  const minDate = `${today.getFullYear()}-${pad(today.getMonth() + 1)}-${pad(today.getDate())}`;
+  const rows = pagSelectedRows();
+  return `
+    <div class="card" style="margin-bottom:16px">
+      <h3 style="margin:0 0 10px;font-size:14px">5. Programar para más tarde (opcional)</h3>
+      <div style="display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap">
+        <div class="field"><label>Fecha</label><input type="date" id="pag-sched-date" value="${escapeHtml(sc.date)}" min="${minDate}" /></div>
+        <div class="field"><label>Hora (la de cada cuenta)</label><input type="time" id="pag-sched-time" value="${escapeHtml(sc.time)}" /></div>
+        <button class="btn-accent" id="pag-sched-create" data-action="pag-sched-create" ${pagSchedCanCreate() ? '' : 'disabled'}>${a.action === 'ENABLED' ? 'Programar la activación' : 'Programar la pausa'}</button>
+      </div>
+      <p class="field-hint" style="margin:8px 0 0">Grupos de recursos marcados que se programarán: ${rows.length}.</p>
+      <p class="field-hint" style="margin:4px 0 0">La hora es la de la zona horaria de cada cuenta en Google Ads. Al llegar la hora el servidor vuelve a validar con Google y solo cambia lo que en ese momento sea aplicable (un grupo que ya esté en el estado pedido se omite). Si el servidor no puede hacerlo a tiempo, lo reintenta hasta 6 horas después; pasado ese margen no se ejecuta. Un grupo que crees después de programar no entra: la programación es solo de los grupos marcados ahora.</p>
+      ${sc.run.status === 'error' ? `<div class="error-panel" style="margin-top:10px">${escapeHtml(sc.run.error)}</div>` : ''}
+      ${sc.run.status === 'loading' ? '<p class="footnote">Guardando la programación…</p>' : ''}
+      ${sc.run.done ? '<p class="field-hint" style="margin-top:10px;color:var(--color-success,#1d6b41);font-weight:700">Programación guardada. Puedes verla abajo.</p>' : ''}
+    </div>`;
+}
+
+function bindPag() {
+  const a = pagState();
+  const on = (id, ev, fn) => { const el = document.getElementById(id); if (el) el.addEventListener(ev, fn); };
+  on('pag-action', 'change', (e) => { a.action = e.target.value; a.sel = {}; a.sched.run = { status: 'idle', error: null, done: false }; pagResetRun(); render(); });
+  on('pag-filter', 'change', (e) => { a.nameFilter = e.target.value; render(); });
+  on('pag-sfilter', 'change', (e) => { a.statusFilter = e.target.value; render(); });
+  document.querySelectorAll('[data-pag-sel]').forEach((el) => el.addEventListener('change', () => { if (el.checked) a.sel[el.dataset.pagSel] = true; else delete a.sel[el.dataset.pagSel]; a.sched.run = { status: 'idle', error: null, done: false }; pagResetRun(); render(); }));
+  document.querySelectorAll('[data-pag-bulk]').forEach((el) => el.addEventListener('click', () => {
+    const mode = el.dataset.pagBulk;
+    if (mode === 'none') a.sel = {};
+    else pagVisibleRows().forEach((r) => { if (r.changeable && (mode === 'visible' || r.byPlatform)) a.sel[r.key] = true; });
+    a.sched.run = { status: 'idle', error: null, done: false }; pagResetRun(); render();
+  }));
+  on('pag-sched-date', 'input', (e) => { a.sched.date = e.target.value; a.sched.run = { status: 'idle', error: null, done: false }; const b = document.getElementById('pag-sched-create'); if (b) b.disabled = !pagSchedCanCreate(); });
+  on('pag-sched-time', 'input', (e) => { a.sched.time = e.target.value; a.sched.run = { status: 'idle', error: null, done: false }; const b = document.getElementById('pag-sched-create'); if (b) b.disabled = !pagSchedCanCreate(); });
 }
 
 function renderNuaModeSwitch() {
@@ -17865,6 +18158,11 @@ function bindNulabel() {
   const syncSched = () => { const b = document.getElementById('nul-sched-create'); if (b) b.disabled = !nulSchedCanCreate(); };
   on('nul-sched-date', 'input', (e) => { l.sched.date = e.target.value; l.sched.run = { status: 'idle', error: null, done: false }; syncSched(); });
   on('nul-sched-time', 'input', (e) => { l.sched.time = e.target.value; l.sched.run = { status: 'idle', error: null, done: false }; syncSched(); });
+  bindNulSchedList();
+}
+
+function bindNulSchedList() {
+  const l = nulState();
   document.querySelectorAll('[data-nul-sched-toggle]').forEach((el) => el.addEventListener('click', () => { const id = el.dataset.nulSchedToggle; l.sched.open[id] = !l.sched.open[id]; render(); }));
   document.querySelectorAll('[data-nul-sched-cancel]').forEach((el) => el.addEventListener('click', () => nulSchedCancel(Number(el.dataset.nulSchedCancel))));
 }
@@ -17896,7 +18194,7 @@ function nulSchedLoad() {
       sc.list = data.schedules || []; sc.status = 'ready';
     })
     .catch((err) => { sc.status = 'error'; sc.error = err.message || String(err); })
-    .then(() => { if (state.nuevosAnuncios.mode === 'etiqueta') render(); });
+    .then(() => { if (['etiqueta', 'pmax'].includes(state.nuevosAnuncios.mode)) render(); });
 }
 
 function nulSchedCreate() {
@@ -17983,7 +18281,7 @@ function renderNulSchedList() {
     return `<tr>
       <td>${x.id}</td>
       <td>${x.action === 'ENABLED' ? 'Activar' : 'Pausar'}</td>
-      <td>${escapeHtml(x.label)}</td>
+      <td>${x.kind === 'asset_group' ? `<span>Grupos de recursos de PMax</span> <span>(${x.targets})</span>` : escapeHtml(x.label)}</td>
       <td>${escapeHtml(x.mcc_name || x.mcc_id)}</td>
       <td>${escapeHtml(x.run_date)} ${escapeHtml(x.run_time)}</td>
       <td>${x.accounts.length}</td>
@@ -18002,7 +18300,7 @@ function renderNulSchedList() {
       ${sc.error ? `<div class="error-panel" style="margin-bottom:8px">${escapeHtml(sc.error)}</div>` : ''}
       ${sc.status !== 'loading' && !sc.error && !sc.list.length ? '<p class="footnote">Todavía no hay programaciones.</p>' : ''}
       ${sc.list.length ? `<div class="table-scroll" style="max-height:420px"><table>
-        <thead><tr><th>N.º</th><th>Acción</th><th>Etiqueta</th><th>MCC</th><th>Fecha y hora (de cada cuenta)</th><th>Cuentas</th><th>Estado</th><th></th></tr></thead>
+        <thead><tr><th>N.º</th><th>Acción</th><th>Etiqueta o grupos</th><th>MCC</th><th>Fecha y hora (de cada cuenta)</th><th>Cuentas</th><th>Estado</th><th></th></tr></thead>
         <tbody>${rows}</tbody></table></div>` : ''}
     </div>`;
 }
@@ -19853,6 +20151,10 @@ function handleAction(action) {
     case 'nul-apply': nulSubmit(false); break;
     case 'nul-new-batch': nulNewBatch(); break;
     case 'pmx-ai-generate': pmxAiGenerate(); break;
+    case 'pag-read': pagRead(); break;
+    case 'pag-validate': pagSubmit(true); break;
+    case 'pag-apply': pagSubmit(false); break;
+    case 'pag-sched-create': pagSchedCreate(); break;
     case 'pmx-read': pmxRead(); break;
     case 'pmx-validate': pmxSubmit(true); break;
     case 'pmx-apply': pmxSubmit(false); break;
