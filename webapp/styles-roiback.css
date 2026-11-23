@@ -737,3 +737,35 @@ body.page-anuncios .content-inner { max-width: 1400px; }
 }
 .nua-summary .delta-badge { font-size: 12px; padding: 3px 10px; }
 @media (max-width: 1279px) { .nua-layout { display: block; } .nua-side { position: static; } }
+
+/* Performance Max: subpestañas tipo píldora y cuadrículas de imágenes */
+.nua-seg { display: inline-flex; gap: 2px; padding: 4px; background: var(--gray-100); border-radius: 12px; margin-bottom: 18px; max-width: 100%; flex-wrap: wrap; }
+.nua-seg-btn {
+  border: none; background: transparent; cursor: pointer; font-size: 13px; font-weight: 600;
+  color: var(--color-text-muted); padding: 9px 22px; border-radius: 9px;
+}
+.nua-seg-btn:hover { color: var(--color-text-heading); }
+.nua-seg-btn.active { background: #fff; color: var(--color-text-heading); box-shadow: var(--shadow-card); }
+.pmx-media { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 24px; margin-top: 16px; align-items: start; }
+@media (max-width: 900px) { .pmx-media { grid-template-columns: 1fr; } }
+.pmx-imgs-wrap { display: flex; flex-wrap: wrap; gap: 14px 28px; }
+
+.pmx-imgs-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: 6px; font-size: 13px; }
+.pmx-imgs-group { width: 250px; }
+.pmx-tiles { display: flex; gap: 10px; flex-wrap: wrap; }
+.pmx-tile {
+  position: relative; width: 112px; height: 84px; border-radius: 10px; box-sizing: border-box;
+  display: flex; align-items: flex-end; overflow: hidden;
+}
+.pmx-tile.add {
+  border: 1.5px dashed var(--color-border); color: var(--color-text-muted); font-size: 12.5px; font-weight: 600;
+  padding: 8px 10px; cursor: pointer; background: var(--gray-50);
+}
+.pmx-tile.add:hover { border-color: var(--color-accent-strong); color: var(--color-accent-strong); }
+.pmx-tile.filled { border: 1px solid var(--color-border); background: #fff; }
+.pmx-tile.filled img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.pmx-tile-cap { position: relative; font-size: 10px; background: rgba(255,255,255,0.85); padding: 1px 5px; border-radius: 0 6px 0 0; color: var(--color-text-muted); }
+.pmx-tile-x {
+  position: absolute; top: 3px; right: 3px; width: 20px; height: 20px; line-height: 18px; text-align: center;
+  border: none; border-radius: 50%; background: var(--navy-800); color: #fff; cursor: pointer; font-size: 14px; padding: 0;
+}

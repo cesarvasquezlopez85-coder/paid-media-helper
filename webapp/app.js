@@ -299,7 +299,7 @@ const state = {
     simulated: false,
     pacingHotels: { status: 'idle', msgs: [] }, // «Marcar los hoteles de Ritmo de consumo»
     accountsOpen: true, // accountsOpen: paso 1 desplegado o plegado a una línea
-    mode: 'plantilla', tpl: null, lab: null, // 'plantilla' | 'etiqueta' (pestaña «Crear anuncios» y pestaña «Activar, pausar y programar»); tpl y lab se crean al entrar a cada modo (nutState, nulState)
+    mode: 'plantilla', pmaxTab: 'crear', tpl: null, lab: null, // 'plantilla' | 'etiqueta' (pestaña «Crear anuncios» y pestaña «Activar, pausar y programar»); tpl y lab se crean al entrar a cada modo (nutState, nulState)
   },
   // IA Max (AI Max for Search) — a diferencia de "Ask Advisor", sí tiene
   // API real (Campaign.ai_max_setting, desde v25). Tres sub-vistas sobre
@@ -16386,7 +16386,11 @@ function renderNuevosAnunciosPage() {
   if (s.mode === 'pmax') {
     if (ready && nulState().sched.status === 'idle') nulSchedLoad();
     if (ready && pagState().snap.status === 'idle') pagSnapLoad();
-    return nuaCompose(sim, ready, `${ready ? renderPmxStepBase() : ''}${ready && s.selected.length ? renderPmxStepRows() : ''}${ready && s.selected.length ? renderPagStep() : ''}${ready && s.selected.length && pagSelectedRows().length ? renderPagSchedForm() : ''}${ready ? renderNulSchedList() : ''}`);
+    const sub = s.pmaxTab === 'gestionar' ? 'gestionar' : 'crear';
+    const body = sub === 'crear'
+      ? `${ready ? renderPmxStepBase() : ''}${ready && s.selected.length ? renderPmxStepRows() : ''}`
+      : `${ready && s.selected.length ? renderPagStep() : ''}${ready && s.selected.length && pagSelectedRows().length ? renderPagSchedForm() : ''}${ready ? renderNulSchedList() : ''}`;
+    return nuaCompose(sim, ready, `${ready ? renderPmxSubtabs(sub) : ''}${body}`);
   }
   return nuaCompose(sim, ready, `${ready ? renderNutStepTemplate() : ''}${s.selected.length && s.mcc.selectedId ? renderNutStepTargets() : ''}`);
 }
@@ -17342,15 +17346,22 @@ function pmxAddFiles(kind, files) {
   Promise.all(jobs).then(() => { p.imgMsg = msgs.join(' '); pmxResetRun(); render(); });
 }
 
+function renderPmxSubtabs(sub) {
+  const b = (key, label) => `<button class="nua-seg-btn${sub === key ? ' active' : ''}" data-pmx-sub="${key}">${label}</button>`;
+  return `<div class="nua-seg">${b('crear', 'Crear grupo de recursos')}${b('gestionar', 'Activar o pausar grupos')}</div>`;
+}
+
 function renderPmxImageBlock(kind) {
   const p = pmxState(), spec = PMX_IMG[kind], list = p.images[kind];
-  return `<div style="margin:0 0 12px">
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-      <strong style="font-size:13px">${spec.label}${spec.req ? ' *' : ''}</strong>
-      <span class="field-hint">${spec.hint}</span>
-      <label class="btn-outline xs" style="cursor:pointer">Agregar<input type="file" accept="image/png,image/jpeg" multiple data-pmx-file="${kind}" style="display:none" /></label>
-    </div>
-    ${list.length ? `<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:6px">${list.map((im, i) => `<div style="text-align:center;font-size:11px"><img src="${im.url}" style="height:56px;max-width:140px;object-fit:contain;border:1px solid var(--color-border,#ddd);border-radius:6px" alt="" /><br />${escapeHtml(im.name.slice(0, 22))} · ${im.w}×${im.h}<br /><button class="btn-link" data-pmx-rm="${kind}:${i}">Quitar</button></div>`).join('')}</div>` : ''}
+  const isLogo = kind.startsWith('logo');
+  const tiles = list.map((im, i) => `<div class="pmx-tile filled" title="${escapeHtml(im.name)}">
+      <img src="${im.url}" alt="" />
+      <span class="pmx-tile-cap">${im.w}×${im.h}</span>
+      <button class="pmx-tile-x" data-pmx-rm="${kind}:${i}" aria-label="Quitar" title="Quitar">×</button>
+    </div>`).join('');
+  return `<div class="pmx-imgs-group">
+    <div class="pmx-imgs-head"><strong>${spec.label}${spec.req ? ' *' : ''}</strong><span class="field-hint">${spec.hint}</span></div>
+    <div class="pmx-tiles">${tiles}<label class="pmx-tile add"><span>${isLogo ? '+ Logo' : '+ Imagen'}</span><input type="file" accept="image/png,image/jpeg" multiple data-pmx-file="${kind}" style="display:none" /></label></div>
   </div>`;
 }
 
@@ -17421,11 +17432,19 @@ function renderPmxStepBase() {
         <div class="field"><label>Títulos largos (uno por línea, de 1 a 5, hasta 90)</label><textarea id="pmx-longs" rows="7" style="width:360px">${escapeHtml(p.longs)}</textarea></div>
         <div class="field"><label>Descripciones (una por línea, de 2 a 5, hasta 90; una de 60 o menos)</label><textarea id="pmx-descs" rows="7" style="width:360px">${escapeHtml(p.descs)}</textarea></div>
       </div>
-      <h4 style="margin:14px 0 8px;font-size:13px">Imágenes y logos (PNG o JPEG, hasta 5 MB cada una)</h4>
-      ${Object.keys(PMX_IMG).map(renderPmxImageBlock).join('')}
-      ${p.imgMsg ? `<p class="field-hint" style="color:var(--color-danger,#b3261e)">${escapeHtml(p.imgMsg)}</p>` : ''}
-      <div class="field" style="margin-top:8px"><label>Videos de YouTube (opcional, un enlace por línea, hasta 5)</label><textarea id="pmx-videos" rows="3" style="width:460px" placeholder="https://www.youtube.com/watch?v=...">${escapeHtml(p.videos)}</textarea>
-        <p class="field-hint" style="margin-top:4px">El video debe estar en YouTube y ser accesible. Sin videos, Google puede generar uno automático.</p></div>
+      <div class="pmx-media">
+        <div>
+          <p class="nua-eyebrow" style="margin:0 0 8px">Imágenes y logos</p>
+          <p class="field-hint" style="margin:0 0 10px">PNG o JPEG, hasta 5 MB cada una.</p>
+          <div class="pmx-imgs-wrap">${Object.keys(PMX_IMG).map(renderPmxImageBlock).join('')}</div>
+          ${p.imgMsg ? `<p class="field-hint" style="color:var(--color-danger,#b3261e)">${escapeHtml(p.imgMsg)}</p>` : ''}
+        </div>
+        <div>
+          <p class="nua-eyebrow" style="margin:0 0 8px">Videos de YouTube · hasta 5</p>
+          <textarea id="pmx-videos" rows="6" style="width:100%;box-sizing:border-box" placeholder="https://www.youtube.com/watch?v=...">${escapeHtml(p.videos)}</textarea>
+          <p class="field-hint" style="margin-top:4px">Opcional, un enlace por línea. El video debe estar en YouTube y ser accesible. Sin videos, Google puede generar uno automático.</p>
+        </div>
+      </div>
       <p id="pmx-base-hint" class="field-hint" style="margin-top:8px;color:var(--color-danger,#b3261e)">${escapeHtml(err)}</p>
     </div>`;
 }
@@ -17514,6 +17533,7 @@ function bindPmx() {
   field('pmx-name', 'name'); field('pmx-business', 'business'); field('pmx-heads', 'heads'); field('pmx-longs', 'longs'); field('pmx-descs', 'descs'); field('pmx-videos', 'videos');
   const f = document.getElementById('pmx-filter');
   if (f) f.addEventListener('change', (e) => { p.campaignFilter = e.target.value; p.excluded = {}; pmxResetRun(); render(); });
+  document.querySelectorAll('[data-pmx-sub]').forEach((el) => el.addEventListener('click', () => { state.nuevosAnuncios.pmaxTab = el.dataset.pmxSub; render(); }));
   document.querySelectorAll('[data-pmx-file]').forEach((el) => el.addEventListener('change', () => pmxAddFiles(el.dataset.pmxFile, el.files)));
   document.querySelectorAll('[data-pmx-rm]').forEach((el) => el.addEventListener('click', () => { const [k, i] = el.dataset.pmxRm.split(':'); p.images[k].splice(Number(i), 1); p.imgMsg = ''; pmxResetRun(); render(); }));
   document.querySelectorAll('[data-pmx-inc]').forEach((el) => el.addEventListener('change', () => { if (el.checked) delete p.excluded[el.dataset.pmxInc]; else p.excluded[el.dataset.pmxInc] = true; pmxResetRun(); render(); }));
@@ -17876,7 +17896,7 @@ function renderPagStep() {
       <p class="field-hint" style="margin-top:8px">El botón de aplicar se habilita solo con lo que Google validó y se bloquea si cambias lo marcado o la acción. Cada cambio queda registrado.</p>` : '';
   return `
     <div class="card" style="margin-bottom:16px">
-      <h3 style="margin:0 0 10px;font-size:14px">4. Activar o pausar grupos de recursos que ya existen</h3>
+      <h3 style="margin:0 0 10px;font-size:14px">2. Activar o pausar grupos de recursos que ya existen</h3>
       <p class="field-hint" style="margin:0 0 10px">Sirve para los grupos que creaste aquí (salen pausados) y para los de siempre. Lee los grupos de las campañas de Performance Max activas de las cuentas marcadas, marca los que quieras cambiar, valida con Google y aplica; o prográmalo para una fecha y hora. Solo se puede pausar lo activo y activar lo pausado.</p>
       <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
         <div class="field" style="margin:0"><label>Acción</label><select id="pag-action">
@@ -17896,7 +17916,7 @@ function renderPagSchedForm() {
   const rows = pagSelectedRows();
   return `
     <div class="card" style="margin-bottom:16px">
-      <h3 style="margin:0 0 10px;font-size:14px">5. Programar para más tarde (opcional)</h3>
+      <h3 style="margin:0 0 10px;font-size:14px">3. Programar para más tarde (opcional)</h3>
       <div style="display:flex;align-items:flex-end;gap:16px;flex-wrap:wrap">
         <div class="field"><label>Fecha</label><input type="date" id="pag-sched-date" value="${escapeHtml(sc.date)}" min="${minDate}" /></div>
         <div class="field"><label>Hora (la de cada cuenta)</label><input type="time" id="pag-sched-time" value="${escapeHtml(sc.time)}" /></div>

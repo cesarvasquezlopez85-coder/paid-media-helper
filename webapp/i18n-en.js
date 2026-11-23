@@ -3350,8 +3350,8 @@ export const EN = {
   [`Los títulos, los títulos largos y las descripciones que ya escribiste se reemplazarán por los que genere la IA. ¿Continuar?`]: `The headlines, long headlines and descriptions you already wrote will be replaced by the ones the AI generates. Continue?`,
   [`Escribe las indicaciones: qué debe tener en cuenta el grupo de recursos (hotel o destino, oferta, fechas, servicios, público…).`]: `Write the instructions: what the asset group should take into account (hotel or destination, offer, dates, services, audience…).`,
   // ---- Performance Max: activar, pausar y programar grupos de recursos ----
-  [`4. Activar o pausar grupos de recursos que ya existen`]: `4. Activate or pause asset groups that already exist`,
-  [`5. Programar para más tarde (opcional)`]: `5. Schedule for later (optional)`,
+  [`2. Activar o pausar grupos de recursos que ya existen`]: `2. Activate or pause asset groups that already exist`,
+  [`3. Programar para más tarde (opcional)`]: `3. Schedule for later (optional)`,
   [`Sirve para los grupos que creaste aquí (salen pausados) y para los de siempre. Lee los grupos de las campañas de Performance Max activas de las cuentas marcadas, marca los que quieras cambiar, valida con Google y aplica; o prográmalo para una fecha y hora. Solo se puede pausar lo activo y activar lo pausado.`]: `It works for the groups you created here (they come out paused) and for the usual ones. It reads the asset groups of the active Performance Max campaigns of the selected accounts; mark the ones you want to change, validate with Google and apply; or schedule it for a date and time. You can only pause what is active and activate what is paused.`,
   [`Pausar grupos activos`]: `Pause active groups`,
   [`Activar grupos pausados`]: `Activate paused groups`,
@@ -3431,4 +3431,12 @@ export const EN = {
   [`Paso común`]: `Shared step`,
   [`MCC y cuentas`]: `MCC and accounts`,
   [`Marca al menos una cuenta en la columna izquierda.`]: `Select at least one account in the left column.`,
+  [`Crear grupo de recursos`]: `Create asset group`,
+  [`Activar o pausar grupos`]: `Enable or pause groups`,
+  [`+ Imagen`]: `+ Image`,
+  [`+ Logo`]: `+ Logo`,
+  [`Imágenes y logos`]: `Images and logos`,
+  [`PNG o JPEG, hasta 5 MB cada una.`]: `PNG or JPEG, up to 5 MB each.`,
+  [`Videos de YouTube · hasta 5`]: `YouTube videos · up to 5`,
+  [`Opcional, un enlace por línea. El video debe estar en YouTube y ser accesible. Sin videos, Google puede generar uno automático.`]: `Optional, one link per line. The video must be on YouTube and accessible. Without videos, Google may generate one automatically.`,
 };
