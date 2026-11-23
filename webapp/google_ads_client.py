@@ -2878,7 +2878,8 @@ def create_pmax_asset_group(customer_id, campaign_id, name, business_name, heads
 
 SIMULATED_PMAX = {
     "1111111111": [("9101", "Estelar Hoteles - CO:es - PMAX", "https://www.estelar-demo.example/reservas", ["Evergreen"]),
-                   ("9102", "Estelar Hoteles - Eventos - PMAX", "https://www.estelar-demo.example/eventos", [])],
+                   ("9102", "Estelar Hoteles - Eventos - PMAX", "https://www.estelar-demo.example/eventos", []),
+                   ("9103", "Estelar Hoteles - US:en - PMAX", "https://www.estelar-demo.example/en", ["Summer"])],
     "2222222222": [("9201", "Click Clack - ES:es - PMAX", "https://www.clickclack-demo.example/", ["Base"])],
 }
 _SIMULATED_PMAX_CREATED = {}

@@ -17126,7 +17126,7 @@ function pmxState() {
 }
 
 function pmxResetRun() { const p = pmxState(); p.check = null; p.run = { status: 'idle', error: null, results: {}, applied: false }; }
-function pmxResetTargets() { const p = pmxState(); p.rows = {}; p.status = 'idle'; p.excluded = {}; p.ag = null; pmxResetRun(); }
+function pmxResetTargets() { const p = pmxState(); p.rows = {}; p.status = 'idle'; p.ag = null; pmxResetRun(); }
 
 function pmxYoutubeId(value) {
   const t = String(value || '').trim();
@@ -17181,22 +17181,22 @@ function pmxCampaigns(accRow) {
   return (accRow.campaigns || []).filter((c) => !f || c.name.toLowerCase().includes(f));
 }
 
-function pmxChosen(accRow) {
-  const list = pmxCampaigns(accRow);
-  if (accRow.pick) return list.find((c) => c.id === accRow.pick) || null;
-  return list.length === 1 ? list[0] : null;
+// Una cuenta puede tener varias campañas de Performance Max y se pueden marcar varias: cada campaña marcada recibe su propio grupo de
+// recursos. Con una sola campaña que coincida se marca sola; con varias hay que marcarlas a mano.
+function pmxPicked(accRow, camp) {
+  if (accRow.picks && Object.prototype.hasOwnProperty.call(accRow.picks, camp.id)) return !!accRow.picks[camp.id];
+  return pmxCampaigns(accRow).length === 1;
 }
 
-// Una fila por cuenta: la campaña elegida, el hotel, los textos finales y, si no se puede, por qué.
-function pmxCompute(accRow) {
+// Una fila por campaña de cada cuenta: el hotel, los textos finales y, si no se puede, por qué.
+function pmxCompute(accRow, camp) {
   const p = pmxState();
-  const camp = pmxChosen(accRow);
   const parsed = camp ? nutParseCampaignName(camp.name) : null;
-  const hotel = (accRow.hotel !== undefined && accRow.hotel !== null && accRow.hotel !== '') ? accRow.hotel.trim() : (parsed ? parsed.hotel : accRow.name);
-  const row = { key: accRow.id, accId: accRow.id, campaign: camp, hotel, reason: '', name: '', business: '', heads: [], longs: [], descs: [] };
+  const over = camp && accRow.hotels ? accRow.hotels[camp.id] : '';
+  const hotel = (over !== undefined && over !== null && over !== '') ? over.trim() : (parsed ? parsed.hotel : accRow.name);
+  const row = { key: camp ? `${accRow.id}:${camp.id}` : accRow.id, accId: accRow.id, accName: accRow.name, campaign: camp || null, picked: camp ? pmxPicked(accRow, camp) : false, hotel, reason: '', name: '', business: '', heads: [], longs: [], descs: [] };
   if (!(accRow.campaigns || []).length) { row.reason = 'La cuenta no tiene campañas de Performance Max activas'; return row; }
-  if (!pmxCampaigns(accRow).length) { row.reason = 'Ninguna campaña coincide con el filtro'; return row; }
-  if (!camp) { row.reason = 'Elige la campaña'; return row; }
+  if (!camp) { row.reason = 'Ninguna campaña coincide con el filtro'; return row; }
   if (!hotel) { row.reason = 'Escribe el nombre del hotel'; return row; }
   row.name = nutRenderLine(p.name, {}, hotel) || '';
   row.business = nutRenderLine(p.business, {}, hotel) || '';
@@ -17218,9 +17218,17 @@ function pmxSelectedRows() {
   return s.selected.map((id) => p.rows[id]).filter((r) => r && r.status === 'ready');
 }
 
+function pmxRowsFor(accRow) {
+  const list = pmxCampaigns(accRow);
+  return list.length ? list.map((c) => pmxCompute(accRow, c)) : [pmxCompute(accRow, null)];
+}
+
+function pmxAllRows() {
+  return pmxSelectedRows().flatMap(pmxRowsFor);
+}
+
 function pmxReadyRows() {
-  const p = pmxState();
-  return pmxSelectedRows().map(pmxCompute).filter((r) => !r.reason && !p.excluded[r.key]);
+  return pmxAllRows().filter((r) => r.campaign && r.picked && !r.reason);
 }
 
 function pmxImagePayload() {
@@ -17250,10 +17258,10 @@ function pmxCanValidate() {
 function pmxRead() {
   const s = state.nuevosAnuncios, p = pmxState();
   if (!s.selected.length) return;
-  p.status = 'loading'; p.excluded = {}; pmxResetRun(); p.rows = {};
+  p.status = 'loading'; pmxResetRun(); p.rows = {};
   s.selected.forEach((id) => {
     const acc = s.accounts.find((a) => a.id === id);
-    p.rows[id] = { id, name: acc ? acc.name : id, status: 'loading', error: null, campaigns: [], pick: '', hotel: '' };
+    p.rows[id] = { id, name: acc ? acc.name : id, status: 'loading', error: null, campaigns: [], picks: {}, hotels: {} };
   });
   render();
   const queue = s.selected.slice();
@@ -17460,31 +17468,27 @@ function pmxResultCell(row) {
 function renderPmxStepRows() {
   const s = state.nuevosAnuncios, p = pmxState();
   const prepared = Object.keys(p.rows).length > 0;
-  const computed = pmxSelectedRows().map(pmxCompute);
+  const all = pmxAllRows();
   const okKeys = p.check ? p.check.okKeys : [];
   const trs = s.selected.map((id) => {
     const acc = p.rows[id];
     if (!acc) return '';
     if (acc.status === 'loading') return `<tr><td></td><td>${escapeHtml(acc.name)}</td><td colspan="5" class="footnote">Leyendo las campañas…</td></tr>`;
     if (acc.status === 'error') return `<tr><td></td><td>${escapeHtml(acc.name)}</td><td colspan="5" style="color:var(--color-danger,#b3261e)">${escapeHtml(acc.error)}</td></tr>`;
-    const r = pmxCompute(acc);
-    const list = pmxCampaigns(acc);
-    const campCell = list.length > 1
-      ? `<select data-pmx-pick="${escapeHtml(id)}"><option value="">Elige la campaña…</option>${list.map((c) => `<option value="${escapeHtml(c.id)}" ${acc.pick === c.id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}</select>`
-      : (list[0] ? escapeHtml(list[0].name) : '');
-    return `<tr>
-      <td style="width:28px"><input type="checkbox" data-pmx-inc="${escapeHtml(id)}" ${!r.reason && !p.excluded[id] ? 'checked' : ''} ${r.reason ? 'disabled' : ''} /></td>
-      <td>${escapeHtml(acc.name)}</td><td>${campCell}</td>
-      <td><input type="text" data-pmx-hotel="${escapeHtml(id)}" value="${escapeHtml(r.hotel)}" style="width:170px" /></td>
-      <td class="field-hint">${r.reason ? '' : `${r.heads.length} títulos · ${r.longs.length} largos · ${r.descs.length} desc.`}${r.campaign && r.campaign.brand_guidelines ? '<br />Brand Guidelines: negocio y logos de la campaña' : ''}</td>
+    return pmxRowsFor(acc).map((r, i) => `<tr>
+      <td style="width:28px"><input type="checkbox" data-pmx-inc="${escapeHtml(r.key)}" ${r.campaign && r.picked && !r.reason ? 'checked' : ''} ${!r.campaign || r.reason ? 'disabled' : ''} /></td>
+      <td${i ? ' style="color:var(--color-text-muted)"' : ''}>${escapeHtml(acc.name)}</td><td>${r.campaign ? escapeHtml(r.campaign.name) : ''}</td>
+      <td>${r.campaign ? `<input type="text" data-pmx-hotel="${escapeHtml(r.key)}" value="${escapeHtml(r.hotel)}" style="width:170px" />` : ''}</td>
+      <td class="field-hint">${r.reason || !r.campaign ? '' : `${r.heads.length} títulos · ${r.longs.length} largos · ${r.descs.length} desc.`}${r.campaign && r.campaign.brand_guidelines ? '<br />Brand Guidelines: negocio y logos de la campaña' : ''}</td>
       <td>${r.reason ? `<span class="field-hint">${escapeHtml(r.reason)}</span>` : ''}</td>
       <td>${pmxResultCell(r)}</td>
-    </tr>`;
+    </tr>`).join('');
   }).join('');
+  const pickedCount = all.filter((r) => r.picked).length;
   const readyCount = pmxReadyRows().length;
   const body = prepared ? `
       <div class="field" style="margin:10px 0 6px"><label>Solo campañas cuyo nombre contenga (opcional)</label><input type="text" id="pmx-filter" value="${escapeHtml(p.campaignFilter)}" style="width:240px" placeholder="ej. PMAX" autocomplete="off" /></div>
-      <p class="field-hint" style="margin:0 0 6px">Si una cuenta tiene una sola campaña que coincide, se elige sola; si tiene varias, elige cuál. El hotel sale del nombre de la campaña («Hotel - MERCADO:idioma - TIPO») o, si no sigue ese formato, del nombre de la cuenta; puedes corregirlo por cuenta.</p>
+      <p class="field-hint" style="margin:0 0 6px">Si una cuenta tiene una sola campaña que coincide, se marca sola; si tiene varias, marca las que quieras: cada campaña marcada recibe su propio grupo de recursos pausado. El hotel sale del nombre de la campaña («Hotel - MERCADO:idioma - TIPO») o, si no sigue ese formato, del nombre de la cuenta; puedes corregirlo en cada fila.</p>
       <div class="table-scroll" style="max-height:340px"><table>
         <thead><tr><th></th><th>Cuenta</th><th>Campaña de Performance Max</th><th>Hotel</th><th>Textos</th><th>Motivo</th><th>Resultado</th></tr></thead>
         <tbody>${trs}</tbody>
@@ -17495,7 +17499,7 @@ function renderPmxStepRows() {
         <button class="btn-outline" id="pmx-validate" data-action="pmx-validate" ${pmxCanValidate() ? '' : 'disabled'}>Validar con Google (sin cambiar nada)</button>
         <button class="btn-accent" id="pmx-apply" data-action="pmx-apply" ${p.run.status === 'loading' || !p.check || !okKeys.length ? 'disabled' : ''}>${p.check ? `Crear ${okKeys.length} grupo${okKeys.length === 1 ? '' : 's'} de recursos (pausados)` : 'Crear los grupos de recursos (pausados)'}</button>
         ${p.run.applied ? '<button class="btn-outline" data-action="pmx-new-batch">Empezar de nuevo</button>' : ''}
-        <span id="pmx-summary" class="field-hint">${readyCount} de ${computed.length} cuentas listas</span>
+        <span id="pmx-summary" class="field-hint">${readyCount} de ${pickedCount} campañas marcadas listas</span>
       </div>
       <p class="field-hint" style="margin-top:8px">${p.run.applied ? 'Grupos creados, todos pausados. Cada uno queda registrado. Actívalos desde Google Ads cuando toque.' : 'El botón de crear se habilita solo con lo que Google validó y se bloquea si cambias la base, la campaña, el hotel o las marcas.'}</p>` : '';
   return `
@@ -17532,13 +17536,12 @@ function bindPmx() {
   if (aiLang) aiLang.addEventListener('change', (e) => { p.ai.idioma = e.target.value; });
   field('pmx-name', 'name'); field('pmx-business', 'business'); field('pmx-heads', 'heads'); field('pmx-longs', 'longs'); field('pmx-descs', 'descs'); field('pmx-videos', 'videos');
   const f = document.getElementById('pmx-filter');
-  if (f) f.addEventListener('change', (e) => { p.campaignFilter = e.target.value; p.excluded = {}; pmxResetRun(); render(); });
+  if (f) f.addEventListener('change', (e) => { p.campaignFilter = e.target.value; pmxResetRun(); render(); });
   document.querySelectorAll('[data-pmx-sub]').forEach((el) => el.addEventListener('click', () => { state.nuevosAnuncios.pmaxTab = el.dataset.pmxSub; render(); }));
   document.querySelectorAll('[data-pmx-file]').forEach((el) => el.addEventListener('change', () => pmxAddFiles(el.dataset.pmxFile, el.files)));
   document.querySelectorAll('[data-pmx-rm]').forEach((el) => el.addEventListener('click', () => { const [k, i] = el.dataset.pmxRm.split(':'); p.images[k].splice(Number(i), 1); p.imgMsg = ''; pmxResetRun(); render(); }));
-  document.querySelectorAll('[data-pmx-inc]').forEach((el) => el.addEventListener('change', () => { if (el.checked) delete p.excluded[el.dataset.pmxInc]; else p.excluded[el.dataset.pmxInc] = true; pmxResetRun(); render(); }));
-  document.querySelectorAll('[data-pmx-pick]').forEach((el) => el.addEventListener('change', () => { p.rows[el.dataset.pmxPick].pick = el.value; pmxResetRun(); render(); }));
-  document.querySelectorAll('[data-pmx-hotel]').forEach((el) => el.addEventListener('change', () => { p.rows[el.dataset.pmxHotel].hotel = el.value.trim(); pmxResetRun(); render(); }));
+  document.querySelectorAll('[data-pmx-inc]').forEach((el) => el.addEventListener('change', () => { const [a, c] = el.dataset.pmxInc.split(':'); p.rows[a].picks[c] = el.checked; pmxResetRun(); render(); }));
+  document.querySelectorAll('[data-pmx-hotel]').forEach((el) => el.addEventListener('change', () => { const [a, c] = el.dataset.pmxHotel.split(':'); p.rows[a].hotels[c] = el.value.trim(); pmxResetRun(); render(); }));
 }
 
 // ---------------------------------------------------------------------------

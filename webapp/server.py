@@ -186,6 +186,7 @@ def get_mcc_member_ids(mcc_customer_id):
 WRITE_RATE_LIMIT = (30, 60)
 # Anuncios nuevos: cuentas por tanda (cada una es una escritura real al aplicar, y el tope por minuto es AD_WRITE_RATE_LIMIT).
 AD_CREATE_MAX_ACCOUNTS = 40
+PMAX_CREATE_MAX_TARGETS = 120  # grupos de recursos por tanda: una cuenta puede tener varias campañas de Performance Max marcadas
 MAX_REQUEST_BYTES = 48 * 1024 * 1024  # las imágenes de Performance Max viajan en base64 dentro del JSON
 # Los anuncios tienen su propio tope de escrituras (una por cuenta): una tanda de 40 cuentas cabe con margen y el resto de
 # escrituras de la plataforma sigue con WRITE_RATE_LIMIT.
@@ -4079,7 +4080,10 @@ class Handler(SimpleHTTPRequestHandler):
         if not isinstance(raw_accounts, list) or not raw_accounts:
             self._send_json(400, {"error": "Elige al menos una cuenta."})
             return
-        if len(raw_accounts) > AD_CREATE_MAX_ACCOUNTS:
+        if len(raw_accounts) > PMAX_CREATE_MAX_TARGETS:
+            self._send_json(400, {"error": f"Máximo {PMAX_CREATE_MAX_TARGETS} grupos de recursos por tanda."})
+            return
+        if len({str((a or {}).get("customer_id") or "").strip() for a in raw_accounts if isinstance(a, dict)}) > AD_CREATE_MAX_ACCOUNTS:
             self._send_json(400, {"error": f"Máximo {AD_CREATE_MAX_ACCOUNTS} cuentas por vez."})
             return
         try:
@@ -4095,10 +4099,10 @@ class Handler(SimpleHTTPRequestHandler):
             if not cid.isdigit() or not camp.isdigit():
                 self._send_json(400, {"error": "Cada cuenta necesita su campaña de Performance Max."})
                 return
-            if cid in seen_acc:
-                self._send_json(400, {"error": "Una cuenta no puede repetirse en la misma tanda."})
+            if (cid, camp) in seen_acc:
+                self._send_json(400, {"error": "Una campaña no puede repetirse en la misma tanda."})
                 return
-            seen_acc.add(cid)
+            seen_acc.add((cid, camp))
             try:
                 name, biz, heads, longs, descs = google_ads_client.clean_pmax_texts(
                     acc.get("name"), acc.get("business_name"), acc.get("headlines"), acc.get("long_headlines"), acc.get("descriptions"))
@@ -4127,22 +4131,30 @@ class Handler(SimpleHTTPRequestHandler):
                 to_run.append(i)
         fn = google_ads_client.simulated_create_pmax_asset_group if simulated else google_ads_client.create_pmax_asset_group
 
-        def run(i):
+        def run_one(i):
             acc = accounts[i]
             try:
                 r = fn(acc["customer_id"], acc["campaign_id"], acc["name"], acc["business_name"], acc["heads"], acc["longs"], acc["descs"],
                        images, video_ids, validate_only=validate_only)
                 return i, {"customer_id": acc["customer_id"], "ok": True, "campaign_name": r.get("campaign_name"),
                            "asset_group_id": r.get("asset_group_id"), "url": r.get("url"), "_r": r}
-            except Exception as e:  # noqa: BLE001 — un fallo en una cuenta no debe frenar a las demás
+            except Exception as e:  # noqa: BLE001 — un fallo en una campaña no debe frenar a las demás
                 if not isinstance(e, ValueError):
                     print(f"[google-ads-error] pmax-create {' '.join(str(e).split())[:300]}", flush=True)
                 return i, {"customer_id": acc["customer_id"], "ok": False, "error": google_ads_client.google_error_text(e)}
 
+        def run_account(indices):
+            # Las campañas de una misma cuenta van una tras otra: comparten las mismas imágenes y no deben crearse a la vez.
+            return [run_one(i) for i in indices]
+
         if to_run:
+            by_account = {}
+            for i in to_run:
+                by_account.setdefault(accounts[i]["customer_id"], []).append(i)
             with ThreadPoolExecutor(max_workers=4) as pool:
-                for i, res in pool.map(run, to_run):
-                    results[i] = res
+                for pairs in pool.map(run_account, by_account.values()):
+                    for i, res in pairs:
+                        results[i] = res
         out = []
         for i, res in enumerate(results):
             r = res.pop("_r", None)

@@ -3439,4 +3439,8 @@ export const EN = {
   [`PNG o JPEG, hasta 5 MB cada una.`]: `PNG or JPEG, up to 5 MB each.`,
   [`Videos de YouTube · hasta 5`]: `YouTube videos · up to 5`,
   [`Opcional, un enlace por línea. El video debe estar en YouTube y ser accesible. Sin videos, Google puede generar uno automático.`]: `Optional, one link per line. The video must be on YouTube and accessible. Without videos, Google may generate one automatically.`,
+  [`Si una cuenta tiene una sola campaña que coincide, se marca sola; si tiene varias, marca las que quieras: cada campaña marcada recibe su propio grupo de recursos pausado. El hotel sale del nombre de la campaña («Hotel - MERCADO:idioma - TIPO») o, si no sigue ese formato, del nombre de la cuenta; puedes corregirlo en cada fila.`]: `If an account has a single matching campaign, it is selected automatically; if it has several, select as many as you want: each selected campaign gets its own paused asset group. The hotel comes from the campaign name ("Hotel - MARKET:language - TYPE") or, if it does not follow that format, from the account name; you can correct it in each row.`,
+  [`{n0} de {n1} campañas marcadas listas`]: `{0} of {1} selected campaigns ready`,
+  [`Una campaña no puede repetirse en la misma tanda.`]: `A campaign cannot be repeated in the same batch.`,
+  [`Máximo {n0} grupos de recursos por tanda.`]: `Maximum {0} asset groups per batch.`,
 };
