@@ -16358,6 +16358,7 @@ function renderNuevosAnunciosPage() {
   }
   if (s.mode === 'pmax') {
     if (ready && nulState().sched.status === 'idle') nulSchedLoad();
+    if (ready && pagState().snap.status === 'idle') pagSnapLoad();
     return `${sim}${renderNuaModeSwitch()}${renderNuaStepAccounts()}${ready ? renderPmxStepBase() : ''}${ready && s.selected.length ? renderPmxStepRows() : ''}${ready && s.selected.length ? renderPagStep() : ''}${ready && s.selected.length && pagSelectedRows().length ? renderPagSchedForm() : ''}${ready ? renderNulSchedList() : ''}`;
   }
   return `${sim}${renderNuaModeSwitch()}${renderNuaStepAccounts()}${ready ? renderNutStepTemplate() : ''}${s.selected.length && s.mcc.selectedId ? renderNutStepTargets() : ''}`;
@@ -17498,7 +17499,8 @@ function bindPmx() {
 // ---------------------------------------------------------------------------
 function pagNewState() {
   return { action: 'PAUSED', nameFilter: '', statusFilter: 'all', rows: {}, status: 'idle', sel: {}, check: null,
-    run: { status: 'idle', error: null, results: {}, applied: false }, sched: { date: '', time: '09:00', run: { status: 'idle', error: null, done: false } } };
+    run: { status: 'idle', error: null, results: {}, applied: false }, sched: { date: '', time: '09:00', run: { status: 'idle', error: null, done: false } },
+    snap: { list: [], status: 'idle', error: null, name: '', pick: '', busy: false, msg: '', msgErr: false } };
 }
 
 function pagState() {
@@ -17678,6 +17680,120 @@ function pagSchedCreate() {
     .catch((err) => { sc.run = { status: 'error', error: err.message || String(err), done: false }; render(); });
 }
 
+// Fotos de los grupos activos: el servidor lee en vivo los grupos activos de las cuentas marcadas y guarda la lista con un nombre.
+// Sirven para saber, después, cuáles estaban activos antes de crear los nuevos y marcarlos de golpe para pausarlos o reactivarlos.
+function pagSnapMine() {
+  const s = state.nuevosAnuncios;
+  return pagState().snap.list.filter((x) => x.mcc_id === s.mcc.selectedId);
+}
+
+function pagSnapLoad() {
+  const sn = pagState().snap;
+  sn.status = 'loading'; sn.error = null;
+  fetch('/api/pmax-snapshots')
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      sn.list = data.snapshots || []; sn.status = 'ready';
+    })
+    .catch((err) => { sn.status = 'error'; sn.error = err.message || String(err); })
+    .then(() => { if (state.nuevosAnuncios.mode === 'pmax') render(); });
+}
+
+function pagSnapCanSave() {
+  const s = state.nuevosAnuncios, sn = pagState().snap;
+  return s.selected.length > 0 && sn.name.trim().length >= 2 && !sn.busy;
+}
+
+function pagSnapSave() {
+  const s = state.nuevosAnuncios, sn = pagState().snap;
+  if (!pagSnapCanSave()) return;
+  const accounts = s.selected.map((id) => { const a = s.accounts.find((x) => x.id === id); return { id, name: a ? a.name : id }; });
+  if (!window.confirm(`Se guardará la foto «${sn.name.trim()}» con los grupos de recursos activos de ${accounts.length} cuentas del MCC «${s.mcc.selectedName}». No cambia nada en Google Ads. ¿Continuar?`)) return;
+  sn.busy = true; sn.msg = ''; sn.error = null;
+  render();
+  fetch('/api/pmax-snapshots', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: sn.name.trim(), mcc_id: s.mcc.selectedId, mcc_name: s.mcc.selectedName, accounts }),
+  })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      sn.list = data.snapshots || sn.list; sn.status = 'ready'; sn.pick = String(data.id); sn.name = '';
+      sn.msg = `Foto guardada con ${data.n_groups} grupos de recursos activos.`; sn.msgErr = false; sn.busy = false;
+      render();
+    })
+    .catch((err) => { sn.busy = false; sn.msg = err.message || String(err); sn.msgErr = true; render(); });
+}
+
+function pagSnapMark() {
+  const a = pagState(), sn = a.snap;
+  if (!sn.pick || sn.busy || a.status !== 'ready') return;
+  const snap = sn.list.find((x) => String(x.id) === sn.pick);
+  sn.busy = true; sn.msg = '';
+  render();
+  fetch(`/api/pmax-snapshots?id=${encodeURIComponent(sn.pick)}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      const inSnap = new Set(data.snapshot.groups.map((g) => `${g.customer_id}:${g.campaign_id}:${g.asset_group_id}`));
+      let marked = 0;
+      a.sel = {};
+      pagAllRows().forEach((r) => { if (inSnap.has(r.key) && r.changeable) { a.sel[r.key] = true; marked += 1; } });
+      const left = data.snapshot.groups.length - marked;
+      a.sched.run = { status: 'idle', error: null, done: false }; pagResetRun();
+      sn.busy = false; sn.msgErr = marked === 0;
+      sn.msg = marked === 0
+        ? `No se marcó ningún grupo de la foto «${snap ? snap.name : ''}»: ya están en ese estado, ya no existen o sus cuentas no están marcadas.`
+        : (left > 0 ? `Se marcaron ${marked} grupos de la foto «${snap ? snap.name : ''}». ${left} grupos de la foto no se marcaron (ya están en ese estado, ya no existen o su cuenta no está marcada).`
+          : `Se marcaron los ${marked} grupos de la foto «${snap ? snap.name : ''}».`);
+      render();
+    })
+    .catch((err) => { sn.busy = false; sn.msg = err.message || String(err); sn.msgErr = true; render(); });
+}
+
+function pagSnapDelete() {
+  const sn = pagState().snap;
+  const snap = sn.list.find((x) => String(x.id) === sn.pick);
+  if (!snap || sn.busy) return;
+  if (!window.confirm(`Se borrará la foto «${snap.name}». No cambia nada en Google Ads. ¿Continuar?`)) return;
+  sn.busy = true; sn.msg = '';
+  render();
+  fetch('/api/pmax-snapshots/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: snap.id }) })
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      sn.list = data.snapshots || []; sn.pick = ''; sn.busy = false; render();
+    })
+    .catch((err) => { sn.busy = false; sn.msg = err.message || String(err); sn.msgErr = true; render(); });
+}
+
+function renderPagSnapshots() {
+  const s = state.nuevosAnuncios, a = pagState(), sn = a.snap;
+  const mine = pagSnapMine();
+  const fmt = (ts) => new Date(ts * 1000).toLocaleDateString();
+  return `
+      <div style="border:1px dashed var(--color-border,#bbb);border-radius:8px;padding:12px;margin:12px 0 0">
+        <strong style="font-size:13px">Fotos de los grupos activos</strong>
+        <p class="field-hint" style="margin:4px 0 8px">Antes de crear los grupos nuevos, guarda una foto de los que están activos hoy en las cuentas marcadas. Después puedes marcar de golpe los de esa foto para pausarlos y, más tarde, para reactivarlos. La foto se guarda en la plataforma y no cambia nada en Google Ads.</p>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
+          <div class="field" style="margin:0"><label>Nombre de la foto</label><input type="text" id="pag-snap-name" value="${escapeHtml(sn.name)}" maxlength="80" style="width:240px" placeholder="ej. Antes de Black Friday" autocomplete="off" /></div>
+          <button class="btn-outline" id="pag-snap-save" data-action="pag-snap-save" ${pagSnapCanSave() ? '' : 'disabled'}>Guardar foto de los grupos activos de las cuentas marcadas</button>
+        </div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-top:10px">
+          <div class="field" style="margin:0"><label>Fotos guardadas de este MCC</label><select id="pag-snap-pick">
+            <option value="">${mine.length ? 'Elige una foto…' : 'Todavía no hay fotos'}</option>
+            ${mine.map((x) => `<option value="${x.id}" ${sn.pick === String(x.id) ? 'selected' : ''}>${escapeHtml(x.name)} · ${escapeHtml(fmt(x.created_at))} · ${x.n_groups} grupos</option>`).join('')}</select></div>
+          <button class="btn-outline" id="pag-snap-mark" data-action="pag-snap-mark" ${sn.pick && a.status === 'ready' && !sn.busy ? '' : 'disabled'}>Marcar los grupos de la foto</button>
+          <button class="btn-link" data-action="pag-snap-delete" ${sn.pick && !sn.busy ? '' : 'disabled'}>Borrar la foto</button>
+          ${sn.busy ? '<span class="field-hint">Trabajando…</span>' : ''}
+        </div>
+        ${a.status !== 'ready' && sn.pick ? '<p class="field-hint" style="margin:6px 0 0">Para marcar los grupos de la foto, primero lee los grupos de recursos de las cuentas.</p>' : ''}
+        ${sn.error ? `<p class="field-hint" style="margin:6px 0 0;color:var(--color-danger,#b3261e)">${escapeHtml(sn.error)}</p>` : ''}
+        ${sn.msg ? `<p class="field-hint" style="margin:6px 0 0;color:${sn.msgErr ? 'var(--color-danger,#b3261e)' : 'var(--color-success,#1d6b41)'}">${escapeHtml(sn.msg)}</p>` : ''}
+      </div>`;
+}
+
 function pagResultCell(row) {
   const a = pagState();
   const r = a.run.results[row.key];
@@ -17739,6 +17855,7 @@ function renderPagStep() {
           <option value="ENABLED" ${a.action === 'ENABLED' ? 'selected' : ''}>Activar grupos pausados</option></select></div>
         <button class="btn-accent" id="pag-read" data-action="pag-read" ${a.status === 'loading' ? 'disabled' : ''}>${prepared ? 'Leer de nuevo los grupos de recursos' : 'Leer los grupos de recursos'}</button>
       </div>
+      ${renderPagSnapshots()}
       ${body}
     </div>`;
 }
@@ -17770,6 +17887,8 @@ function bindPag() {
   on('pag-action', 'change', (e) => { a.action = e.target.value; a.sel = {}; a.sched.run = { status: 'idle', error: null, done: false }; pagResetRun(); render(); });
   on('pag-filter', 'change', (e) => { a.nameFilter = e.target.value; render(); });
   on('pag-sfilter', 'change', (e) => { a.statusFilter = e.target.value; render(); });
+  on('pag-snap-name', 'input', (e) => { a.snap.name = e.target.value; const b = document.getElementById('pag-snap-save'); if (b) b.disabled = !pagSnapCanSave(); });
+  on('pag-snap-pick', 'change', (e) => { a.snap.pick = e.target.value; a.snap.msg = ''; render(); });
   document.querySelectorAll('[data-pag-sel]').forEach((el) => el.addEventListener('change', () => { if (el.checked) a.sel[el.dataset.pagSel] = true; else delete a.sel[el.dataset.pagSel]; a.sched.run = { status: 'idle', error: null, done: false }; pagResetRun(); render(); }));
   document.querySelectorAll('[data-pag-bulk]').forEach((el) => el.addEventListener('click', () => {
     const mode = el.dataset.pagBulk;
@@ -20152,6 +20271,9 @@ function handleAction(action) {
     case 'nul-new-batch': nulNewBatch(); break;
     case 'pmx-ai-generate': pmxAiGenerate(); break;
     case 'pag-read': pagRead(); break;
+    case 'pag-snap-save': pagSnapSave(); break;
+    case 'pag-snap-mark': pagSnapMark(); break;
+    case 'pag-snap-delete': pagSnapDelete(); break;
     case 'pag-validate': pagSubmit(true); break;
     case 'pag-apply': pagSubmit(false); break;
     case 'pag-sched-create': pagSchedCreate(); break;

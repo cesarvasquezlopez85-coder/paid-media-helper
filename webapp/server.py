@@ -633,6 +633,35 @@ def init_db():
             )
             """
         )
+        # Fotos de los grupos de recursos de Performance Max que estaban ACTIVOS en un momento (para saber, después, cuáles eran).
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pmax_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at REAL NOT NULL,
+                user_id INTEGER,
+                name TEXT NOT NULL,
+                mcc_id TEXT NOT NULL,
+                mcc_name TEXT,
+                n_accounts INTEGER NOT NULL DEFAULT 0,
+                n_groups INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pmax_snapshot_groups (
+                snapshot_id INTEGER NOT NULL,
+                customer_id TEXT NOT NULL,
+                customer_name TEXT,
+                campaign_id TEXT NOT NULL,
+                campaign_name TEXT,
+                asset_group_id TEXT NOT NULL,
+                asset_group_name TEXT,
+                PRIMARY KEY (snapshot_id, customer_id, asset_group_id)
+            )
+            """
+        )
         # Plantillas de Anuncios nuevos (textos por idioma, variables y etiqueta): compartidas entre super admins.
         conn.execute(
             """
@@ -882,6 +911,61 @@ def store_ad_creation_bulk(user_id, customer_id, rows, label):
               json.dumps(r["descriptions"], ensure_ascii=False), _pins_json(r.get("head_pins"), r.get("desc_pins"))) for r in rows],
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+PMAX_SNAPSHOT_MAX = 100
+
+
+def list_pmax_snapshots():
+    conn = get_db()
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT id, created_at, name, mcc_id, mcc_name, n_accounts, n_groups FROM pmax_snapshots ORDER BY id DESC LIMIT ?", (PMAX_SNAPSHOT_MAX,)).fetchall()]
+    finally:
+        conn.close()
+
+
+def get_pmax_snapshot(snapshot_id):
+    conn = get_db()
+    try:
+        head = conn.execute("SELECT id, created_at, name, mcc_id, mcc_name, n_accounts, n_groups FROM pmax_snapshots WHERE id = ?", (snapshot_id,)).fetchone()
+        if not head:
+            return None
+        rows = conn.execute(
+            "SELECT customer_id, customer_name, campaign_id, campaign_name, asset_group_id, asset_group_name FROM pmax_snapshot_groups WHERE snapshot_id = ? "
+            "ORDER BY customer_name, campaign_name, asset_group_name", (snapshot_id,)).fetchall()
+        return {**dict(head), "groups": [{"customer_id": r["customer_id"], "customer_name": r["customer_name"], "campaign_id": r["campaign_id"],
+                                          "campaign_name": r["campaign_name"], "asset_group_id": r["asset_group_id"], "name": r["asset_group_name"]} for r in rows]}
+    finally:
+        conn.close()
+
+
+def create_pmax_snapshot(user_id, name, mcc_id, mcc_name, rows, n_accounts):
+    conn = get_db()
+    try:
+        if conn.execute("SELECT COUNT(*) AS n FROM pmax_snapshots").fetchone()["n"] >= PMAX_SNAPSHOT_MAX:
+            raise ValueError(f"Ya hay {PMAX_SNAPSHOT_MAX} fotos guardadas: borra alguna primero.")
+        cur = conn.execute("INSERT INTO pmax_snapshots (created_at, user_id, name, mcc_id, mcc_name, n_accounts, n_groups) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                           (time.time(), user_id, name, mcc_id, mcc_name, n_accounts, len(rows)))
+        sid = cur.lastrowid
+        conn.executemany(
+            "INSERT OR IGNORE INTO pmax_snapshot_groups (snapshot_id, customer_id, customer_name, campaign_id, campaign_name, asset_group_id, asset_group_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [(sid, r["customer_id"], r["customer_name"][:200], r["campaign_id"], r["campaign_name"][:200], r["asset_group_id"], r["name"][:200]) for r in rows])
+        conn.commit()
+        return sid
+    finally:
+        conn.close()
+
+
+def delete_pmax_snapshot(snapshot_id):
+    conn = get_db()
+    try:
+        conn.execute("DELETE FROM pmax_snapshot_groups WHERE snapshot_id = ?", (snapshot_id,))
+        cur = conn.execute("DELETE FROM pmax_snapshots WHERE id = ?", (snapshot_id,))
+        conn.commit()
+        return cur.rowcount > 0
     finally:
         conn.close()
 
@@ -1439,6 +1523,20 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_ad_groups_bulk(parse_qs(parsed.query))
             return
 
+        if path == "/api/pmax-snapshots":
+            if not self._require_super_admin_json():
+                return
+            sid = (parse_qs(parsed.query).get("id") or [""])[0].strip()
+            if sid:
+                snap = get_pmax_snapshot(int(sid)) if sid.isdigit() else None
+                if not snap:
+                    self._send_json(404, {"error": "La foto ya no existe."})
+                    return
+                self._send_json(200, {"snapshot": snap})
+            else:
+                self._send_json(200, {"snapshots": list_pmax_snapshots()})
+            return
+
         if path == "/api/ad-schedules":
             if not self._require_super_admin_json():
                 return
@@ -1707,6 +1805,22 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_super_admin_json():
                 return
             self._handle_google_ads_label_ads_remove(payload)
+        elif path == "/api/pmax-snapshots":
+            if not self._require_super_admin_json():
+                return
+            self._handle_pmax_snapshot_create(payload)
+        elif path == "/api/pmax-snapshots/delete":
+            if not self._require_super_admin_json():
+                return
+            try:
+                sid = int(payload.get("id"))
+            except (TypeError, ValueError):
+                self._send_json(400, {"error": "Foto inválida."})
+                return
+            if not delete_pmax_snapshot(sid):
+                self._send_json(404, {"error": "La foto ya no existe."})
+                return
+            self._send_json(200, {"snapshots": list_pmax_snapshots()})
         elif path == "/api/ad-schedules":
             if not self._require_super_admin_json():
                 return
@@ -3884,6 +3998,74 @@ class Handler(SimpleHTTPRequestHandler):
                         print(f"[asset-group-status-log] {e}", flush=True)
         self._send_json(200, {"validate_only": validate_only, "simulated": simulated, "status": status, "results": results,
                               "ok_count": ok_count, "error_count": error_count})
+
+    def _handle_pmax_snapshot_create(self, payload):
+        # Guarda una «foto» de los grupos de recursos ACTIVOS de las cuentas elegidas (leídos en vivo de Google Ads, no del navegador).
+        user = self._get_current_user()
+        mcc_id = str(payload.get("mcc_id") or "").strip()
+        mcc_name = " ".join(str(payload.get("mcc_name") or "").split())[:120]
+        name = " ".join(str(payload.get("name") or "").split())[:80]
+        raw_accounts = payload.get("accounts")
+        if not mcc_id.isdigit():
+            self._send_json(400, {"error": "Elige primero el MCC."})
+            return
+        if len(name) < 2:
+            self._send_json(400, {"error": "Ponle un nombre a la foto (por ejemplo «Antes de Black Friday»)."})
+            return
+        if not isinstance(raw_accounts, list) or not raw_accounts:
+            self._send_json(400, {"error": "Elige al menos una cuenta."})
+            return
+        if len(raw_accounts) > AD_CREATE_MAX_ACCOUNTS:
+            self._send_json(400, {"error": f"Máximo {AD_CREATE_MAX_ACCOUNTS} cuentas por vez."})
+            return
+        accounts, seen = [], set()
+        for a in raw_accounts:
+            a = a if isinstance(a, dict) else {}
+            cid = str(a.get("id") or "").strip()
+            if not cid.isdigit() or cid in seen:
+                self._send_json(400, {"error": "Las cuentas son inválidas o están repetidas."})
+                return
+            seen.add(cid)
+            accounts.append((cid, " ".join(str(a.get("name") or "").split())[:120] or cid))
+        simulated = not google_ads_client.is_configured()
+        if not simulated:
+            members = get_mcc_member_ids(mcc_id)
+            if members is None:
+                self._send_json(502, {"error": "No se pudo leer las cuentas de ese MCC. Intenta de nuevo."})
+                return
+            for cid, _n in accounts:
+                if cid not in members:
+                    self._send_json(400, {"error": "Una de las cuentas no pertenece al MCC elegido."})
+                    return
+                if not self._user_can_access_account(user, cid):
+                    self._send_json(403, {"error": "No tienes acceso a una de las cuentas de Google Ads."})
+                    return
+        fetch = google_ads_client.simulated_pmax_asset_groups if simulated else google_ads_client.fetch_pmax_asset_groups
+
+        def read(item):
+            cid, cname = item
+            try:
+                return [{"customer_id": cid, "customer_name": cname, **g} for g in fetch(cid)["groups"] if g["status"] == "ENABLED"], False
+            except Exception as e:  # noqa: BLE001
+                print(f"[google-ads-error] pmax-snapshot {' '.join(str(e).split())[:300]}", flush=True)
+                return [], True
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(read, accounts))
+        failed = sum(1 for _r, bad in results if bad)
+        if failed:
+            self._send_json(502, {"error": f"No se pudo leer los grupos de recursos de {failed} cuenta(s). No se guardó la foto; intenta de nuevo."})
+            return
+        rows = [g for r, _bad in results for g in r]
+        if not rows:
+            self._send_json(400, {"error": "Ninguna de las cuentas tiene grupos de recursos activos en campañas de Performance Max activas."})
+            return
+        try:
+            sid = create_pmax_snapshot(user["id"], name, mcc_id, mcc_name, rows, len(accounts))
+        except ValueError as e:
+            self._send_json(400, {"error": str(e)})
+            return
+        self._send_json(200, {"id": sid, "n_groups": len(rows), "snapshots": list_pmax_snapshots()})
 
     def _handle_google_ads_pmax_create(self, payload):
         # Crea (o valida sin crear) UN grupo de recursos PAUSADO de Performance Max en una campaña ya activa de cada cuenta.
