@@ -62,7 +62,7 @@ Todo esto está publicado en producción (último despliegue verificado: `4b8fd0
 
 ## Novedades del 2026-11-20: Anuncios nuevos (hecho y probado en local; pendiente de publicar)
 
-Nueva sección **Anuncios nuevos** (solo super admin; detalle en la Función 19): crea el mismo anuncio de búsqueda adaptable en varias cuentas de un mismo MCC, cada uno con la URL que ya usa esa cuenta, siempre **pausado**.
+Nueva sección **Anuncios nuevos** (solo super admin al crearse; desde el 2026-11-23 abierta a administradores; detalle en la Función 19): crea el mismo anuncio de búsqueda adaptable en varias cuentas de un mismo MCC, cada uno con la URL que ya usa esa cuenta, siempre **pausado**.
 
 Tiene dos pestañas (hasta 2026-11-20 tenía además el modo «Un anuncio, un grupo por cuenta», ya retirado de la pantalla): **«Crear anuncios»** = **por plantilla, todos los grupos** (textos por idioma y variables por hotel en todos los grupos activos, con etiqueta y plantillas guardadas) y **«Activar, pausar y programar»** (cambia, a mano y con vista previa, el estado de los anuncios de una tanda). Ambas se inspiran en un script de Google Ads que el equipo ya usaba para Black Friday, y, tras ir y volver, **cesar decidió (2026-11-20) que activar y pausar por etiqueta se hace a mano con vista previa y también se puede programar dentro de la plataforma** (opción B: fecha y hora de cada cuenta; ver Función 19). Los anuncios nuevos se siguen creando siempre pausados. El tope por tanda subió de 25 a **40 cuentas**.
 
@@ -114,7 +114,7 @@ Fue la versión del sidebar entre el 2026-07-29 y el 2026-10-14. El salto de V1 
 - **Conectada de verdad desde el 2026-07-28** (no solo en modo simulado): la primera prueba contra una cuenta real de la agencia encontró y corrigió varios bugs reales (versión de API retirada, un parámetro no soportado, un nombre de campo equivocado, un filtro que dejaba fuera la mayoría de las cuentas del MCC) — ver el detalle completo en la sección de Función 1 más abajo y en `roadmap.md`.
 - Mientras las credenciales de Google no estén configuradas (o para cualquier cuenta de prueba), todo sigue funcionando en **modo simulado** — mismos botones, mismo flujo, datos de ejemplo en vez de reales.
 
-## Estado: V4 — diecinueve funciones construidas y en el menú (copys solo para administradores desde el 2026-11-01; Hoteles, Audiencias y Anuncios nuevos solo para el super admin; Campañas abierta a todos desde el 2026-11-18, escritura incluida; Historial de cambios abierto a todos desde el 2026-11-12)
+## Estado: V4 — diecinueve funciones construidas y en el menú (copys solo para administradores desde el 2026-11-01; Hoteles y Audiencias solo para el super admin; Anuncios nuevos para administradores desde el 2026-11-23; Campañas abierta a todos desde el 2026-11-18, escritura incluida; Historial de cambios abierto a todos desde el 2026-11-12)
 
 **Menú reordenado (2026-07-29):** las cuatro funciones conectadas a Google Ads quedan agrupadas arriba — Rendimiento, Comparar periodos, Oportunidad de ingresos, Negativización — y las dos que no dependen de Google Ads (Bookings, Proyección de ventas) quedan abajo.
 
@@ -608,7 +608,9 @@ Quién cambió qué en una cuenta de la lista de Ritmo de consumo, a partir de `
 - **Retraso de Google:** un cambio puede tardar en aparecer. La pausa y reactivación de prueba del 2026-11-06 no salían en el historial unos 30 minutos después; está por confirmar.
 - **Verificado** con datos reales en dos cuentas (4 y 32 cambios, lectura): se ven los modificadores de puja que se cambiaron el 2026-11-04 por la API y las pausas hechas desde la web de Google Ads. Pantalla, filtros, paginación, errores y descargas probados en modo simulado.
 
-### Función 19 — Anuncios nuevos (nueva, 2026-11-20, solo super admin)
+### Función 19 — Anuncios nuevos (nueva, 2026-11-20; abierta a administradores desde 2026-11-23)
+
+- **Acceso (2026-11-23, decisión de la persona dueña; probado en local, pendiente de publicar):** se quitó la etiqueta «Solo super administradores» del título y la sección (menú, pestañas, programaciones, fotos, plantillas y textos con IA) pasó de super admin a **administradores y super admins**. El servidor usa `_require_ads_json` (administrador o super admin; 401 sin sesión y 403 «Esta sección es solo para administradores.» a un usuario normal); Audiencias, Hoteles y la pestaña «Con IA» de Negativización siguen solo para super admin. Una programación se ejecuta si quien la creó sigue siendo administrador (antes, super admin). Cualquier administrador puede ver y cancelar las programaciones y las fotos de otro. Los administradores ya acceden a todas las cuentas. Probado con tres usuarios (super admin, administrador y normal): los dos primeros 200, el normal 403 en 11 rutas; el menú solo aparece para administradores. Las notas de abajo que dicen «solo super admin» son de cuando se crearon.
 
 Crea **el mismo anuncio de búsqueda adaptable (RSA)** en varias cuentas de un mismo MCC. Pedido por cesar: elegir las cuentas, escribir títulos y descripciones y que se creen, con la URL original de cada cuenta. Decisiones de cesar: destino elegido por cuenta con sugerencia, anuncios **pausados** y solo super admin.
 

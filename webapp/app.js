@@ -291,7 +291,7 @@ const state = {
     listFilter: 'all', listLimit: 50, usoKind: 'all', usoCampaign: 'all', usoSearch: '', usoLimit: 40,
     perfKind: 'all', perfSort: 'cost', perfLimit: 50,
   },
-  // Anuncios nuevos: crea el mismo anuncio de búsqueda adaptable (pausado) en varias cuentas de un mismo MCC, cada uno con la URL que ya usa esa cuenta. Solo super admin.
+  // Anuncios nuevos: crea el mismo anuncio de búsqueda adaptable (pausado) en varias cuentas de un mismo MCC, cada uno con la URL que ya usa esa cuenta. Abierta a administradores desde 2026-11-23.
   nuevosAnuncios: {
     mcc: { status: 'idle', groups: [], filter: '', selectedId: '', selectedName: '', error: null },
     accountsStatus: 'idle', accounts: [], accountFilter: '', selected: [],
@@ -526,7 +526,6 @@ const PLUS_JAKARTA_HREF = 'https://fonts.googleapis.com/css2?family=Plus+Jakarta
 const PAGE_META = {
   anuncios: {
     title: 'Anuncios nuevos',
-    badge: 'Solo super administradores',
     caption: 'Crea anuncios de búsqueda adaptables en varias cuentas de un mismo MCC (siempre quedan pausados, con la URL que ya usa cada cuenta) y luego actívalos, páusalos o prográmalos por etiqueta.',
   },
   audiencias: {
@@ -16169,7 +16168,7 @@ function renderCambiosPage() {
 }
 
 // ---------------------------------------------------------------------------
-// Anuncios nuevos (solo super admin). Dos pestañas: «Crear anuncios» (por plantilla, más abajo: nut*) y «Activar, pausar y
+// Anuncios nuevos (administradores y super admins). Dos pestañas: «Crear anuncios» (por plantilla, más abajo: nut*) y «Activar, pausar y
 // programar» (por etiqueta: nul*). Este bloque tiene lo común: MCC y cuentas, ayudas de pines y cuadro de IA. El servidor
 // vuelve a validar todo (cuenta del MCC, grupo activo, dominio de la URL).
 // ---------------------------------------------------------------------------
@@ -20905,7 +20904,7 @@ fetch('/api/me').then((r) => r.json()).then((data) => {
   const navAudiencias = document.getElementById('nav-audiencias');
   if (navAudiencias && currentUser.isSuperAdmin) navAudiencias.style.display = '';
   const navAnuncios = document.getElementById('nav-anuncios');
-  if (navAnuncios && currentUser.isSuperAdmin) navAnuncios.style.display = '';
+  if (navAnuncios && (currentUser.isAdmin || currentUser.isSuperAdmin)) navAnuncios.style.display = ''; // abierta a administradores desde 2026-11-23
   const navCambios = document.getElementById('nav-cambios');
   if (navCambios) navCambios.style.display = '';
   const navHoteles = document.getElementById('nav-hoteles');

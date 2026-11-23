@@ -1057,8 +1057,8 @@ def _schedule_save_run(schedule_id, customer_id, status, ok=0, skipped=0, failed
 def _schedule_execute_account(sched, acc):
     """Aplica la programación a una cuenta. Devuelve (estado final, ok, omitidos, fallidos, mensaje, permanente)."""
     user = _schedule_user_row(sched["user_id"])
-    if not user or user["username"].lower() not in SUPER_ADMIN_USERNAMES:
-        return "error", 0, 0, 0, "Quien programó esto ya no es super admin: no se ejecutó.", True
+    if not user or not (user["is_admin"] or user["username"].lower() in SUPER_ADMIN_USERNAMES):
+        return "error", 0, 0, 0, "Quien programó esto ya no es administrador: no se ejecutó.", True
     cid = acc["id"]
     simulated = not google_ads_client.is_configured()
     if not simulated:
@@ -1513,19 +1513,19 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/google-ads/ad-targets":
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_google_ads_ad_targets(parse_qs(parsed.query))
             return
 
         if path == "/api/google-ads/ad-groups-bulk":
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_google_ads_ad_groups_bulk(parse_qs(parsed.query))
             return
 
         if path == "/api/pmax-snapshots":
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             sid = (parse_qs(parsed.query).get("id") or [""])[0].strip()
             if sid:
@@ -1539,38 +1539,38 @@ class Handler(SimpleHTTPRequestHandler):
             return
 
         if path == "/api/ad-schedules":
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._send_json(200, {"schedules": list_ad_schedules(), "interval_seconds": SCHEDULER_INTERVAL_SECONDS,
                                   "catchup_hours": SCHEDULE_CATCHUP_SECONDS // 3600})
             return
 
         if path == "/api/google-ads/label-ads":
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_google_ads_label_ads(parse_qs(parsed.query))
             return
 
         if path == "/api/google-ads/pmax-campaigns":
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_google_ads_pmax_campaigns(parse_qs(parsed.query))
             return
 
         if path == "/api/google-ads/pmax-asset-groups":
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_google_ads_pmax_asset_groups(parse_qs(parsed.query))
             return
 
         if path == "/api/google-ads/label-candidates":
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_google_ads_label_candidates(parse_qs(parsed.query))
             return
 
         if path == "/api/ad-templates":
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._send_json(200, {"templates": list_ad_templates()})
             return
@@ -1773,45 +1773,45 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_recommendation_subscriptions(payload)
         elif path == "/api/google-ads/ads-create":
             # Anuncios nuevos en varias cuentas de un MCC: solo super admin (el servidor responde 403 a los demás).
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_google_ads_ads_create(payload)
         elif path == "/api/google-ads/ads-create-bulk":
             # Anuncios nuevos por plantilla en todos los grupos de varias cuentas de un MCC: solo super admin.
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_google_ads_ads_create_bulk(payload)
         elif path == "/api/google-ads/label-ads-status":
             # Activar o pausar anuncios por etiqueta (manual, con vista previa): solo super admin.
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_google_ads_label_ads_status(payload)
         elif path == "/api/google-ads/pmax-create":
             # Crear un grupo de recursos de Performance Max (siempre pausado), con vista previa: solo super admin.
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_google_ads_pmax_create(payload)
         elif path == "/api/google-ads/pmax-asset-groups-status":
             # Activar o pausar grupos de recursos de Performance Max (manual, con vista previa): solo super admin.
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_google_ads_pmax_asset_groups_status(payload)
         elif path == "/api/google-ads/label-ads-add":
             # Poner una etiqueta a anuncios activos que ya existen (no cambia su estado), con vista previa: solo super admin.
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_google_ads_label_ads_add(payload)
         elif path == "/api/google-ads/label-ads-remove":
             # Eliminar (irreversible) anuncios pausados por etiqueta, con vista previa: solo super admin.
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_google_ads_label_ads_remove(payload)
         elif path == "/api/pmax-snapshots":
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_pmax_snapshot_create(payload)
         elif path == "/api/pmax-snapshots/delete":
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             try:
                 sid = int(payload.get("id"))
@@ -1823,19 +1823,19 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             self._send_json(200, {"snapshots": list_pmax_snapshots()})
         elif path == "/api/ad-schedules":
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_ad_schedule_create(payload)
         elif path == "/api/ad-schedules/cancel":
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_ad_schedule_cancel(payload)
         elif path == "/api/ad-templates":
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_ad_template_save(payload)
         elif path == "/api/ad-templates/delete":
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_ad_template_delete(payload)
         elif path == "/api/google-ads/hotel-modifiers-apply":
@@ -1917,11 +1917,11 @@ class Handler(SimpleHTTPRequestHandler):
                 return
             self._handle_negativos_palabras(payload)
         elif path == "/api/ai/anuncios-textos":
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_ai_anuncios_textos(payload)
         elif path == "/api/ai/pmax-textos":
-            if not self._require_super_admin_json():
+            if not self._require_ads_json():
                 return
             self._handle_ai_pmax_textos(payload)
         elif path == "/api/ai/generar-copys":
@@ -2114,6 +2114,17 @@ class Handler(SimpleHTTPRequestHandler):
 
     # Funciones en afinado (p. ej. Hoteles): solo las ve y usa un super admin.
     # El menú oculto en el navegador no basta — el servidor también lo exige.
+    # Anuncios nuevos (abierta a administradores desde 2026-11-23): administradores y super admins. El resto recibe 403.
+    def _require_ads_json(self):
+        user = self._get_current_user()
+        if not user:
+            self._send_json(401, {"error": "No autenticado."})
+            return None
+        if not user["is_admin"] and user["username"].lower() not in SUPER_ADMIN_USERNAMES:
+            self._send_json(403, {"error": "Esta sección es solo para administradores."})
+            return None
+        return user
+
     def _require_super_admin_json(self):
         user = self._get_current_user()
         if not user:

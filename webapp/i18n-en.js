@@ -3443,4 +3443,5 @@ export const EN = {
   [`{n0} de {n1} campañas marcadas listas`]: `{0} of {1} selected campaigns ready`,
   [`Una campaña no puede repetirse en la misma tanda.`]: `A campaign cannot be repeated in the same batch.`,
   [`Máximo {n0} grupos de recursos por tanda.`]: `Maximum {0} asset groups per batch.`,
+  [`Esta sección es solo para administradores.`]: `This section is for administrators only.`,
 };
