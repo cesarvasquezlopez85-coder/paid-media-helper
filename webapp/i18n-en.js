@@ -3427,4 +3427,8 @@ export const EN = {
   [`Ya hay {n0} fotos guardadas: borra alguna primero.`]: `There are already {0} saved photos: delete one first.`,
   [`La foto ya no existe.`]: `The photo no longer exists.`,
   [`Foto inválida.`]: `Invalid photo.`,
+  [`Solo super administradores`]: `Super admins only`,
+  [`Paso común`]: `Shared step`,
+  [`MCC y cuentas`]: `MCC and accounts`,
+  [`Marca al menos una cuenta en la columna izquierda.`]: `Select at least one account in the left column.`,
 };

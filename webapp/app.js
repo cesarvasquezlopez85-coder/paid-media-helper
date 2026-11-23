@@ -526,6 +526,7 @@ const PLUS_JAKARTA_HREF = 'https://fonts.googleapis.com/css2?family=Plus+Jakarta
 const PAGE_META = {
   anuncios: {
     title: 'Anuncios nuevos',
+    badge: 'Solo super administradores',
     caption: 'Crea anuncios de búsqueda adaptables en varias cuentas de un mismo MCC (siempre quedan pausados, con la URL que ya usa cada cuenta) y luego actívalos, páusalos o prográmalos por etiqueta.',
   },
   audiencias: {
@@ -918,10 +919,13 @@ function render() {
   else if (state.page === 'administracion') pageHtml = renderAdminPage();
   else pageHtml = renderBookPage();
 
+  const sideList = document.querySelector('.nua-side-list');
+  const sideScroll = sideList ? sideList.scrollTop : 0;
+  document.body.classList.toggle('page-anuncios', state.page === 'anuncios');
   root.innerHTML = `
     <div class="page-header">
       <div>
-        <h1 class="page-title">${escapeHtml(meta.title)}</h1>
+        ${meta.badge ? `<div class="page-title-row"><h1 class="page-title">${escapeHtml(meta.title)}</h1><span class="page-badge">${escapeHtml(meta.badge)}</span></div>` : `<h1 class="page-title">${escapeHtml(meta.title)}</h1>`}
         <p class="page-caption">${escapeHtml(state.page === 'auditoria' && !currentUser.isAdmin ? meta.caption.replace(' — o de hasta 20 a la vez —', '') : meta.caption)}</p>
       </div>
       ${toggleHtml}
@@ -932,6 +936,8 @@ function render() {
   bindEvents();
   if (window.lucide) window.lucide.createIcons();
   mountCharts();
+  const sideNew = document.querySelector('.nua-side-list');
+  if (sideNew && sideScroll) sideNew.scrollTop = sideScroll;
 
   if (focusId) {
     const el = document.getElementById(focusId);
@@ -16347,30 +16353,53 @@ function adAiGenerate() {
     .catch((err) => { ai.status = 'error'; ai.error = err.message || String(err); render(); });
 }
 
+const NUA_WIDE_MQ = typeof window !== 'undefined' && window.matchMedia ? window.matchMedia('(min-width: 1280px)') : null;
+function nuaWide() { return !!(NUA_WIDE_MQ && NUA_WIDE_MQ.matches); }
+if (NUA_WIDE_MQ) {
+  const onWideChange = () => { if (typeof state !== 'undefined' && state.page === 'anuncios') render(); };
+  if (NUA_WIDE_MQ.addEventListener) NUA_WIDE_MQ.addEventListener('change', onWideChange);
+}
+
+// Con pantalla ancha: columna izquierda fija con el «paso común» (MCC y cuentas) y área de trabajo a la derecha.
+function nuaCompose(sim, ready, mainHtml) {
+  const tabs = renderNuaModeSwitch();
+  if (nuaWide() && ready) {
+    return `${sim}${tabs}<div class="nua-layout"><aside class="nua-side">${renderNuaStepAccounts()}</aside><div class="nua-main">${renderNuaSummary()}${mainHtml}</div></div>`;
+  }
+  return `${sim}${tabs}${renderNuaStepAccounts()}${mainHtml}`;
+}
+
+function renderNuaSummary() {
+  const s = state.nuevosAnuncios;
+  return `<div class="nua-summary"><span class="delta-badge neutral">${escapeHtml(s.mcc.selectedName)}</span><span class="field-hint">${s.selected.length ? `Cuentas marcadas: ${s.selected.length}` : 'Marca al menos una cuenta en la columna izquierda.'}</span></div>`;
+}
+
 function renderNuevosAnunciosPage() {
   const s = state.nuevosAnuncios;
   if (s.mcc.status === 'idle') nuaLoadMccGroups(true);
   const sim = s.simulated ? '<div class="ok-panel" style="margin:0 0 12px"><strong>Modo simulado.</strong> La API de Google Ads no está configurada en el servidor: las cuentas y los anuncios son de ejemplo y no se crea nada real.</div>' : '';
-  const ready = s.mcc.selectedId && s.accountsStatus === 'ready';
+  const ready = !!(s.mcc.selectedId && s.accountsStatus === 'ready');
   if (s.mode === 'etiqueta') {
     if (ready && nulState().sched.status === 'idle') nulSchedLoad();
-    return `${sim}${renderNuaModeSwitch()}${renderNuaStepAccounts()}${ready ? renderNulStepLabel() : ''}${ready && s.selected.length ? renderNulStepRows() : ''}${ready && s.selected.length && ['ENABLED', 'PAUSED'].includes(nulState().action) ? renderNulSchedForm() : ''}${ready ? renderNulSchedList() : ''}`;
+    return nuaCompose(sim, ready, `${ready ? renderNulStepLabel() : ''}${ready && s.selected.length ? renderNulStepRows() : ''}${ready && s.selected.length && ['ENABLED', 'PAUSED'].includes(nulState().action) ? renderNulSchedForm() : ''}${ready ? renderNulSchedList() : ''}`);
   }
   if (s.mode === 'pmax') {
     if (ready && nulState().sched.status === 'idle') nulSchedLoad();
     if (ready && pagState().snap.status === 'idle') pagSnapLoad();
-    return `${sim}${renderNuaModeSwitch()}${renderNuaStepAccounts()}${ready ? renderPmxStepBase() : ''}${ready && s.selected.length ? renderPmxStepRows() : ''}${ready && s.selected.length ? renderPagStep() : ''}${ready && s.selected.length && pagSelectedRows().length ? renderPagSchedForm() : ''}${ready ? renderNulSchedList() : ''}`;
+    return nuaCompose(sim, ready, `${ready ? renderPmxStepBase() : ''}${ready && s.selected.length ? renderPmxStepRows() : ''}${ready && s.selected.length ? renderPagStep() : ''}${ready && s.selected.length && pagSelectedRows().length ? renderPagSchedForm() : ''}${ready ? renderNulSchedList() : ''}`);
   }
-  return `${sim}${renderNuaModeSwitch()}${renderNuaStepAccounts()}${ready ? renderNutStepTemplate() : ''}${s.selected.length && s.mcc.selectedId ? renderNutStepTargets() : ''}`;
+  return nuaCompose(sim, ready, `${ready ? renderNutStepTemplate() : ''}${s.selected.length && s.mcc.selectedId ? renderNutStepTargets() : ''}`);
 }
 
 function renderNuaStepAccounts() {
   const s = state.nuevosAnuncios;
   const m = s.mcc;
-  const head = (inner) => `<div class="card" style="margin-bottom:16px"><h3 style="margin:0 0 10px;font-size:14px">1. MCC y cuentas</h3>${inner}</div>`;
-  if (m.selectedId && s.accountsStatus === 'ready' && !s.accountsOpen && s.selected.length) {
+  const wide = nuaWide();
+  const head = (inner) => `<div class="card" style="margin-bottom:16px"><p class="nua-eyebrow">Paso común</p><h3 style="margin:0 0 10px;font-size:14px">MCC y cuentas</h3>${inner}</div>`;
+  if (!wide && m.selectedId && s.accountsStatus === 'ready' && !s.accountsOpen && s.selected.length) {
     return `<div class="card" style="margin-bottom:16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-      <strong style="font-size:14px">1. MCC y cuentas</strong>
+      <span class="nua-eyebrow" style="margin:0">Paso común</span>
+      <strong style="font-size:14px">MCC y cuentas</strong>
       <span class="delta-badge neutral">${escapeHtml(m.selectedName)}</span>
       <span class="field-hint">Cuentas marcadas: ${s.selected.length}</span>
       <button class="btn-link" data-action="nua-acc-open">Cambiar cuentas</button>
@@ -16384,7 +16413,7 @@ function renderNuaStepAccounts() {
     return head(`
       <div class="field">
         <label>MCC de las cuentas</label>
-        <input type="text" id="nua-mcc-filter" placeholder="Busca por nombre o ID del MCC (${m.groups.length} agrupaciones)…" value="${escapeHtml(m.filter)}" style="width:340px" autocomplete="off" />
+        <input type="text" id="nua-mcc-filter" placeholder="Busca por nombre o ID del MCC (${m.groups.length} agrupaciones)…" value="${escapeHtml(m.filter)}" style="width:340px;max-width:100%" autocomplete="off" />
         <p class="field-hint" style="margin-top:6px">Todas las cuentas de un anuncio nuevo salen del mismo MCC.</p>
         ${matches.length ? `<div class="table-scroll" style="max-height:220px;margin-top:8px"><table><tbody>
           ${matches.map((g) => `<tr><td>${escapeHtml(g.name)}</td><td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(g.id)}</td><td><button class="btn-outline xs" data-nua-mcc-pick="${escapeHtml(g.id)}" data-nua-mcc-name="${escapeHtml(g.name)}">Usar</button></td></tr>`).join('')}
@@ -16392,7 +16421,7 @@ function renderNuaStepAccounts() {
       </div>`);
   }
   const top = `
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
       <span class="delta-badge neutral">${escapeHtml(m.selectedName)}</span>
       <button class="btn-link" data-action="nua-mcc-clear">Cambiar de MCC</button>
     </div>`;
@@ -16402,16 +16431,16 @@ function renderNuaStepAccounts() {
   const visible = s.accounts.filter((a) => !f || a.name.toLowerCase().includes(f) || a.id.includes(f));
   return head(`
     ${top}
-    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
-      <input type="text" id="nua-acc-filter" placeholder="Filtrar cuentas (${s.accounts.length})…" value="${escapeHtml(s.accountFilter)}" style="width:260px" autocomplete="off" />
+    <input type="text" id="nua-acc-filter" placeholder="Filtrar cuentas (${s.accounts.length})…" value="${escapeHtml(s.accountFilter)}" style="width:${wide ? '100%' : '260px'};max-width:100%;margin-bottom:8px;box-sizing:border-box" autocomplete="off" />
+    <div class="nua-side-actions">
       <button class="btn-outline sm" data-action="nua-acc-all">Marcar las visibles</button>
       <button class="btn-outline sm" data-action="nua-acc-none">Quitar las visibles</button>
       <button class="btn-outline sm" data-action="nua-acc-pacing" ${s.pacingHotels.status === 'loading' ? 'disabled' : ''}>Marcar los hoteles de Ritmo de consumo</button>
-      <span class="field-hint">${s.selected.length} de máximo 40 marcadas</span>
-      ${s.selected.length ? '<button class="btn-accent sm" data-action="nua-acc-done">Listo: usar estas cuentas</button>' : ''}
     </div>
+    <p class="field-hint" style="margin:0 0 8px">${s.selected.length} de máximo 40 marcadas</p>
+    ${s.selected.length && !wide ? '<button class="btn-accent sm" data-action="nua-acc-done" style="margin-bottom:8px">Listo: usar estas cuentas</button>' : ''}
     ${s.pacingHotels.msgs.length ? `<div style="margin:0 0 8px">${s.pacingHotels.msgs.map((m) => `<p class="field-hint" style="margin:2px 0;${s.pacingHotels.status === 'error' ? 'color:var(--color-danger,#b3261e)' : ''}">${escapeHtml(m)}</p>`).join('')}</div>` : ''}
-    <div class="table-scroll" style="max-height:280px"><table><tbody>
+    <div class="table-scroll ${wide ? 'nua-side-list' : ''}" ${wide ? '' : 'style="max-height:280px"'}><table><tbody>
       ${visible.map((a) => `<tr><td style="width:30px"><input type="checkbox" data-nua-acc="${escapeHtml(a.id)}" ${s.selected.includes(a.id) ? 'checked' : ''} /></td><td>${escapeHtml(a.name)}</td><td style="font-family:ui-monospace,monospace;font-size:12px">${escapeHtml(a.id)}</td></tr>`).join('') || '<tr><td>Sin cuentas que coincidan.</td></tr>'}
     </tbody></table></div>`);
 }
@@ -16819,8 +16848,8 @@ function nutResultCell(row) {
   const r = t.run.results[row.key];
   if (r) {
     if (!r.ok) return `<span style="color:var(--color-danger,#b3261e)">✕ ${escapeHtml(r.error || 'Error')}</span>`;
-    if (!t.run.applied) return '<span style="color:var(--color-success,#1d6b41);font-weight:700">✓ Google lo validó</span>';
-    return `<span style="color:var(--color-success,#1d6b41);font-weight:700">✓ Creado, pausado${r.ad_id ? ` (ID ${escapeHtml(r.ad_id)})` : ''}</span>${r.label_error ? `<br><span style="color:var(--color-danger,#b3261e)">Sin etiqueta: ${escapeHtml(r.label_error)}</span>` : ''}`;
+    if (!t.run.applied) return '<span class="delta-badge good">✓ Google lo validó</span>';
+    return `<span class="delta-badge good">✓ Creado, pausado${r.ad_id ? ` (ID ${escapeHtml(r.ad_id)})` : ''}</span>${r.label_error ? `<br><span style="color:var(--color-danger,#b3261e)">Sin etiqueta: ${escapeHtml(r.label_error)}</span>` : ''}`;
   }
   return '';
 }
@@ -17405,8 +17434,8 @@ function pmxResultCell(row) {
   const r = pmxState().run.results[row.key];
   if (!r) return '';
   if (!r.ok) return `<span style="color:var(--color-danger,#b3261e)">✕ ${escapeHtml(r.error || 'Error')}</span>`;
-  if (!pmxState().run.applied) return '<span style="color:var(--color-success,#1d6b41);font-weight:700">✓ Google lo validó</span>';
-  return '<span style="color:var(--color-success,#1d6b41);font-weight:700">✓ Creado (pausado)</span>';
+  if (!pmxState().run.applied) return '<span class="delta-badge good">✓ Google lo validó</span>';
+  return '<span class="delta-badge good">✓ Creado (pausado)</span>';
 }
 
 function renderPmxStepRows() {
@@ -17799,8 +17828,8 @@ function pagResultCell(row) {
   const r = a.run.results[row.key];
   if (!r) return '';
   if (!r.ok) return `<span style="color:var(--color-danger,#b3261e)">✕ ${escapeHtml(r.error || 'Error')}</span>`;
-  if (!a.run.applied) return '<span style="color:var(--color-success,#1d6b41);font-weight:700">✓ Google lo validó</span>';
-  return `<span style="color:var(--color-success,#1d6b41);font-weight:700">${a.action === 'ENABLED' ? '✓ Activado' : '✓ Pausado'}</span>`;
+  if (!a.run.applied) return '<span class="delta-badge good">✓ Google lo validó</span>';
+  return `<span class="delta-badge good">${a.action === 'ENABLED' ? '✓ Activado' : '✓ Pausado'}</span>`;
 }
 
 function renderPagStep() {
@@ -17902,8 +17931,8 @@ function bindPag() {
 
 function renderNuaModeSwitch() {
   const mode = state.nuevosAnuncios.mode;
-  const tab = (key, label, active) => `<button class="${active ? 'btn-accent' : 'btn-outline'}" data-nua-tab="${key}">${label}</button>`;
-  return `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
+  const tab = (key, label, active) => `<button class="nua-tab${active ? ' active' : ''}" data-nua-tab="${key}">${label}</button>`;
+  return `<div class="nua-tabs">
     ${tab('crear', 'Crear anuncios', mode === 'plantilla')}
     ${tab('gestionar', 'Activar, pausar y programar', mode === 'etiqueta')}
     ${tab('pmax', 'Performance Max', mode === 'pmax')}
@@ -18171,8 +18200,8 @@ function nulResultCell(row) {
   const r = l.run.results[row.key];
   if (!r) return '';
   if (!r.ok) return `<span style="color:var(--color-danger,#b3261e)">✕ ${escapeHtml(r.error || 'Error')}</span>`;
-  if (!l.run.applied) return '<span style="color:var(--color-success,#1d6b41);font-weight:700">✓ Google lo validó</span>';
-  return `<span style="color:var(--color-success,#1d6b41);font-weight:700">${l.action === 'DELETE' ? '✓ Eliminado' : l.action === 'LABEL' ? '✓ Etiquetado' : l.action === 'ENABLED' ? '✓ Activado' : '✓ Pausado'}</span>`;
+  if (!l.run.applied) return '<span class="delta-badge good">✓ Google lo validó</span>';
+  return `<span class="delta-badge good">${l.action === 'DELETE' ? '✓ Eliminado' : l.action === 'LABEL' ? '✓ Etiquetado' : l.action === 'ENABLED' ? '✓ Activado' : '✓ Pausado'}</span>`;
 }
 
 function nulAccountBody(accRow) {
