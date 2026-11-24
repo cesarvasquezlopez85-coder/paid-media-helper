@@ -14331,8 +14331,12 @@ const INVEST_VERDICTS = {
   keep: { label: 'Mantener', cls: 'neutral', rank: 2 },
   nodata: { label: 'Pocos datos', cls: 'warn', rank: 1 },
 };
-const INVEST_SORT_DEFAULT_DIR = { priority: 'desc', roas: 'desc', conversions: 'desc', cost: 'desc', cpa_pct: 'asc', lost_budget: 'desc' };
-const INVEST_SORT_LABELS = { priority: 'Veredicto (primero lo que conviene subir)', roas: 'ROAS a 30 días', conversions: 'Conversiones a 30 días', cost: 'Gasto a 30 días', cpa_pct: 'CPA % a 30 días', lost_budget: 'Pérdida por presupuesto' };
+// Las claves roas, conversions y cpa_pct son las de 30 días; las otras ventanas llevan el sufijo _7 o _14.
+const INVEST_SORT_DEFAULT_DIR = { priority: 'desc', name: 'asc', cost: 'desc', conv_7: 'desc', conv_14: 'desc', conversions: 'desc', roas_7: 'desc', roas_14: 'desc', roas: 'desc', cpa_7: 'asc', cpa_14: 'asc', cpa_pct: 'asc', lost_budget: 'desc', budget: 'desc' };
+const INVEST_SORT_LABELS = { priority: 'Veredicto (primero lo que conviene subir)', name: 'Nombre de la campaña', cost: 'Gasto a 30 días',
+  conv_7: 'Conversiones a 7 días', conv_14: 'Conversiones a 14 días', conversions: 'Conversiones a 30 días',
+  roas_7: 'ROAS a 7 días', roas_14: 'ROAS a 14 días', roas: 'ROAS a 30 días',
+  cpa_7: 'CPA % a 7 días', cpa_14: 'CPA % a 14 días', cpa_pct: 'CPA % a 30 días', lost_budget: 'Pérdida por presupuesto', budget: 'Presupuesto diario' };
 
 function investAccountData(customerId) {
   const a = state.campanas.invest.byAccount[customerId];
@@ -14403,8 +14407,16 @@ function investSortedRows(list) {
     cost: (x) => x.w[30].cost,
     cpa_pct: (x) => x.w[30].cpa_pct,
     lost_budget: (x) => x.w[30].lost_is_budget,
+    conv_7: (x) => x.w[7].conversions, conv_14: (x) => x.w[14].conversions,
+    roas_7: (x) => x.w[7].roas, roas_14: (x) => x.w[14].roas,
+    cpa_7: (x) => x.w[7].cpa_pct, cpa_14: (x) => x.w[14].cpa_pct,
+    budget: (x) => x.row.budget,
   }[inv.sortBy] || ((x) => x.w[30].roas);
   const ready = list.filter((x) => x.ready);
+  if (inv.sortBy === 'name') {
+    const sign = inv.dir === 'asc' ? 1 : -1;
+    return [...[...ready].sort((a, b) => sign * String(a.row.campaign_name).localeCompare(String(b.row.campaign_name), undefined, { sensitivity: 'base' })), ...list.filter((x) => !x.ready)];
+  }
   return [...hotelSortByValue(ready, f, inv.dir), ...list.filter((x) => !x.ready)];
 }
 
@@ -14713,13 +14725,21 @@ const INVEST_GROUP = 'border-left:2px solid var(--color-border,#e5e7eb)';
 
 function investTableHtml(list, plain) {
   const e = escapeHtml;
+  const inv = state.campanas.invest;
+  const th = (key, label, style, title) => {
+    const attrs = `${style ? ` style="${style}"` : ''}${title ? ` title="${title}"` : ''}`;
+    if (plain || !key) return `<th${attrs}>${label}</th>`;
+    const active = inv.sortBy === key;
+    const arrow = active ? (inv.dir === 'asc' ? '▲' : '▼') : '↕';
+    return `<th class="camp-sort-th${active ? ' active' : ''}" data-camp-sort-col="${key}" tabindex="0" aria-sort="${active ? (inv.dir === 'asc' ? 'ascending' : 'descending') : 'none'}"${attrs}>${label}<span class="camp-sort-arrow" aria-hidden="true">${arrow}</span></th>`;
+  };
   const head = `<thead><tr>
-    <th style="min-width:260px">Campaña</th><th style="min-width:230px">Veredicto</th><th title="Cómo va el mes de la cuenta frente a su objetivo de Billing (mismo criterio que Ritmo de consumo)">Ritmo del mes (cuenta)</th><th>Gasto 30 d</th>
-    <th style="${INVEST_GROUP}">Conv. 7 d</th><th>Conv. 14 d</th><th>Conv. 30 d</th>
-    <th style="${INVEST_GROUP}">ROAS 7 d</th><th>ROAS 14 d</th><th>ROAS 30 d</th>
-    <th style="${INVEST_GROUP}" title="Gasto ÷ valor de conversión: lo inverso del ROAS; menor es mejor">CPA % 7 d</th><th>CPA % 14 d</th><th>CPA % 30 d</th>
-    <th style="${INVEST_GROUP}" title="Parte de las impresiones de búsqueda que se perdió porque el presupuesto se agotó (solo Search y Performance Max)">Pérdida por presupuesto 30 d</th>
-    <th style="${INVEST_GROUP}">Presupuesto diario</th></tr></thead>`;
+    ${th('name', 'Campaña', 'min-width:260px')}${th('priority', 'Veredicto', 'min-width:230px')}${th(null, 'Ritmo del mes (cuenta)', '', 'Cómo va el mes de la cuenta frente a su objetivo de Billing (mismo criterio que Ritmo de consumo)')}${th('cost', 'Gasto 30 d')}
+    ${th('conv_7', 'Conv. 7 d', INVEST_GROUP)}${th('conv_14', 'Conv. 14 d')}${th('conversions', 'Conv. 30 d')}
+    ${th('roas_7', 'ROAS 7 d', INVEST_GROUP)}${th('roas_14', 'ROAS 14 d')}${th('roas', 'ROAS 30 d')}
+    ${th('cpa_7', 'CPA % 7 d', INVEST_GROUP, 'Gasto ÷ valor de conversión: lo inverso del ROAS; menor es mejor')}${th('cpa_14', 'CPA % 14 d')}${th('cpa_pct', 'CPA % 30 d')}
+    ${th('lost_budget', 'Pérdida por presupuesto 30 d', INVEST_GROUP, 'Parte de las impresiones de búsqueda que se perdió porque el presupuesto se agotó (solo Search y Performance Max)')}
+    ${th('budget', 'Presupuesto diario', INVEST_GROUP)}</tr></thead>`;
   const adjKey = state.campanas.invest.adjust.key;
   const projKey = state.campanas.invest.proj.key;
   const conv = (m) => `<td>${m.conversions ? fmtConv(m.conversions) : '0'}</td>`;
@@ -19380,6 +19400,15 @@ function bindEvents() {
   campOn('camp-sort', 'change', (e) => { state.campanas.sortBy = e.target.value; render(); });
   document.querySelectorAll('[data-camp-view]').forEach((btn) => btn.addEventListener('click', () => { state.campanas.view = btn.dataset.campView; render(); }));
   document.querySelectorAll('[data-camp-budget-open]').forEach((btn) => btn.addEventListener('click', () => startInvestBudgetEdit(btn.dataset.campBudgetOpen)));
+  document.querySelectorAll('[data-camp-sort-col]').forEach((el) => {
+    const go = () => {
+      const inv = state.campanas.invest; const k = el.dataset.campSortCol;
+      if (inv.sortBy === k) inv.dir = inv.dir === 'asc' ? 'desc' : 'asc'; else { inv.sortBy = k; inv.dir = INVEST_SORT_DEFAULT_DIR[k] || 'desc'; }
+      render();
+    };
+    el.addEventListener('click', go);
+    el.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); go(); } });
+  });
   document.querySelectorAll('[data-camp-proj-open]').forEach((btn) => btn.addEventListener('click', () => startInvestProj(btn.dataset.campProjOpen)));
   campOn('camp-proj-input', 'input', (e) => {
     const inv = state.campanas.invest; inv.proj.amount = e.target.value;

@@ -787,3 +787,10 @@ body.page-anuncios .card h3 { line-height: 1.35; }
 .camp-proj-panel .stat-grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
 .camp-proj-panel .stat-card { padding: 12px 14px; }
 .camp-proj-panel .stat-value { font-size: 20px; }
+
+/* Campañas · Dónde invertir: encabezados que ordenan con flechas */
+.camp-sort-th { cursor: pointer; user-select: none; white-space: nowrap; }
+.camp-sort-th:hover { color: var(--color-accent-strong); }
+.camp-sort-th:focus-visible { outline: 2px solid var(--color-accent-strong); outline-offset: -2px; }
+.camp-sort-arrow { margin-left: 5px; font-size: 10px; opacity: .35; }
+.camp-sort-th.active .camp-sort-arrow { opacity: 1; color: var(--color-accent-strong); }

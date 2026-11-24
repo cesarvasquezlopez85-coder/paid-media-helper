@@ -3492,4 +3492,12 @@ export const EN = {
   [`⚠ Solo {n0} conversion{1} en 30 días: la proyección es poco fiable.`]: `⚠ Only {0} conversion{1} in 30 days: the projection is not very reliable.`,
   [`⚠ Esta campaña está en «Revisar o bajar»: su ROAS es flojo frente al de la cuenta, así que el dinero extra rendiría mejor en otra campaña.`]: `⚠ This campaign is in “Review or cut”: its ROAS is weak compared with the account’s, so the extra money would perform better in another campaign.`,
   [`Cómo se calcula: ventas extra = dinero extra × ROAS de la campaña (con el rango de sus ventanas de 7, 14 y 30 días). Supone que cada peso extra rinde como los últimos 30 días; en la práctica el rendimiento baja cuando el gasto sube mucho. Es una guía para decidir, no una promesa, y no cambia nada en Google Ads.`]: `How it is calculated: extra sales = extra money × the campaign’s ROAS (with the range from its 7, 14 and 30-day windows). It assumes every extra unit of money performs like the last 30 days; in practice performance drops when spend rises a lot. It is a guide for deciding, not a promise, and it changes nothing in Google Ads.`,
+  // ---- Campañas · Dónde invertir: orden con flechas en los encabezados ----
+  [`Nombre de la campaña`]: `Campaign name`,
+  [`Conversiones a 7 días`]: `Conversions, 7 days`,
+  [`Conversiones a 14 días`]: `Conversions, 14 days`,
+  [`ROAS a 7 días`]: `ROAS, 7 days`,
+  [`ROAS a 14 días`]: `ROAS, 14 days`,
+  [`CPA % a 7 días`]: `CPA %, 7 days`,
+  [`CPA % a 14 días`]: `CPA %, 14 days`,
 };
