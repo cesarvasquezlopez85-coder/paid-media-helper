@@ -16297,7 +16297,7 @@ function renderAdAiBox(prefix, ai, langLabel) {
   const loading = ai.status === 'loading';
   const r = ai.result;
   return `
-      <div style="border:1px dashed var(--color-border,#bbb);border-radius:8px;padding:12px;margin:0 0 12px">
+      <div class="pmx-ai-box">
         <strong style="font-size:13px">Redactar con IA</strong>
         <p class="field-hint" style="margin:4px 0 8px">Escribe solo las indicaciones: la IA redacta los títulos y las descripciones usando únicamente lo que digas aquí (no inventa precios, ofertas ni servicios). Luego puedes editarlos.</p>
         <textarea id="${prefix}-ai-brief" rows="4" maxlength="2000" style="width:100%;font-family:inherit" placeholder="ej. Hotel boutique en el centro de Cartagena, desayuno incluido, cancelación gratis hasta 48 horas antes, tono cálido y para parejas." ${loading ? 'disabled' : ''}>${escapeHtml(ai.brief)}</textarea>
@@ -17478,15 +17478,15 @@ function renderPmxStepBase() {
     <div class="card" style="margin-bottom:16px">
       <h3 style="margin:0 0 10px;font-size:14px">2. Base del grupo de recursos</h3>
       <p class="field-hint" style="margin:0 0 10px">Se crea UN grupo de recursos pausado en una campaña de Performance Max que ya esté activa en cada cuenta. Usa {HOTEL} donde deba ir el nombre del hotel. Los títulos que no quepan tras sustituirlo se descartan. Si la campaña usa Brand Guidelines, el nombre del negocio y los logos son los de la campaña (los que subas aquí no se usan); si no, son obligatorios.</p>
-      <div style="display:flex;gap:16px;flex-wrap:wrap">
-        <div class="field"><label>Nombre del grupo de recursos</label><input type="text" id="pmx-name" value="${escapeHtml(p.name)}" style="width:300px" maxlength="128" autocomplete="off" /></div>
-        <div class="field"><label>Nombre del negocio (hasta ${PMX_LIM.biz}; con Brand Guidelines se usa el de la campaña)</label><input type="text" id="pmx-business" value="${escapeHtml(p.business)}" style="width:240px" maxlength="60" autocomplete="off" /></div>
+      <div class="pmx-row2">
+        <div class="field"><label>Nombre del grupo de recursos</label><input type="text" id="pmx-name" value="${escapeHtml(p.name)}" maxlength="128" autocomplete="off" /></div>
+        <div class="field"><label>Nombre del negocio (hasta ${PMX_LIM.biz}; con Brand Guidelines se usa el de la campaña)</label><input type="text" id="pmx-business" value="${escapeHtml(p.business)}" maxlength="60" autocomplete="off" /></div>
       </div>
       ${renderPmxAiBox()}
-      <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:8px">
-        <div class="field"><label>Títulos (uno por línea, de 3 a 15, hasta 30 caracteres)</label><textarea id="pmx-heads" rows="7" style="width:300px" placeholder="Black Friday {HOTEL}">${escapeHtml(p.heads)}</textarea></div>
-        <div class="field"><label>Títulos largos (uno por línea, de 1 a 5, hasta 90)</label><textarea id="pmx-longs" rows="7" style="width:360px">${escapeHtml(p.longs)}</textarea></div>
-        <div class="field"><label>Descripciones (una por línea, de 2 a 5, hasta 90; una de 60 o menos)</label><textarea id="pmx-descs" rows="7" style="width:360px">${escapeHtml(p.descs)}</textarea></div>
+      <div class="pmx-cols3">
+        <div class="field"><label>Títulos (uno por línea, de 3 a 15, hasta 30 caracteres)</label><textarea id="pmx-heads" rows="8" placeholder="Black Friday {HOTEL}">${escapeHtml(p.heads)}</textarea></div>
+        <div class="field"><label>Títulos largos (uno por línea, de 1 a 5, hasta 90)</label><textarea id="pmx-longs" rows="8">${escapeHtml(p.longs)}</textarea></div>
+        <div class="field"><label>Descripciones (una por línea, de 2 a 5, hasta 90; una de 60 o menos)</label><textarea id="pmx-descs" rows="8">${escapeHtml(p.descs)}</textarea></div>
       </div>
       <div class="pmx-media">
         <div>
