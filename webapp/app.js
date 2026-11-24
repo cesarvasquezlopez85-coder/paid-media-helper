@@ -17109,10 +17109,11 @@ const PMX_IMG = {
   logo_wide: { label: 'Logo horizontal 4:1 (opcional)', hint: 'Mínimo 512×128 (recomendado 1200×300)', ratio: 4, min: [512, 128], req: false },
 };
 const PMX_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const PMX_MAX_THEMES = 25;
 const PMX_LIM = { head: [3, 15, 30], long: [1, 5, 90], desc: [2, 5, 90], descShort: 60, biz: 25, name: 128, videos: 5 };
 
 function pmxNewState() {
-  return { name: 'Black Friday - {HOTEL}', business: '{HOTEL}', heads: '', longs: '', descs: '', videos: '', imgMsg: '', campaignFilter: '',
+  return { name: 'Black Friday - {HOTEL}', business: '{HOTEL}', heads: '', longs: '', descs: '', videos: '', imgMsg: '', campaignFilter: '', copySignals: false,
     images: { landscape: [], square: [], portrait: [], logo: [], logo_wide: [] },
     ai: { brief: '', idioma: 'es', status: 'idle', error: '', result: null }, ag: null,
     rows: {}, status: 'idle', excluded: {}, check: null, run: { status: 'idle', error: null, results: {}, applied: false } };
@@ -17203,6 +17204,7 @@ function pmxCompute(accRow, camp) {
   row.longs = pmxPick(nutLines(p.longs), hotel, PMX_LIM.long[2], PMX_LIM.long[1]);
   row.descs = pmxPick(nutLines(p.descs), hotel, PMX_LIM.desc[2], PMX_LIM.desc[1]);
   if (!camp.url) row.reason = 'La campaña no tiene grupos de recursos de los que tomar la URL';
+  else if (pmxSignalBlock(accRow)) row.reason = pmxSignalBlock(accRow);
   else if (!row.name || row.name.length > PMX_LIM.name) row.reason = 'El nombre del grupo queda vacío o demasiado largo';
   else if ((camp.asset_group_names || []).some((n) => n.toLowerCase() === row.name.toLowerCase())) row.reason = 'Ya existe un grupo de recursos con ese nombre';
   else if (row.business.length > PMX_LIM.biz) row.reason = `El nombre del negocio pasa de ${PMX_LIM.biz} caracteres`;
@@ -17244,7 +17246,7 @@ function pmxAccountsPayload(rows) {
 function pmxSignature(rows) {
   const s = state.nuevosAnuncios, p = pmxState();
   const imgs = Object.keys(PMX_IMG).map((k) => p.images[k].map((i) => `${i.name}:${i.data.length}`));
-  return JSON.stringify({ m: s.mcc.selectedId, a: pmxAccountsPayload(rows), i: imgs, v: nutLines(p.videos) });
+  return JSON.stringify({ m: s.mcc.selectedId, a: pmxAccountsPayload(rows), i: imgs, v: nutLines(p.videos), c: !!p.copySignals });
 }
 
 function pmxImagesCount() { const p = pmxState(); return Object.keys(PMX_IMG).reduce((n, k) => n + p.images[k].length, 0); }
@@ -17278,7 +17280,7 @@ function pmxRead() {
       .catch((err) => { row.status = 'error'; row.error = err.message || String(err); })
       .then(() => worker());
   };
-  Promise.all([worker(), worker(), worker(), worker()]).then(() => { if (pmxState() !== p) return; p.status = 'ready'; render(); });
+  Promise.all([worker(), worker(), worker(), worker()]).then(() => { if (pmxState() !== p) return; p.status = 'ready'; render(); pmxSignalsLoad(); });
 }
 
 function pmxSubmit(validateOnly) {
@@ -17289,14 +17291,17 @@ function pmxSubmit(validateOnly) {
     rows = rows.filter((r) => p.check.okKeys.includes(r.key));
     if (!rows.length || p.check.signature !== pmxSignature(rows)) return;
     const nVid = nutLines(p.videos).length;
-    if (!window.confirm(`Se crearán ${rows.length} grupos de recursos PAUSADOS de Performance Max en cuentas del MCC «${s.mcc.selectedName}», cada uno con ${pmxImagesCount()} imágenes y ${nVid} videos. Después los activas a mano en Google Ads. ¿Continuar?`)) return;
+    const msg = p.copySignals
+      ? `Se crearán ${rows.length} grupos de recursos PAUSADOS de Performance Max en cuentas del MCC «${s.mcc.selectedName}», cada uno con ${pmxImagesCount()} imágenes y ${nVid} videos, y con los temas de búsqueda y la audiencia del grupo con más conversiones de su cuenta. Después los activas a mano en Google Ads. ¿Continuar?`
+      : `Se crearán ${rows.length} grupos de recursos PAUSADOS de Performance Max en cuentas del MCC «${s.mcc.selectedName}», cada uno con ${pmxImagesCount()} imágenes y ${nVid} videos. Después los activas a mano en Google Ads. ¿Continuar?`;
+    if (!window.confirm(msg)) return;
   }
   if (!rows.length) return;
   p.run = { status: 'loading', error: null, results: {}, applied: false };
   render();
   fetch('/api/google-ads/pmax-create', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ validate_only: validateOnly, mcc_id: s.mcc.selectedId, images: pmxImagePayload(), videos: nutLines(p.videos), accounts: pmxAccountsPayload(rows) }),
+    body: JSON.stringify({ validate_only: validateOnly, mcc_id: s.mcc.selectedId, images: pmxImagePayload(), videos: nutLines(p.videos), copy_signals: !!p.copySignals, accounts: pmxAccountsPayload(rows) }),
   })
     .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
     .then(({ ok, data }) => {
@@ -17320,6 +17325,50 @@ function pmxSubmit(validateOnly) {
       render();
     })
     .catch((err) => { p.run = { status: 'error', error: err.message || String(err), results: {}, applied: false }; render(); });
+}
+
+// Con «copiar señales» marcado: por cada cuenta leída se pregunta de qué grupo (el de más conversiones) se copiarían y cuántas señales lleva.
+function pmxSignalsLoad() {
+  const p = pmxState();
+  if (!p.copySignals) return;
+  Object.values(p.rows).forEach((acc) => {
+    if (acc.status !== 'ready' || (acc.signal && acc.signal.status !== 'error')) return;
+    acc.signal = { status: 'loading', data: null, error: '' };
+    fetch(`/api/google-ads/pmax-signal-source?customer_id=${encodeURIComponent(acc.id)}`)
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Error desconocido.');
+        acc.signal = { status: 'ready', data, error: '' };
+      })
+      .catch((err) => { acc.signal = { status: 'error', data: null, error: err.message || String(err) }; })
+      .then(() => { if (pmxState() === p) render(); });
+  });
+  render();
+}
+
+function pmxSignalCell(acc) {
+  const sg = acc.signal;
+  if (!sg || sg.status === 'loading') return '<span class="field-hint">Leyendo las señales…</span>';
+  if (sg.status === 'error') return `<span class="field-hint" style="color:var(--color-danger,#b3261e)">${escapeHtml(sg.error)}</span>`;
+  const d = sg.data || {};
+  if (!d.source) return '<span class="field-hint" style="color:var(--color-danger,#b3261e)">Ningún grupo de la cuenta tiene temas de búsqueda y audiencia que copiar.</span>';
+  const how = d.source.criterion === 'conv30'
+    ? `${escapeHtml(String(d.source.conversions))} <span>conversiones en 30 días</span>`
+    : (d.source.criterion === 'conv_all'
+      ? `${escapeHtml(String(d.source.conversions))} <span>conversiones en su historial (sin conversiones en 30 días)</span>`
+      : '<span>Sin conversiones: el grupo con más temas de búsqueda</span>');
+  return `<span class="field-hint"><span>Copia de:</span> <strong>${escapeHtml(d.source.name)}</strong><br />${how}<br /><span>${(d.themes || []).length} temas de búsqueda</span><br /><span>con audiencia</span></span>`;
+}
+
+// Con «copiar señales», una cuenta sin señales que copiar (o con la lectura pendiente o fallida) no puede crear grupos: ninguno debe quedar sin temas ni audiencia.
+function pmxSignalBlock(accRow) {
+  const p = pmxState();
+  if (!p.copySignals) return '';
+  const sg = accRow.signal;
+  if (!sg || sg.status === 'loading') return 'Leyendo las señales de la cuenta…';
+  if (sg.status === 'error') return 'No se pudieron leer las señales de la cuenta';
+  if (!sg.data || !sg.data.source) return 'Ningún grupo de la cuenta tiene temas de búsqueda y audiencia que copiar';
+  return '';
 }
 
 function pmxNewBatch() {
@@ -17460,8 +17509,11 @@ function pmxResultCell(row) {
   const r = pmxState().run.results[row.key];
   if (!r) return '';
   if (!r.ok) return `<span style="color:var(--color-danger,#b3261e)">✕ ${escapeHtml(r.error || 'Error')}</span>`;
-  if (!pmxState().run.applied) return '<span class="delta-badge good">✓ Google lo validó</span>';
-  return '<span class="delta-badge good">✓ Creado (pausado)</span>';
+  const note = !pmxState().copySignals ? '' : (r.signals
+    ? `<br /><span class="field-hint">${r.signals.audience ? `Con ${r.signals.themes} temas de búsqueda y audiencia` : `Con ${r.signals.themes} temas de búsqueda`}</span>`
+    : '');
+  if (!pmxState().run.applied) return `<span class="delta-badge good">✓ Google lo validó</span>${note}`;
+  return `<span class="delta-badge good">✓ Creado (pausado)</span>${note}`;
 }
 
 function renderPmxStepRows() {
@@ -17479,6 +17531,7 @@ function renderPmxStepRows() {
       <td${i ? ' style="color:var(--color-text-muted)"' : ''}>${escapeHtml(acc.name)}</td><td>${r.campaign ? escapeHtml(r.campaign.name) : ''}</td>
       <td>${r.campaign ? `<input type="text" data-pmx-hotel="${escapeHtml(r.key)}" value="${escapeHtml(r.hotel)}" style="width:170px" />` : ''}</td>
       <td class="field-hint">${r.reason || !r.campaign ? '' : `${r.heads.length} títulos · ${r.longs.length} largos · ${r.descs.length} desc.`}${r.campaign && r.campaign.brand_guidelines ? '<br />Brand Guidelines: negocio y logos de la campaña' : ''}</td>
+      ${p.copySignals ? `<td>${r.campaign && i === 0 ? pmxSignalCell(acc) : ''}</td>` : ''}
       <td>${r.reason ? `<span class="field-hint">${escapeHtml(r.reason)}</span>` : ''}</td>
       <td>${pmxResultCell(r)}</td>
     </tr>`).join('');
@@ -17488,8 +17541,9 @@ function renderPmxStepRows() {
   const body = prepared ? `
       <div class="field" style="margin:10px 0 6px"><label>Solo campañas cuyo nombre contenga (opcional)</label><input type="text" id="pmx-filter" value="${escapeHtml(p.campaignFilter)}" style="width:240px" placeholder="ej. PMAX" autocomplete="off" /></div>
       <p class="field-hint" style="margin:0 0 6px">Si una cuenta tiene una sola campaña que coincide, se marca sola; si tiene varias, marca las que quieras: cada campaña marcada recibe su propio grupo de recursos pausado. El hotel sale del nombre de la campaña («Hotel - MERCADO:idioma - TIPO») o, si no sigue ese formato, del nombre de la cuenta; puedes corregirlo en cada fila.</p>
+      <label style="display:flex;align-items:flex-start;gap:8px;margin:6px 0 10px;font-size:13px;cursor:pointer"><input type="checkbox" id="pmx-copy-signals" ${p.copySignals ? 'checked' : ''} style="margin-top:3px" /><span><strong>Copiar los temas de búsqueda y la audiencia del grupo con más conversiones de la cuenta</strong><br /><span class="field-hint">Se toma el grupo de recursos activo con más conversiones en los últimos 30 días de cada cuenta (si no hay, el de más conversiones en su historial y, si tampoco, el que tenga más temas) y se copian sus temas de búsqueda (hasta ${PMX_MAX_THEMES}) y su audiencia. Solo sirve un grupo que tenga temas y audiencia: si la cuenta no tiene ninguno, no se crea el grupo. El servidor lo vuelve a leer al crear.</span></span></label>
       <div class="table-scroll" style="max-height:340px"><table>
-        <thead><tr><th></th><th>Cuenta</th><th>Campaña de Performance Max</th><th>Hotel</th><th>Textos</th><th>Motivo</th><th>Resultado</th></tr></thead>
+        <thead><tr><th></th><th>Cuenta</th><th>Campaña de Performance Max</th><th>Hotel</th><th>Textos</th>${p.copySignals ? '<th>Señales</th>' : ''}<th>Motivo</th><th>Resultado</th></tr></thead>
         <tbody>${trs}</tbody>
       </table></div>
       ${p.run.status === 'error' ? `<div class="error-panel" style="margin-top:12px">${escapeHtml(p.run.error)}</div>` : ''}
@@ -17534,6 +17588,8 @@ function bindPmx() {
   const aiLang = document.getElementById('pmx-ai-lang');
   if (aiLang) aiLang.addEventListener('change', (e) => { p.ai.idioma = e.target.value; });
   field('pmx-name', 'name'); field('pmx-business', 'business'); field('pmx-heads', 'heads'); field('pmx-longs', 'longs'); field('pmx-descs', 'descs'); field('pmx-videos', 'videos');
+  const cs = document.getElementById('pmx-copy-signals');
+  if (cs) cs.addEventListener('change', (e) => { p.copySignals = e.target.checked; pmxResetRun(); if (p.copySignals) pmxSignalsLoad(); else render(); });
   const f = document.getElementById('pmx-filter');
   if (f) f.addEventListener('change', (e) => { p.campaignFilter = e.target.value; pmxResetRun(); render(); });
   document.querySelectorAll('[data-pmx-sub]').forEach((el) => el.addEventListener('click', () => { state.nuevosAnuncios.pmaxTab = el.dataset.pmxSub; render(); }));

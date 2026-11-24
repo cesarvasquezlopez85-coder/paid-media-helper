@@ -547,6 +547,11 @@ def init_db():
             )
             """
         )
+        # Señales copiadas a cada grupo de recursos nuevo (JSON {themes, audience, source_name}); las bases que ya existían necesitan la migración.
+        try:
+            conn.execute("ALTER TABLE pmax_creation_log ADD COLUMN signals TEXT")
+        except sqlite3.OperationalError:
+            pass  # ya existe, de un arranque anterior
         # Posiciones fijadas (pin) de cada anuncio creado, como JSON {"h": [0, 1, ...], "d": [...]}; las bases que ya
         # existían (producción) necesitan la migración explícita.
         try:
@@ -883,15 +888,16 @@ def store_ad_creation(user_id, customer_id, result, ad_group_id, final_url, head
         conn.close()
 
 
-def store_pmax_creation(user_id, customer_id, result, name, business_name, heads, longs, descs, n_images, n_videos):
+def store_pmax_creation(user_id, customer_id, result, name, business_name, heads, longs, descs, n_images, n_videos, signals=None):
     conn = get_db()
     try:
         conn.execute(
             "INSERT INTO pmax_creation_log (created_at, user_id, customer_id, campaign_id, campaign_name, asset_group_id, asset_group_name, "
-            "final_url, headlines, long_headlines, descriptions, business_name, images, videos) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "final_url, headlines, long_headlines, descriptions, business_name, images, videos, signals) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (time.time(), user_id, str(customer_id), str(result.get("campaign_id") or ""), (result.get("campaign_name") or "")[:200],
              str(result.get("asset_group_id") or ""), name[:200], (result.get("url") or "")[:2000], json.dumps(heads, ensure_ascii=False),
-             json.dumps(longs, ensure_ascii=False), json.dumps(descs, ensure_ascii=False), business_name, n_images, n_videos),
+             json.dumps(longs, ensure_ascii=False), json.dumps(descs, ensure_ascii=False), business_name, n_images, n_videos,
+             json.dumps(signals, ensure_ascii=False) if signals else None),
         )
         conn.commit()
     finally:
@@ -1555,6 +1561,12 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_ads_json():
                 return
             self._handle_google_ads_pmax_campaigns(parse_qs(parsed.query))
+            return
+
+        if path == "/api/google-ads/pmax-signal-source":
+            if not self._require_ads_json():
+                return
+            self._handle_google_ads_pmax_signal_source(parse_qs(parsed.query))
             return
 
         if path == "/api/google-ads/pmax-asset-groups":
@@ -3881,6 +3893,26 @@ class Handler(SimpleHTTPRequestHandler):
             return
         self._send_json(200, {**data, "simulated": False})
 
+    def _handle_google_ads_pmax_signal_source(self, query):
+        # El grupo de recursos con más conversiones de la cuenta (30 días) y las señales que se le copiarían a un grupo nuevo. Solo lectura.
+        user = self._get_current_user()
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        if not customer_id.isdigit():
+            self._send_json(400, {"error": "Falta o es inválido el parámetro customer_id."})
+            return
+        if not google_ads_client.is_configured():
+            self._send_json(200, {**google_ads_client.simulated_pmax_signal_source(customer_id), "simulated": True})
+            return
+        if not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+        try:
+            data = google_ads_client.fetch_pmax_signal_source(customer_id)
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+            return
+        self._send_json(200, {**data, "simulated": False})
+
     def _handle_google_ads_pmax_asset_groups(self, query):
         # Grupos de recursos de las campañas PMax activas de una cuenta, con su estado y si los creó la plataforma.
         user = self._get_current_user()
@@ -4097,6 +4129,7 @@ class Handler(SimpleHTTPRequestHandler):
         if len({str((a or {}).get("customer_id") or "").strip() for a in raw_accounts if isinstance(a, dict)}) > AD_CREATE_MAX_ACCOUNTS:
             self._send_json(400, {"error": f"Máximo {AD_CREATE_MAX_ACCOUNTS} cuentas por vez."})
             return
+        copy_signals = payload.get("copy_signals") is True
         try:
             images = google_ads_client.clean_pmax_images(payload.get("images"))
             video_ids = google_ads_client.clean_pmax_videos(payload.get("videos"))
@@ -4142,13 +4175,13 @@ class Handler(SimpleHTTPRequestHandler):
                 to_run.append(i)
         fn = google_ads_client.simulated_create_pmax_asset_group if simulated else google_ads_client.create_pmax_asset_group
 
-        def run_one(i):
+        def run_one(i, signals):
             acc = accounts[i]
             try:
                 r = fn(acc["customer_id"], acc["campaign_id"], acc["name"], acc["business_name"], acc["heads"], acc["longs"], acc["descs"],
-                       images, video_ids, validate_only=validate_only)
+                       images, video_ids, validate_only=validate_only, signals=signals)
                 return i, {"customer_id": acc["customer_id"], "ok": True, "campaign_name": r.get("campaign_name"),
-                           "asset_group_id": r.get("asset_group_id"), "url": r.get("url"), "_r": r}
+                           "asset_group_id": r.get("asset_group_id"), "url": r.get("url"), "signals": r.get("signals"), "_r": r}
             except Exception as e:  # noqa: BLE001 — un fallo en una campaña no debe frenar a las demás
                 if not isinstance(e, ValueError):
                     print(f"[google-ads-error] pmax-create {' '.join(str(e).split())[:300]}", flush=True)
@@ -4156,7 +4189,21 @@ class Handler(SimpleHTTPRequestHandler):
 
         def run_account(indices):
             # Las campañas de una misma cuenta van una tras otra: comparten las mismas imágenes y no deben crearse a la vez.
-            return [run_one(i) for i in indices]
+            signals = None
+            if copy_signals:
+                # Se vuelve a leer en vivo, una vez por cuenta: el grupo con más conversiones y sus señales. Si no se puede leer,
+                # el grupo no se crea sin señales a escondidas: cada campaña de la cuenta falla con el motivo.
+                try:
+                    signals = (google_ads_client.simulated_pmax_signal_source if simulated else google_ads_client.fetch_pmax_signal_source)(accounts[indices[0]]["customer_id"])
+                except Exception as e:  # noqa: BLE001
+                    if not isinstance(e, ValueError):
+                        print(f"[google-ads-error] pmax-signal-source {' '.join(str(e).split())[:300]}", flush=True)
+                    msg = "No se pudieron leer las señales de la cuenta: " + google_ads_client.google_error_text(e)
+                    return [(i, {"customer_id": accounts[i]["customer_id"], "ok": False, "error": msg}) for i in indices]
+                if not (signals or {}).get("source") or not signals.get("themes") or not signals.get("audience"):
+                    msg = "Ningún grupo de la cuenta tiene temas de búsqueda y audiencia que copiar: no se creó el grupo."
+                    return [(i, {"customer_id": accounts[i]["customer_id"], "ok": False, "error": msg}) for i in indices]
+            return [run_one(i, signals) for i in indices]
 
         if to_run:
             by_account = {}
@@ -4172,7 +4219,7 @@ class Handler(SimpleHTTPRequestHandler):
             if r and not validate_only:
                 a = accounts[i]
                 try:
-                    store_pmax_creation(user["id"], a["customer_id"], r, a["name"], a["business_name"], a["heads"], a["longs"], a["descs"], len(images), len(video_ids))
+                    store_pmax_creation(user["id"], a["customer_id"], r, a["name"], a["business_name"], a["heads"], a["longs"], a["descs"], len(images), len(video_ids), res.get("signals"))
                 except Exception as e:  # noqa: BLE001 — el grupo ya quedó en Google Ads; un fallo del registro no debe ocultarlo
                     print(f"[pmax-creation-log] {e}", flush=True)
             out.append(res)

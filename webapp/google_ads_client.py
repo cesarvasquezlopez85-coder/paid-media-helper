@@ -2820,7 +2820,7 @@ def _check_pmax_target(campaigns, campaign_id, group_name, business_name="", ima
     return camp
 
 
-def _pmax_operations(customer_id, campaign_id, name, url, business_name, heads, longs, descs, images, video_ids, brand_guidelines=False):
+def _pmax_operations(customer_id, campaign_id, name, url, business_name, heads, longs, descs, images, video_ids, brand_guidelines=False, signals=None):
     """Operaciones de UNA petición `googleAds:mutate`: recursos con ID temporal negativo, el grupo y los vínculos."""
     ops, next_id = [], [0]
 
@@ -2858,22 +2858,99 @@ def _pmax_operations(customer_id, campaign_id, name, url, business_name, heads, 
         links.append(("YOUTUBE_VIDEO", rn))
     for field, rn in links:
         ops.append({"assetGroupAssetOperation": {"create": {"assetGroup": ag, "asset": rn, "fieldType": field}}})
+    # Señales copiadas del grupo con más conversiones de la cuenta: temas de búsqueda y la audiencia (por referencia, es de la misma cuenta).
+    for theme in (signals or {}).get("themes") or []:
+        ops.append({"assetGroupSignalOperation": {"create": {"assetGroup": ag, "searchTheme": {"text": theme}}}})
+    if (signals or {}).get("audience"):
+        ops.append({"assetGroupSignalOperation": {"create": {"assetGroup": ag, "audience": {"audience": signals["audience"]}}}})
     return ops
 
 
-def create_pmax_asset_group(customer_id, campaign_id, name, business_name, heads, longs, descs, images, video_ids, validate_only=True):
+PMAX_MAX_SEARCH_THEMES = 25
+
+
+def fetch_pmax_signal_source(customer_id):
+    """De qué grupo de recursos de la cuenta se copian las señales a un grupo nuevo, y esas señales: {source, themes, audience}.
+    Solo cuentan los grupos que tienen AL MENOS un tema de búsqueda Y una audiencia (un grupo nuevo no debe quedar sin ellos).
+    Escalera, en este orden:
+      1. 'conv30': grupo activo (de campaña PMax activa) con más conversiones en los últimos 30 días;
+      2. 'conv_all': grupo activo con más conversiones en todo su historial;
+      3. 'any': cualquier grupo (también pausado) con más temas de búsqueda.
+    Si ninguno cumple, source es None y el servidor no crea el grupo. Solo lectura."""
+    base = """
+        SELECT asset_group.id, asset_group.name, asset_group.status, campaign.name, campaign.status, metrics.conversions, metrics.conversions_value
+        FROM asset_group
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX' AND campaign.status != 'REMOVED' AND asset_group.status != 'REMOVED'"""
+    groups = {}
+
+    def collect(rows, tag):
+        for r in rows:
+            ag, m = r.get("assetGroup") or {}, r.get("metrics") or {}
+            gid = str(ag.get("id") or "")
+            if not gid.isdigit():
+                continue
+            gr = groups.setdefault(gid, {"id": gid, "name": ag.get("name") or "", "campaign_name": (r.get("campaign") or {}).get("name") or "",
+                                         "active": ag.get("status") == "ENABLED" and (r.get("campaign") or {}).get("status") == "ENABLED",
+                                         "themes": [], "audience": "", "conv30": 0.0, "val30": 0.0, "conv_all": 0.0, "val_all": 0.0})
+            gr["conv" + tag] = float(m.get("conversions") or 0)
+            gr["val" + tag] = float(m.get("conversionsValue") or 0)
+    collect(_search(customer_id, base + " AND segments.date DURING LAST_30_DAYS"), "30")
+    collect(_search(customer_id, base), "_all")
+    sig = _search(customer_id, """
+        SELECT asset_group_signal.asset_group, asset_group_signal.search_theme.text, asset_group_signal.audience.audience, asset_group_signal.approval_status
+        FROM asset_group_signal""")
+    for x in sig:
+        sg = x.get("assetGroupSignal") or {}
+        if sg.get("approvalStatus") == "DISAPPROVED":
+            continue
+        gid = str(sg.get("assetGroup") or "").rsplit("/", 1)[-1]
+        gr = groups.get(gid)
+        if not gr:
+            continue
+        t = (sg.get("searchTheme") or {}).get("text")
+        if t and t not in gr["themes"]:
+            gr["themes"].append(t)
+        a = (sg.get("audience") or {}).get("audience")
+        if a and not gr["audience"]:
+            gr["audience"] = a
+    eligible = [g for g in groups.values() if g["themes"] and g["audience"]]
+    pick = None
+    for criterion, pool, key in (("conv30", [g for g in eligible if g["active"] and g["conv30"] > 0], lambda g: (g["conv30"], g["val30"])),
+                                 ("conv_all", [g for g in eligible if g["active"] and g["conv_all"] > 0], lambda g: (g["conv_all"], g["val_all"])),
+                                 ("any", eligible, lambda g: (len(g["themes"]), g["conv_all"]))):
+        if pool:
+            pick = (criterion, max(pool, key=key))
+            break
+    if not pick:
+        return {"source": None, "themes": [], "audience": ""}
+    criterion, g = pick
+    conv = g["conv30"] if criterion == "conv30" else g["conv_all"]
+    return {"source": {"asset_group_id": g["id"], "name": g["name"], "campaign_name": g["campaign_name"], "criterion": criterion,
+                       "conversions": round(conv, 2)},
+            "themes": g["themes"][:PMAX_MAX_SEARCH_THEMES], "audience": g["audience"]}
+
+
+def create_pmax_asset_group(customer_id, campaign_id, name, business_name, heads, longs, descs, images, video_ids, validate_only=True, signals=None):
     """Crea (o solo valida) un grupo de recursos PAUSADO en una campaña Performance Max activa. Devuelve
     {campaign_id, campaign_name, asset_group_id, url}."""
     camps = fetch_pmax_campaigns(customer_id)["campaigns"]
     camp = _check_pmax_target(camps, campaign_id, name, business_name, images)
-    ops = _pmax_operations(customer_id, camp["id"], name, camp["url"], business_name, heads, longs, descs, images, video_ids, camp.get("brand_guidelines", False))
+    ops = _pmax_operations(customer_id, camp["id"], name, camp["url"], business_name, heads, longs, descs, images, video_ids, camp.get("brand_guidelines", False), signals)
     payload = _post_json(f"{BASE_URL}/customers/{customer_id}/googleAds:mutate", {"mutateOperations": ops, "validateOnly": validate_only}, timeout=120)
     group_id = ""
     for r in payload.get("mutateOperationResponses") or []:
         rn = (r.get("assetGroupResult") or {}).get("resourceName", "")
         if rn:
             group_id = rn.rsplit("/", 1)[-1]
-    return {"campaign_id": camp["id"], "campaign_name": camp["name"], "asset_group_id": group_id, "url": camp["url"]}
+    return {"campaign_id": camp["id"], "campaign_name": camp["name"], "asset_group_id": group_id, "url": camp["url"], "signals": _signals_summary(signals)}
+
+
+def _signals_summary(signals):
+    """Lo que se copió (o None si no se pidió copiar o no había de dónde): {themes, audience, source_name}."""
+    if not signals or not signals.get("source"):
+        return None
+    return {"themes": len(signals.get("themes") or []), "audience": bool(signals.get("audience")), "source_name": signals["source"]["name"],
+            "criterion": signals["source"].get("criterion", "")}
 
 
 SIMULATED_PMAX = {
@@ -2898,7 +2975,18 @@ def simulated_pmax_campaigns(customer_id):
     return out
 
 
-def simulated_create_pmax_asset_group(customer_id, campaign_id, name, business_name, heads, longs, descs, images, video_ids, validate_only=True):
+def simulated_pmax_signal_source(customer_id):
+    """Simulado: la cuenta 1111111111 tiene un grupo con conversiones y señales; la otra no tiene ninguno con conversiones."""
+    if str(customer_id) == "1111111111":
+        return {"source": {"asset_group_id": "910101", "name": "Evergreen", "campaign_name": "Estelar Hoteles - CO:es - PMAX", "criterion": "conv30", "conversions": 42.0},
+                "themes": ["hotel boutique cartagena", "hotel con spa", "hoteles para parejas"], "audience": f"customers/{customer_id}/audiences/555"}
+    if str(customer_id) == "2222222222":
+        return {"source": {"asset_group_id": "920101", "name": "Base", "campaign_name": "Click Clack - ES:es - PMAX", "criterion": "conv_all", "conversions": 7.0},
+                "themes": ["hotel centro historico", "hoteles economicos"], "audience": f"customers/{customer_id}/audiences/777"}
+    return {"source": None, "themes": [], "audience": ""}
+
+
+def simulated_create_pmax_asset_group(customer_id, campaign_id, name, business_name, heads, longs, descs, images, video_ids, validate_only=True, signals=None):
     camps = simulated_pmax_campaigns(customer_id)["campaigns"]
     camp = _check_pmax_target(camps, campaign_id, name, business_name, images)
     if any("rechazar" in t.lower() for t in heads):
@@ -2906,7 +2994,8 @@ def simulated_create_pmax_asset_group(customer_id, campaign_id, name, business_n
     if not validate_only:
         _SIMULATED_PMAX_CREATED.setdefault((str(customer_id), camp["id"]), []).append(name)
     return {"campaign_id": camp["id"], "campaign_name": camp["name"],
-            "asset_group_id": "" if validate_only else f"7{camp['id']}{len(_SIMULATED_PMAX_CREATED[(str(customer_id), camp['id'])]) - 1}", "url": camp["url"]}
+            "asset_group_id": "" if validate_only else f"7{camp['id']}{len(_SIMULATED_PMAX_CREATED[(str(customer_id), camp['id'])]) - 1}", "url": camp["url"],
+            "signals": _signals_summary(signals)}
 
 
 
