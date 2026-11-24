@@ -781,3 +781,9 @@ body.page-anuncios .card h3 { line-height: 1.35; }
 .pmx-ai-box textarea { width: 100%; box-sizing: border-box; font-family: inherit; }
 @media (max-width: 1100px) { .pmx-cols3 { grid-template-columns: 1fr; } .pmx-row2 { grid-template-columns: 1fr; } }
 @media (max-width: 1499px) { .pmx-media { grid-template-columns: 1fr; } }
+
+/* Campañas · Dónde invertir: el panel de proyección queda fijo a la izquierda y no más ancho que la pantalla, aunque la tabla se desplace */
+.camp-proj-panel { position: sticky; left: 16px; width: max(560px, min(980px, calc(100vw - 420px))); white-space: normal; }
+.camp-proj-panel .stat-grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.camp-proj-panel .stat-card { padding: 12px 14px; }
+.camp-proj-panel .stat-value { font-size: 20px; }

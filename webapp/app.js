@@ -274,7 +274,8 @@ const state = {
     confirm: null, busy: {}, notice: null,
     view: 'table', // 'table' | 'invest' (Dónde invertir)
     invest: { byAccount: {}, errors: {}, running: false, cancel: false, token: 0, stopMsg: '', runDone: 0, runTotal: 0, sortBy: 'priority', dir: 'desc', verdict: 'all',
-      adjust: { key: null, newBudget: '', status: 'idle', preview: null, result: null, error: null } },
+      adjust: { key: null, newBudget: '', status: 'idle', preview: null, result: null, error: null },
+      proj: { key: null, amount: '', per: 'day' } },
     loadedFrom: '', loadedTo: '', // rango con el que se trajo la tabla; el detalle de cada campaña usa el mismo
     detail: emptyCampanaDetail(0),
   },
@@ -14523,6 +14524,7 @@ function startInvestBudgetEdit(key) {
   const x = investRows().find((y) => y.row.key === key);
   const pct = x && x.ready ? (x.verdict.key === 'raise' ? INVEST_BUDGET_SUGGEST : (x.verdict.key === 'reduce' ? -INVEST_BUDGET_SUGGEST : null)) : null;
   inv.adjust = { ...investAdjustEmpty(), key, newBudget: row && row.budget > 0 && pct != null ? String(investBudgetStep(row.budget, pct)) : '' };
+  inv.proj = investProjEmpty();
   render();
 }
 
@@ -14559,11 +14561,12 @@ function adjustInvestBudget(preview) {
 
 function investBudgetCell(x, plain) {
   const r = x.row;
-  if (r.budget == null) return '<td>N/D</td>';
+  const projBtn = `<button class="btn-outline xs" data-camp-proj-open="${escapeHtml(r.key)}" title="Cuánto se vendería con dinero extra (no cambia nada en Google Ads)">Proyectar</button>`;
+  if (r.budget == null) return plain ? '<td>N/D</td>' : `<td>N/D<div style="margin-top:4px">${projBtn}</div></td>`;
   const money = campanasMoney(r.budget, r.currency);
   if (plain) return `<td>${money}</td>`;
-  if (r.budget_shared) return `<td>${money}<div class="footnote" title="Esta campaña usa un presupuesto compartido con otras: cambiarlo afectaría a todas. Ajústalo desde Google Ads.">Compartido: solo lectura</div></td>`;
-  return `<td>${money}<div style="margin-top:4px"><button class="btn-outline xs" data-camp-budget-open="${escapeHtml(r.key)}">Ajustar</button></div></td>`;
+  if (r.budget_shared) return `<td>${money}<div class="footnote" title="Esta campaña usa un presupuesto compartido con otras: cambiarlo afectaría a todas. Ajústalo desde Google Ads.">Compartido: solo lectura</div><div style="margin-top:4px">${projBtn}</div></td>`;
+  return `<td>${money}<div style="margin-top:4px;display:flex;gap:6px;flex-wrap:wrap"><button class="btn-outline xs" data-camp-budget-open="${escapeHtml(r.key)}">Ajustar</button>${projBtn}</div></td>`;
 }
 
 function investBudgetPanelHtml(x, cols) {
@@ -14597,6 +14600,97 @@ function investBudgetPanelHtml(x, cols) {
   return `<tr><td colspan="${cols}" style="background:var(--gray-50,#f6f7f9)">${inner}</td></tr>`;
 }
 
+// ---- Proyección: «si pongo X de dinero extra, ¿cuánto se vendería?» (solo lectura; no escribe nada en Google Ads) ----
+// Regla simple: ventas extra = dinero extra × ROAS de la campaña, con el rango que dan sus ventanas de 7, 14 y 30 días.
+// El margen de gasto extra se estima con la cuota de impresiones perdida por presupuesto: gasto × perdida ÷ (1 − perdida).
+const INVEST_PROJ_DAYS = 30;
+const investProjEmpty = () => ({ key: null, amount: '', per: 'day' });
+
+function investProjExtra(p) {
+  const v = parseFloat(String(p.amount).replace(/\s/g, '').replace(',', '.'));
+  if (!Number.isFinite(v) || v <= 0) return null;
+  return p.per === 'total' ? v : v * INVEST_PROJ_DAYS;
+}
+
+function investProjection(x, extra) {
+  const w30 = x.w[30];
+  if (!(w30.cost > 0)) return { error: 'Sin gasto en los últimos 30 días: no hay con qué proyectar.' };
+  if (!(w30.conv_value > 0)) return { error: 'Sin conversiones con valor en los últimos 30 días: no se puede calcular el ROAS.' };
+  const wins = [7, 14, 30].map((n) => x.w[n]).filter((m) => m.cost > 0);
+  const roas = wins.map((m) => m.roas);
+  const cpm = wins.map((m) => m.conversions / m.cost); // conversiones por unidad de dinero
+  const roas30 = w30.roas;
+  const cpm30 = w30.conversions / w30.cost;
+  const lost = w30.lost_is_budget;
+  const approx = lost != null && Math.abs(lost - 0.0999) < 0.0002; // Google solo dice «menos del 10 %»
+  const margin = lost != null && !approx && lost < 0.99 ? (w30.cost * lost) / (1 - lost) : null;
+  return {
+    extra, roas30, roasMin: Math.min(...roas), roasMax: Math.max(...roas),
+    sales: extra * roas30, salesMin: extra * Math.min(...roas), salesMax: extra * Math.max(...roas),
+    conv: extra * cpm30, convMin: extra * Math.min(...cpm), convMax: extra * Math.max(...cpm),
+    lost, approx, margin, convReal: w30.conversions,
+  };
+}
+
+function investProjResultHtml(x, p) {
+  const r = x.row;
+  const e = escapeHtml;
+  const money = (v) => campanasMoney(v, r.currency);
+  const extra = investProjExtra(p);
+  if (extra == null) return '<p class="field-hint" style="margin:10px 0 0">Escribe cuánto dinero extra pondrías sobre lo que ya gasta (por día o en total para 30 días).</p>';
+  const pr = investProjection(x, extra);
+  if (pr.error) return `<div class="error-panel" style="margin-top:10px;font-size:12px">${e(pr.error)}</div>`;
+  const rng = (a, b, f) => `${f(a)} – ${f(b)}`;
+  const xf = (v) => `${v.toFixed(2)}×`;
+  const card = (label, value, sub) => `<div class="card stat-card"><div class="stat-label">${label}</div><div class="stat-value">${value}</div><div class="stat-sub">${sub}</div></div>`;
+  const cards = [
+    card('Dinero extra (30 días)', money(pr.extra), `${e(money(pr.extra / INVEST_PROJ_DAYS))} por día`),
+    card('Ventas extra esperadas', money(pr.sales), `Rango: ${e(rng(pr.salesMin, pr.salesMax, money))}`),
+    card('Conversiones extra esperadas', fmtConv(pr.conv), `Rango: ${e(rng(pr.convMin, pr.convMax, fmtConv))}`),
+    card('ROAS usado (30 días)', xf(pr.roas30), `Rango: ${e(rng(pr.roasMin, pr.roasMax, xf))}`),
+  ];
+  if (r.budget > 0) {
+    const daily = pr.extra / INVEST_PROJ_DAYS;
+    cards.push(card('Sobre el presupuesto diario', `+${((daily / r.budget) * 100).toFixed(0)} %`, `De ${e(money(r.budget))} a ${e(money(r.budget + daily))} al día`));
+  }
+  const notes = [];
+  if (r.budget > 0 && pr.extra / INVEST_PROJ_DAYS > r.budget * INVEST_BUDGET_MAX) notes.push(['hint', 'Desde «Ajustar» el presupuesto solo sube hasta un 30 % por vez: este monto se alcanzaría en varios pasos.']);
+  if (pr.lost === 0) notes.push(['warn', 'No pierde impresiones por presupuesto en 30 días: el presupuesto no la frena, así que el dinero extra probablemente no compre más impresiones y esta proyección sería optimista.']);
+  else if (pr.approx) notes.push(['warn', 'Google solo informa que pierde menos del 10 % de las impresiones por presupuesto: el margen para gastar más es pequeño y esta proyección puede ser optimista.']);
+  else if (pr.margin != null && pr.extra > pr.margin) notes.push(['warn', `Este monto pasa del margen estimado de gasto extra (${money(pr.margin)} en 30 días): la campaña pierde el ${(pr.lost * 100).toFixed(0)} % de las impresiones por presupuesto y, más allá de ese margen, el dinero extra probablemente no compre más impresiones. Con solo ese margen, las ventas extra serían ${money(pr.margin * pr.roas30)}.`]);
+  else if (pr.margin != null) notes.push(['hint', `Margen estimado de gasto extra: ${money(pr.margin)} en 30 días (la campaña pierde el ${(pr.lost * 100).toFixed(0)} % de las impresiones por presupuesto).`]);
+  else notes.push(['hint', 'No hay dato de cuota perdida por presupuesto para este tipo de campaña: no se puede estimar el margen de gasto extra.']);
+  if (pr.convReal < INVEST_MIN_CONV) notes.push(['warn', `Solo ${fmtConv(pr.convReal)} conversion${fmtConv(pr.convReal) === '1' ? '' : 'es'} en 30 días: la proyección es poco fiable.`]);
+  if (x.verdict.key === 'reduce') notes.push(['warn', 'Esta campaña está en «Revisar o bajar»: su ROAS es flojo frente al de la cuenta, así que el dinero extra rendiría mejor en otra campaña.']);
+  const noteHtml = notes.map(([k, t]) => (k === 'warn' ? `<div class="error-panel" style="margin-top:8px;font-size:12px">⚠ ${e(t)}</div>` : `<p class="field-hint" style="margin:8px 0 0">${e(t)}</p>`)).join('');
+  return `<div class="stat-grid" style="margin-top:10px">${cards.join('')}</div>${noteHtml}`;
+}
+
+function investProjPanelHtml(x, cols) {
+  const p = state.campanas.invest.proj;
+  const r = x.row;
+  const e = escapeHtml;
+  const inner = `<div class="camp-proj-panel"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <strong>Proyección con dinero extra</strong>
+      <span class="field-hint">${e(r.campaign_name)}</span>
+      <span class="field-hint">Dinero extra:</span>
+      <input type="text" id="camp-proj-input" inputmode="decimal" value="${e(p.amount)}" placeholder="ej. 50" style="width:110px" />
+      ${r.currency ? `<span class="field-hint">${e(r.currency)}</span>` : ''}
+      <select id="camp-proj-per" style="width:190px"><option value="day" ${p.per === 'day' ? 'selected' : ''}>por día</option><option value="total" ${p.per === 'total' ? 'selected' : ''}>en total (30 días)</option></select>
+      <button class="btn-outline xs" data-action="camp-proj-close">Cerrar</button>
+    </div>
+    <div id="camp-proj-result">${investProjResultHtml(x, p)}</div>
+    <p class="footnote" style="margin:10px 0 0">Cómo se calcula: ventas extra = dinero extra × ROAS de la campaña (con el rango de sus ventanas de 7, 14 y 30 días). Supone que cada peso extra rinde como los últimos 30 días; en la práctica el rendimiento baja cuando el gasto sube mucho. Es una guía para decidir, no una promesa, y no cambia nada en Google Ads.</p></div>`;
+  return `<tr><td colspan="${cols}" style="background:var(--gray-50,#f6f7f9)">${inner}</td></tr>`;
+}
+
+function startInvestProj(key) {
+  const inv = state.campanas.invest;
+  inv.proj = inv.proj.key === key ? investProjEmpty() : { ...investProjEmpty(), key };
+  if (inv.proj.key) inv.adjust = investAdjustEmpty();
+  render();
+}
+
 function investTone(ratio) {
   if (ratio == null) return '';
   return ratio >= INVEST_OK_RATIO ? 'background:#dcfce7' : (ratio >= INVEST_BAD_RATIO ? 'background:#fef3c7' : 'background:#fee2e2');
@@ -14627,6 +14721,7 @@ function investTableHtml(list, plain) {
     <th style="${INVEST_GROUP}" title="Parte de las impresiones de búsqueda que se perdió porque el presupuesto se agotó (solo Search y Performance Max)">Pérdida por presupuesto 30 d</th>
     <th style="${INVEST_GROUP}">Presupuesto diario</th></tr></thead>`;
   const adjKey = state.campanas.invest.adjust.key;
+  const projKey = state.campanas.invest.proj.key;
   const conv = (m) => `<td>${m.conversions ? fmtConv(m.conversions) : '0'}</td>`;
   const body = list.map((x) => {
     const r = x.row;
@@ -14645,7 +14740,7 @@ function investTableHtml(list, plain) {
       ${roasCell(w[7], true)}${roasCell(w[14])}${roasCell(w[30])}
       ${cpaCell(w[7], true)}${cpaCell(w[14])}${cpaCell(w[30])}
       <td style="${INVEST_GROUP}">${w[30].lost_is_budget == null ? 'N/D' : `${(w[30].lost_is_budget * 100).toFixed(0)} %`}</td>
-      ${investBudgetCell(x, plain).replace('<td>', `<td style="${INVEST_GROUP}">`)}</tr>${!plain && adjKey === r.key && r.budget > 0 ? investBudgetPanelHtml(x, 15) : ''}`;
+      ${investBudgetCell(x, plain).replace('<td>', `<td style="${INVEST_GROUP}">`)}</tr>${!plain && adjKey === r.key && r.budget > 0 ? investBudgetPanelHtml(x, 15) : ''}${!plain && projKey === r.key ? investProjPanelHtml(x, 15) : ''}`;
   }).join('') || '<tr><td colspan="15" class="footnote">Ninguna campaña coincide con los filtros.</td></tr>';
   return `<div class="table-scroll sticky-head"><table>${head}<tbody>${body}</tbody></table></div>`;
 }
@@ -14776,7 +14871,7 @@ function renderCampanasPage() {
   const controls = invView ? `${viewToggle}
     <div class="card control-panel align-end">
       <button class="btn-outline" data-action="camp-refresh">Actualizar las campañas</button>
-      <p class="field-hint" style="max-width:520px">Dónde invertir mira solo las campañas <strong>activas</strong> de las cuentas de tu lista de <strong>Ritmo de consumo</strong>, con ventanas de 7, 14 y 30 días que terminan ayer (no usan el rango de fechas de la tabla). Desde cada fila puedes ajustar el presupuesto diario, con vista previa y confirmación.</p>
+      <p class="field-hint" style="max-width:520px">Dónde invertir mira solo las campañas <strong>activas</strong> de las cuentas de tu lista de <strong>Ritmo de consumo</strong>, con ventanas de 7, 14 y 30 días que terminan ayer (no usan el rango de fechas de la tabla). Desde cada fila puedes ajustar el presupuesto diario, con vista previa y confirmación.<br>Con «Proyectar» ves cuánto se vendería con dinero extra, sin cambiar nada en Google Ads.</p>
     </div>` : `${viewToggle}
     <div class="card control-panel align-end">
       <div class="field"><label>Desde</label><input type="date" id="camp-date-from" value="${escapeHtml(c.dateFrom)}" /></div>
@@ -19285,6 +19380,13 @@ function bindEvents() {
   campOn('camp-sort', 'change', (e) => { state.campanas.sortBy = e.target.value; render(); });
   document.querySelectorAll('[data-camp-view]').forEach((btn) => btn.addEventListener('click', () => { state.campanas.view = btn.dataset.campView; render(); }));
   document.querySelectorAll('[data-camp-budget-open]').forEach((btn) => btn.addEventListener('click', () => startInvestBudgetEdit(btn.dataset.campBudgetOpen)));
+  document.querySelectorAll('[data-camp-proj-open]').forEach((btn) => btn.addEventListener('click', () => startInvestProj(btn.dataset.campProjOpen)));
+  campOn('camp-proj-input', 'input', (e) => {
+    const inv = state.campanas.invest; inv.proj.amount = e.target.value;
+    const x = investRows().find((y) => y.ready && y.row.key === inv.proj.key); const box = document.getElementById('camp-proj-result');
+    if (x && box) box.innerHTML = investProjResultHtml(x, inv.proj);
+  });
+  campOn('camp-proj-per', 'change', (e) => { state.campanas.invest.proj.per = e.target.value; render(); });
   document.querySelectorAll('[data-camp-budget-pct]').forEach((btn) => btn.addEventListener('click', () => {
     const adj = state.campanas.invest.adjust; const row = investFindRow(adj.key);
     if (!row || !(row.budget > 0)) return;
@@ -20358,6 +20460,7 @@ function handleAction(action) {
     case 'camp-budget-preview': adjustInvestBudget(true); break;
     case 'camp-budget-confirm': adjustInvestBudget(false); break;
     case 'camp-budget-cancel': state.campanas.invest.adjust = investAdjustEmpty(); render(); break;
+    case 'camp-proj-close': state.campanas.invest.proj = investProjEmpty(); render(); break;
     case 'camp-invest-csv': downloadInvestCsv(); break;
     case 'camp-invest-html': downloadInvestHtml(); break;
     case 'camp-detail-close': closeCampanaDetail(); break;
