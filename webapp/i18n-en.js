@@ -3500,4 +3500,6 @@ export const EN = {
   [`ROAS a 14 días`]: `ROAS, 14 days`,
   [`CPA % a 7 días`]: `CPA %, 7 days`,
   [`CPA % a 14 días`]: `CPA %, 14 days`,
+  [`Basado en los 30 días que terminan ayer:`]: `Based on the 30 days ending yesterday:`,
+  [`Una pantalla con otro rango de fechas, o que incluya hoy, dará cifras algo distintas.`]: `A screen with a different date range, or one that includes today, will show somewhat different figures.`,
 };

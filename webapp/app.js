@@ -14691,6 +14691,12 @@ function investProjPanelHtml(x, cols) {
       <select id="camp-proj-per" style="width:190px"><option value="day" ${p.per === 'day' ? 'selected' : ''}>por día</option><option value="total" ${p.per === 'total' ? 'selected' : ''}>en total (30 días)</option></select>
       <button class="btn-outline xs" data-action="camp-proj-close">Cerrar</button>
     </div>
+    ${(() => {
+      const d = investAccountData(r.customer_id); const rg = d && d.ranges ? d.ranges['30'] : null;
+      if (!rg) return '';
+      const f = (iso) => { const t = new Date(`${iso}T00:00:00`); return Number.isNaN(t.getTime()) ? iso : t.toLocaleDateString(dateLocale(), { day: 'numeric', month: 'short', year: 'numeric' }); };
+      return `<p class="field-hint" style="margin:6px 0 0"><span>Basado en los 30 días que terminan ayer:</span> <span>${e(f(rg.from))} – ${e(f(rg.to))}</span>. <span>Una pantalla con otro rango de fechas, o que incluya hoy, dará cifras algo distintas.</span></p>`;
+    })()}
     <div id="camp-proj-result">${investProjResultHtml(x, p)}</div>
     <p class="footnote" style="margin:10px 0 0">Cómo se calcula: ventas extra = dinero extra × ROAS de la campaña (con el rango de sus ventanas de 7, 14 y 30 días). Supone que cada peso extra rinde como los últimos 30 días; en la práctica el rendimiento baja cuando el gasto sube mucho. Es una guía para decidir, no una promesa, y no cambia nada en Google Ads.</p></div>`;
   return `<tr><td colspan="${cols}" style="background:var(--gray-50,#f6f7f9)">${inner}</td></tr>`;
