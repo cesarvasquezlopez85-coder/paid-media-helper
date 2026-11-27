@@ -1569,6 +1569,12 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_google_ads_pmax_signal_source(parse_qs(parsed.query))
             return
 
+        if path == "/api/google-ads/pmax-video-source":
+            if not self._require_ads_json():
+                return
+            self._handle_google_ads_pmax_video_source(parse_qs(parsed.query))
+            return
+
         if path == "/api/google-ads/pmax-asset-groups":
             if not self._require_ads_json():
                 return
@@ -3913,6 +3919,25 @@ class Handler(SimpleHTTPRequestHandler):
             return
         self._send_json(200, {**data, "simulated": False})
 
+    def _handle_google_ads_pmax_video_source(self, query):
+        # De qué grupo se copiarían los videos a un grupo nuevo de cada campaña PMax indicada (primero la misma campaña y, si no hay, la cuenta). Solo lectura.
+        user = self._get_current_user()
+        customer_id = (query.get("customer_id") or [""])[0].strip()
+        camp_ids = [c.strip() for c in ((query.get("campaign_ids") or [""])[0]).split(",") if c.strip()]
+        if not customer_id.isdigit() or not camp_ids or not all(c.isdigit() for c in camp_ids) or len(camp_ids) > 200:
+            self._send_json(400, {"error": "Faltan o son inválidos los parámetros customer_id y campaign_ids."})
+            return
+        simulated = not google_ads_client.is_configured()
+        if not simulated and not self._user_can_access_account(user, customer_id):
+            self._send_json(403, {"error": "No tienes acceso a esta cuenta de Google Ads."})
+            return
+        try:
+            groups = (google_ads_client.simulated_pmax_video_data if simulated else google_ads_client.fetch_pmax_video_data)(customer_id)
+        except Exception as e:  # noqa: BLE001 — nunca tumbar el server por un error de la API externa
+            self._send_google_ads_error(e)
+            return
+        self._send_json(200, {"campaigns": google_ads_client.pmax_video_sources_public(groups, camp_ids), "simulated": simulated})
+
     def _handle_google_ads_pmax_asset_groups(self, query):
         # Grupos de recursos de las campañas PMax activas de una cuenta, con su estado y si los creó la plataforma.
         user = self._get_current_user()
@@ -4136,6 +4161,8 @@ class Handler(SimpleHTTPRequestHandler):
         except ValueError as e:
             self._send_json(400, {"error": str(e)})
             return
+        # Copiar los videos del grupo con más conversiones solo cuando la persona no escribió ninguno: los suyos mandan.
+        copy_videos = payload.get("copy_videos") is True and not video_ids
         accounts, seen_acc = [], set()
         for acc in raw_accounts:
             acc = acc if isinstance(acc, dict) else {}
@@ -4175,13 +4202,18 @@ class Handler(SimpleHTTPRequestHandler):
                 to_run.append(i)
         fn = google_ads_client.simulated_create_pmax_asset_group if simulated else google_ads_client.create_pmax_asset_group
 
-        def run_one(i, signals):
+        def run_one(i, signals, video_groups=None):
             acc = accounts[i]
             try:
+                # Los videos a copiar salen de la misma campaña y, si ahí no hay, de la cuenta; sin ninguno el grupo se crea sin videos.
+                videos = None
+                if video_groups is not None:
+                    pick = google_ads_client.pick_pmax_video_source(video_groups, acc["campaign_id"])
+                    videos = pick if pick.get("source") else None
                 r = fn(acc["customer_id"], acc["campaign_id"], acc["name"], acc["business_name"], acc["heads"], acc["longs"], acc["descs"],
-                       images, video_ids, validate_only=validate_only, signals=signals)
+                       images, video_ids, validate_only=validate_only, signals=signals, videos=videos)
                 return i, {"customer_id": acc["customer_id"], "ok": True, "campaign_name": r.get("campaign_name"),
-                           "asset_group_id": r.get("asset_group_id"), "url": r.get("url"), "signals": r.get("signals"), "_r": r}
+                           "asset_group_id": r.get("asset_group_id"), "url": r.get("url"), "signals": r.get("signals"), "videos": r.get("videos"), "_r": r}
             except Exception as e:  # noqa: BLE001 — un fallo en una campaña no debe frenar a las demás
                 if not isinstance(e, ValueError):
                     print(f"[google-ads-error] pmax-create {' '.join(str(e).split())[:300]}", flush=True)
@@ -4203,7 +4235,18 @@ class Handler(SimpleHTTPRequestHandler):
                 if not (signals or {}).get("source") or not signals.get("themes") or not signals.get("audience"):
                     msg = "Ningún grupo de la cuenta tiene temas de búsqueda y audiencia que copiar: no se creó el grupo."
                     return [(i, {"customer_id": accounts[i]["customer_id"], "ok": False, "error": msg}) for i in indices]
-            return [run_one(i, signals) for i in indices]
+            video_groups = None
+            if copy_videos:
+                # Una lectura por cuenta (todos sus grupos y videos); cada campaña elige después su origen. Si no se puede leer, no se
+                # crea nada sin avisar: cada campaña de la cuenta falla con el motivo.
+                try:
+                    video_groups = (google_ads_client.simulated_pmax_video_data if simulated else google_ads_client.fetch_pmax_video_data)(accounts[indices[0]]["customer_id"])
+                except Exception as e:  # noqa: BLE001
+                    if not isinstance(e, ValueError):
+                        print(f"[google-ads-error] pmax-video-source {' '.join(str(e).split())[:300]}", flush=True)
+                    msg = "No se pudieron leer los videos de la cuenta: " + google_ads_client.google_error_text(e)
+                    return [(i, {"customer_id": accounts[i]["customer_id"], "ok": False, "error": msg}) for i in indices]
+            return [run_one(i, signals, video_groups) for i in indices]
 
         if to_run:
             by_account = {}
@@ -4219,7 +4262,7 @@ class Handler(SimpleHTTPRequestHandler):
             if r and not validate_only:
                 a = accounts[i]
                 try:
-                    store_pmax_creation(user["id"], a["customer_id"], r, a["name"], a["business_name"], a["heads"], a["longs"], a["descs"], len(images), len(video_ids), res.get("signals"))
+                    store_pmax_creation(user["id"], a["customer_id"], r, a["name"], a["business_name"], a["heads"], a["longs"], a["descs"], len(images), len(video_ids) + int((res.get("videos") or {}).get("count") or 0), res.get("signals"))
                 except Exception as e:  # noqa: BLE001 — el grupo ya quedó en Google Ads; un fallo del registro no debe ocultarlo
                     print(f"[pmax-creation-log] {e}", flush=True)
             out.append(res)

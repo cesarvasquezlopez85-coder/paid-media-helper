@@ -2820,7 +2820,7 @@ def _check_pmax_target(campaigns, campaign_id, group_name, business_name="", ima
     return camp
 
 
-def _pmax_operations(customer_id, campaign_id, name, url, business_name, heads, longs, descs, images, video_ids, brand_guidelines=False, signals=None):
+def _pmax_operations(customer_id, campaign_id, name, url, business_name, heads, longs, descs, images, video_ids, brand_guidelines=False, signals=None, videos=None):
     """Operaciones de UNA petición `googleAds:mutate`: recursos con ID temporal negativo, el grupo y los vínculos."""
     ops, next_id = [], [0]
 
@@ -2856,6 +2856,11 @@ def _pmax_operations(customer_id, campaign_id, name, url, business_name, heads, 
         rn = tmp("assets")
         ops.append({"assetOperation": {"create": {"resourceName": rn, "youtubeVideoAsset": {"youtubeVideoId": vid}}}})
         links.append(("YOUTUBE_VIDEO", rn))
+    # Videos copiados de otro grupo de la cuenta: se vincula el recurso que ya existe (no se crea otro, así no hay duplicados).
+    for v in (videos or {}).get("videos") or []:
+        if not re.fullmatch(rf"customers/{re.escape(str(customer_id))}/assets/\d+", str(v.get("asset") or "")):
+            raise ValueError("Un video a copiar no es de esta cuenta.")
+        links.append(("YOUTUBE_VIDEO", v["asset"]))
     for field, rn in links:
         ops.append({"assetGroupAssetOperation": {"create": {"assetGroup": ag, "asset": rn, "fieldType": field}}})
     # Señales copiadas del grupo con más conversiones de la cuenta: temas de búsqueda y la audiencia (por referencia, es de la misma cuenta).
@@ -2930,19 +2935,94 @@ def fetch_pmax_signal_source(customer_id):
             "themes": g["themes"][:PMAX_MAX_SEARCH_THEMES], "audience": g["audience"]}
 
 
-def create_pmax_asset_group(customer_id, campaign_id, name, business_name, heads, longs, descs, images, video_ids, validate_only=True, signals=None):
+def fetch_pmax_video_data(customer_id):
+    """Los grupos de recursos PMax de la cuenta con sus videos de YouTube activos y sus conversiones (30 días e historial):
+    {asset_group_id: {id, name, campaign_id, campaign_name, active, conv30, val30, conv_all, val_all, videos: [{asset, youtube_id}]}}.
+    Solo lectura. De aquí sale, con pick_pmax_video_source, de qué grupo se copian los videos a uno nuevo."""
+    base = """
+        SELECT asset_group.id, asset_group.name, asset_group.status, campaign.id, campaign.name, campaign.status, metrics.conversions, metrics.conversions_value
+        FROM asset_group
+        WHERE campaign.advertising_channel_type = 'PERFORMANCE_MAX' AND campaign.status != 'REMOVED' AND asset_group.status != 'REMOVED'"""
+    groups = {}
+
+    def collect(rows, tag):
+        for r in rows:
+            ag, m, c = r.get("assetGroup") or {}, r.get("metrics") or {}, r.get("campaign") or {}
+            gid = str(ag.get("id") or "")
+            if not gid.isdigit():
+                continue
+            gr = groups.setdefault(gid, {"id": gid, "name": ag.get("name") or "", "campaign_id": str(c.get("id") or ""), "campaign_name": c.get("name") or "",
+                                         "active": ag.get("status") == "ENABLED" and c.get("status") == "ENABLED",
+                                         "conv30": 0.0, "val30": 0.0, "conv_all": 0.0, "val_all": 0.0, "videos": []})
+            gr["conv" + tag] = float(m.get("conversions") or 0)
+            gr["val" + tag] = float(m.get("conversionsValue") or 0)
+    collect(_search(customer_id, base + " AND segments.date DURING LAST_30_DAYS"), "30")
+    collect(_search(customer_id, base), "_all")
+    rows = _search(customer_id, """
+        SELECT asset_group.id, asset_group_asset.asset, asset_group_asset.status, asset.youtube_video_asset.youtube_video_id
+        FROM asset_group_asset
+        WHERE asset_group_asset.field_type = 'YOUTUBE_VIDEO' AND asset_group_asset.status = 'ENABLED'
+          AND campaign.advertising_channel_type = 'PERFORMANCE_MAX' AND campaign.status != 'REMOVED' AND asset_group.status != 'REMOVED'""")
+    for r in rows:
+        gr = groups.get(str((r.get("assetGroup") or {}).get("id") or ""))
+        asset = (r.get("assetGroupAsset") or {}).get("asset") or ""
+        vid = (((r.get("asset") or {}).get("youtubeVideoAsset")) or {}).get("youtubeVideoId") or ""
+        if gr and asset and all(v["asset"] != asset for v in gr["videos"]):
+            gr["videos"].append({"asset": asset, "youtube_id": vid})
+    return groups
+
+
+def pick_pmax_video_source(groups, campaign_id):
+    """De qué grupo se copian los videos a un grupo nuevo de esta campaña: {source, videos}. Primero la MISMA campaña y, si ahí ningún
+    grupo tiene videos, el resto de la cuenta. En cada ámbito, la escalera: 'conv30' (grupo activo con más conversiones en 30 días),
+    'conv_all' (activo con más conversiones en su historial) y 'any' (cualquiera, el que tenga más videos). Solo cuentan grupos
+    con al menos un video. Sin ninguno, source es None: el grupo se crea igual, sin videos copiados."""
+    campaign_id = str(campaign_id)
+    for scope, pool in (("campaign", [g for g in groups.values() if g["campaign_id"] == campaign_id and g["videos"]]),
+                        ("account", [g for g in groups.values() if g["videos"]])):
+        for criterion, sub, key in (("conv30", [g for g in pool if g["active"] and g["conv30"] > 0], lambda g: (g["conv30"], g["val30"])),
+                                    ("conv_all", [g for g in pool if g["active"] and g["conv_all"] > 0], lambda g: (g["conv_all"], g["val_all"])),
+                                    ("any", pool, lambda g: (len(g["videos"]), g["conv_all"]))):
+            if sub:
+                g = max(sub, key=key)
+                conv = g["conv30"] if criterion == "conv30" else g["conv_all"]
+                return {"source": {"asset_group_id": g["id"], "name": g["name"], "campaign_name": g["campaign_name"], "scope": scope,
+                                   "criterion": criterion, "conversions": round(conv, 2)},
+                        "videos": g["videos"][:PMAX_MAX_VIDEOS]}
+    return {"source": None, "videos": []}
+
+
+def pmax_video_sources_public(groups, campaign_ids):
+    """Lo que ve la pantalla antes de crear: por campaña, el grupo del que se copiarían los videos y los ID de YouTube (sin recursos internos)."""
+    out = {}
+    for cid in campaign_ids:
+        pick = pick_pmax_video_source(groups, cid)
+        out[str(cid)] = {"source": pick["source"], "videos": [v["youtube_id"] for v in pick["videos"]]}
+    return out
+
+
+def create_pmax_asset_group(customer_id, campaign_id, name, business_name, heads, longs, descs, images, video_ids, validate_only=True, signals=None, videos=None):
     """Crea (o solo valida) un grupo de recursos PAUSADO en una campaña Performance Max activa. Devuelve
     {campaign_id, campaign_name, asset_group_id, url}."""
     camps = fetch_pmax_campaigns(customer_id)["campaigns"]
     camp = _check_pmax_target(camps, campaign_id, name, business_name, images)
-    ops = _pmax_operations(customer_id, camp["id"], name, camp["url"], business_name, heads, longs, descs, images, video_ids, camp.get("brand_guidelines", False), signals)
+    videos = None if video_ids else videos  # los videos que escribe la persona mandan sobre los copiados
+    ops = _pmax_operations(customer_id, camp["id"], name, camp["url"], business_name, heads, longs, descs, images, video_ids, camp.get("brand_guidelines", False), signals, videos)
     payload = _post_json(f"{BASE_URL}/customers/{customer_id}/googleAds:mutate", {"mutateOperations": ops, "validateOnly": validate_only}, timeout=120)
     group_id = ""
     for r in payload.get("mutateOperationResponses") or []:
         rn = (r.get("assetGroupResult") or {}).get("resourceName", "")
         if rn:
             group_id = rn.rsplit("/", 1)[-1]
-    return {"campaign_id": camp["id"], "campaign_name": camp["name"], "asset_group_id": group_id, "url": camp["url"], "signals": _signals_summary(signals)}
+    return {"campaign_id": camp["id"], "campaign_name": camp["name"], "asset_group_id": group_id, "url": camp["url"], "signals": _signals_summary(signals),
+            "videos": _videos_summary(videos)}
+
+
+def _videos_summary(videos):
+    """Los videos que se copiaron (o None si no se pidió copiar o no había de dónde): {count, source_name, scope, criterion}."""
+    if not videos or not videos.get("source") or not videos.get("videos"):
+        return None
+    return {"count": len(videos["videos"]), "source_name": videos["source"]["name"], "scope": videos["source"]["scope"], "criterion": videos["source"]["criterion"]}
 
 
 def _signals_summary(signals):
@@ -2986,7 +3066,20 @@ def simulated_pmax_signal_source(customer_id):
     return {"source": None, "themes": [], "audience": ""}
 
 
-def simulated_create_pmax_asset_group(customer_id, campaign_id, name, business_name, heads, longs, descs, images, video_ids, validate_only=True, signals=None):
+def simulated_pmax_video_data(customer_id):
+    """Simulado: en 1111111111 el grupo Evergreen (campaña 9101) tiene 2 videos; las otras campañas de esa cuenta los toman de la cuenta.
+    La otra cuenta no tiene videos en ningún grupo."""
+    if str(customer_id) == "1111111111":
+        return {"910101": {"id": "910101", "name": "Evergreen", "campaign_id": "9101", "campaign_name": "Estelar Hoteles - CO:es - PMAX", "active": True,
+                           "conv30": 42.0, "val30": 9000.0, "conv_all": 80.0, "val_all": 17000.0,
+                           "videos": [{"asset": "customers/1111111111/assets/801", "youtube_id": "dQw4w9WgXcQ"},
+                                      {"asset": "customers/1111111111/assets/802", "youtube_id": "aqz-KE-bpKQ"}]},
+                "910301": {"id": "910301", "name": "Summer", "campaign_id": "9103", "campaign_name": "Estelar Hoteles - US:en - PMAX", "active": True,
+                           "conv30": 0.0, "val30": 0.0, "conv_all": 3.0, "val_all": 500.0, "videos": []}}
+    return {}
+
+
+def simulated_create_pmax_asset_group(customer_id, campaign_id, name, business_name, heads, longs, descs, images, video_ids, validate_only=True, signals=None, videos=None):
     camps = simulated_pmax_campaigns(customer_id)["campaigns"]
     camp = _check_pmax_target(camps, campaign_id, name, business_name, images)
     if any("rechazar" in t.lower() for t in heads):
@@ -2995,7 +3088,7 @@ def simulated_create_pmax_asset_group(customer_id, campaign_id, name, business_n
         _SIMULATED_PMAX_CREATED.setdefault((str(customer_id), camp["id"]), []).append(name)
     return {"campaign_id": camp["id"], "campaign_name": camp["name"],
             "asset_group_id": "" if validate_only else f"7{camp['id']}{len(_SIMULATED_PMAX_CREATED[(str(customer_id), camp['id'])]) - 1}", "url": camp["url"],
-            "signals": _signals_summary(signals)}
+            "signals": _signals_summary(signals), "videos": _videos_summary(None if video_ids else videos)}
 
 
 

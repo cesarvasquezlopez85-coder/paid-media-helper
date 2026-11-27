@@ -17234,7 +17234,7 @@ const PMX_MAX_THEMES = 25;
 const PMX_LIM = { head: [3, 15, 30], long: [1, 5, 90], desc: [2, 5, 90], descShort: 60, biz: 25, name: 128, videos: 5 };
 
 function pmxNewState() {
-  return { name: 'Black Friday - {HOTEL}', business: '{HOTEL}', heads: '', longs: '', descs: '', videos: '', imgMsg: '', campaignFilter: '', copySignals: false,
+  return { name: 'Black Friday - {HOTEL}', business: '{HOTEL}', heads: '', longs: '', descs: '', videos: '', imgMsg: '', campaignFilter: '', copySignals: false, copyVideos: false,
     images: { landscape: [], square: [], portrait: [], logo: [], logo_wide: [] },
     ai: { brief: '', idioma: 'es', status: 'idle', error: '', result: null }, ag: null,
     rows: {}, status: 'idle', excluded: {}, check: null, run: { status: 'idle', error: null, results: {}, applied: false } };
@@ -17367,7 +17367,7 @@ function pmxAccountsPayload(rows) {
 function pmxSignature(rows) {
   const s = state.nuevosAnuncios, p = pmxState();
   const imgs = Object.keys(PMX_IMG).map((k) => p.images[k].map((i) => `${i.name}:${i.data.length}`));
-  return JSON.stringify({ m: s.mcc.selectedId, a: pmxAccountsPayload(rows), i: imgs, v: nutLines(p.videos), c: !!p.copySignals });
+  return JSON.stringify({ m: s.mcc.selectedId, a: pmxAccountsPayload(rows), i: imgs, v: nutLines(p.videos), c: !!p.copySignals, cv: pmxCopyVideosOn() });
 }
 
 function pmxImagesCount() { const p = pmxState(); return Object.keys(PMX_IMG).reduce((n, k) => n + p.images[k].length, 0); }
@@ -17401,7 +17401,7 @@ function pmxRead() {
       .catch((err) => { row.status = 'error'; row.error = err.message || String(err); })
       .then(() => worker());
   };
-  Promise.all([worker(), worker(), worker(), worker()]).then(() => { if (pmxState() !== p) return; p.status = 'ready'; render(); pmxSignalsLoad(); });
+  Promise.all([worker(), worker(), worker(), worker()]).then(() => { if (pmxState() !== p) return; p.status = 'ready'; render(); pmxSignalsLoad(); pmxVideosLoad(); });
 }
 
 function pmxSubmit(validateOnly) {
@@ -17412,7 +17412,12 @@ function pmxSubmit(validateOnly) {
     rows = rows.filter((r) => p.check.okKeys.includes(r.key));
     if (!rows.length || p.check.signature !== pmxSignature(rows)) return;
     const nVid = nutLines(p.videos).length;
-    const msg = p.copySignals
+    const copyVid = pmxCopyVideosOn();
+    const msg = copyVid
+      ? (p.copySignals
+        ? `Se crearán ${rows.length} grupos de recursos PAUSADOS de Performance Max en cuentas del MCC «${s.mcc.selectedName}», cada uno con ${pmxImagesCount()} imágenes, con los temas de búsqueda y la audiencia del grupo con más conversiones de su cuenta y con los videos del grupo con más conversiones de su campaña (o, si no hay, de su cuenta) cuando existan. Después los activas a mano en Google Ads. ¿Continuar?`
+        : `Se crearán ${rows.length} grupos de recursos PAUSADOS de Performance Max en cuentas del MCC «${s.mcc.selectedName}», cada uno con ${pmxImagesCount()} imágenes y con los videos del grupo con más conversiones de su campaña (o, si no hay, de su cuenta) cuando existan. Después los activas a mano en Google Ads. ¿Continuar?`)
+      : p.copySignals
       ? `Se crearán ${rows.length} grupos de recursos PAUSADOS de Performance Max en cuentas del MCC «${s.mcc.selectedName}», cada uno con ${pmxImagesCount()} imágenes y ${nVid} videos, y con los temas de búsqueda y la audiencia del grupo con más conversiones de su cuenta. Después los activas a mano en Google Ads. ¿Continuar?`
       : `Se crearán ${rows.length} grupos de recursos PAUSADOS de Performance Max en cuentas del MCC «${s.mcc.selectedName}», cada uno con ${pmxImagesCount()} imágenes y ${nVid} videos. Después los activas a mano en Google Ads. ¿Continuar?`;
     if (!window.confirm(msg)) return;
@@ -17422,7 +17427,7 @@ function pmxSubmit(validateOnly) {
   render();
   fetch('/api/google-ads/pmax-create', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ validate_only: validateOnly, mcc_id: s.mcc.selectedId, images: pmxImagePayload(), videos: nutLines(p.videos), copy_signals: !!p.copySignals, accounts: pmxAccountsPayload(rows) }),
+    body: JSON.stringify({ validate_only: validateOnly, mcc_id: s.mcc.selectedId, images: pmxImagePayload(), videos: nutLines(p.videos), copy_signals: !!p.copySignals, copy_videos: pmxCopyVideosOn(), accounts: pmxAccountsPayload(rows) }),
   })
     .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
     .then(({ ok, data }) => {
@@ -17490,6 +17495,43 @@ function pmxSignalBlock(accRow) {
   if (sg.status === 'error') return 'No se pudieron leer las señales de la cuenta';
   if (!sg.data || !sg.data.source) return 'Ningún grupo de la cuenta tiene temas de búsqueda y audiencia que copiar';
   return '';
+}
+
+// Los videos que la persona escribe mandan: con alguno escrito, «copiar videos» no se usa.
+function pmxCopyVideosOn() { const p = pmxState(); return !!p.copyVideos && !nutLines(p.videos).length; }
+
+// Con «copiar videos» marcado: por cada cuenta leída se pregunta, para cada una de sus campañas, de qué grupo se copiarían los videos.
+function pmxVideosLoad() {
+  const p = pmxState();
+  if (!p.copyVideos) return;
+  Object.values(p.rows).forEach((acc) => {
+    if (acc.status !== 'ready' || !(acc.campaigns || []).length || (acc.video && acc.video.status !== 'error')) return;
+    acc.video = { status: 'loading', data: null, error: '' };
+    fetch(`/api/google-ads/pmax-video-source?customer_id=${encodeURIComponent(acc.id)}&campaign_ids=${acc.campaigns.map((c) => encodeURIComponent(c.id)).join(',')}`)
+      .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+      .then(({ ok, data }) => {
+        if (!ok) throw new Error(data.error || 'Error desconocido.');
+        acc.video = { status: 'ready', data: data.campaigns || {}, error: '' };
+      })
+      .catch((err) => { acc.video = { status: 'error', data: null, error: err.message || String(err) }; })
+      .then(() => { if (pmxState() === p) render(); });
+  });
+  render();
+}
+
+function pmxVideoCell(acc, camp) {
+  const v = acc.video;
+  if (!v || v.status === 'loading') return '<span class="field-hint">Leyendo los videos…</span>';
+  if (v.status === 'error') return `<span class="field-hint" style="color:var(--color-danger,#b3261e)">${escapeHtml(v.error)}</span>`;
+  const d = (v.data || {})[camp.id];
+  if (!d || !d.source) return '<span class="field-hint">Ningún grupo de la cuenta tiene videos: se crea sin video.</span>';
+  const src = d.source;
+  const how = src.criterion === 'conv30'
+    ? `${escapeHtml(String(src.conversions))} <span>conversiones en 30 días</span>`
+    : (src.criterion === 'conv_all'
+      ? `${escapeHtml(String(src.conversions))} <span>conversiones en su historial (sin conversiones en 30 días)</span>`
+      : '<span>Sin conversiones: el grupo con más videos</span>');
+  return `<span class="field-hint"><span>Copia de:</span> <strong>${escapeHtml(src.name)}</strong><br /><span>${src.scope === 'campaign' ? 'De la misma campaña' : 'De otra campaña de la cuenta'}</span><br />${how}<br /><span>Videos a copiar: ${(d.videos || []).length}</span></span>`;
 }
 
 function pmxNewBatch() {
@@ -17633,8 +17675,11 @@ function pmxResultCell(row) {
   const note = !pmxState().copySignals ? '' : (r.signals
     ? `<br /><span class="field-hint">${r.signals.audience ? `Con ${r.signals.themes} temas de búsqueda y audiencia` : `Con ${r.signals.themes} temas de búsqueda`}</span>`
     : '');
-  if (!pmxState().run.applied) return `<span class="delta-badge good">✓ Google lo validó</span>${note}`;
-  return `<span class="delta-badge good">✓ Creado (pausado)</span>${note}`;
+  const vnote = !pmxCopyVideosOn() ? '' : (r.videos
+    ? `<br /><span class="field-hint">Videos copiados: ${r.videos.count}</span>`
+    : '<br /><span class="field-hint">Sin videos que copiar</span>');
+  if (!pmxState().run.applied) return `<span class="delta-badge good">✓ Google lo validó</span>${note}${vnote}`;
+  return `<span class="delta-badge good">✓ Creado (pausado)</span>${note}${vnote}`;
 }
 
 function renderPmxStepRows() {
@@ -17653,6 +17698,7 @@ function renderPmxStepRows() {
       <td>${r.campaign ? `<input type="text" data-pmx-hotel="${escapeHtml(r.key)}" value="${escapeHtml(r.hotel)}" style="width:170px" />` : ''}</td>
       <td class="field-hint">${r.reason || !r.campaign ? '' : `${r.heads.length} títulos · ${r.longs.length} largos · ${r.descs.length} desc.`}${r.campaign && r.campaign.brand_guidelines ? '<br />Brand Guidelines: negocio y logos de la campaña' : ''}</td>
       ${p.copySignals ? `<td>${r.campaign && i === 0 ? pmxSignalCell(acc) : ''}</td>` : ''}
+      ${pmxCopyVideosOn() ? `<td>${r.campaign ? pmxVideoCell(acc, r.campaign) : ''}</td>` : ''}
       <td>${r.reason ? `<span class="field-hint">${escapeHtml(r.reason)}</span>` : ''}</td>
       <td>${pmxResultCell(r)}</td>
     </tr>`).join('');
@@ -17663,8 +17709,9 @@ function renderPmxStepRows() {
       <div class="field" style="margin:10px 0 6px"><label>Solo campañas cuyo nombre contenga (opcional)</label><input type="text" id="pmx-filter" value="${escapeHtml(p.campaignFilter)}" style="width:240px" placeholder="ej. PMAX" autocomplete="off" /></div>
       <p class="field-hint" style="margin:0 0 6px">Si una cuenta tiene una sola campaña que coincide, se marca sola; si tiene varias, marca las que quieras: cada campaña marcada recibe su propio grupo de recursos pausado. El hotel sale del nombre de la campaña («Hotel - MERCADO:idioma - TIPO») o, si no sigue ese formato, del nombre de la cuenta; puedes corregirlo en cada fila.</p>
       <label style="display:flex;align-items:flex-start;gap:8px;margin:6px 0 10px;font-size:13px;cursor:pointer"><input type="checkbox" id="pmx-copy-signals" ${p.copySignals ? 'checked' : ''} style="margin-top:3px" /><span><strong>Copiar los temas de búsqueda y la audiencia del grupo con más conversiones de la cuenta</strong><br /><span class="field-hint">Se toma el grupo de recursos activo con más conversiones en los últimos 30 días de cada cuenta (si no hay, el de más conversiones en su historial y, si tampoco, el que tenga más temas) y se copian sus temas de búsqueda (hasta ${PMX_MAX_THEMES}) y su audiencia. Solo sirve un grupo que tenga temas y audiencia: si la cuenta no tiene ninguno, no se crea el grupo. El servidor lo vuelve a leer al crear.</span></span></label>
+      <label style="display:flex;align-items:flex-start;gap:8px;margin:6px 0 10px;font-size:13px;cursor:pointer"><input type="checkbox" id="pmx-copy-videos" ${p.copyVideos ? 'checked' : ''} style="margin-top:3px" /><span><strong>Si no escribo videos, copiar los del grupo con más conversiones</strong><br /><span class="field-hint"><span>Con el cuadro de videos de YouTube vacío, cada grupo nuevo recibe los videos del grupo de recursos con más conversiones (en 30 días y, si no hay, en su historial) de su misma campaña que tenga videos; si en esa campaña ninguno tiene, los toma de otro grupo de la cuenta. Si la cuenta no tiene videos, el grupo se crea sin video (Google puede generar uno automático).</span> ${p.copyVideos && nutLines(p.videos).length ? '<strong>Ahora no se usa porque escribiste videos.</strong> ' : ''}<span>El servidor lo vuelve a leer al crear.</span></span></span></label>
       <div class="table-scroll" style="max-height:340px"><table>
-        <thead><tr><th></th><th>Cuenta</th><th>Campaña de Performance Max</th><th>Hotel</th><th>Textos</th>${p.copySignals ? '<th>Señales</th>' : ''}<th>Motivo</th><th>Resultado</th></tr></thead>
+        <thead><tr><th></th><th>Cuenta</th><th>Campaña de Performance Max</th><th>Hotel</th><th>Textos</th>${p.copySignals ? '<th>Señales</th>' : ''}${pmxCopyVideosOn() ? '<th>Videos</th>' : ''}<th>Motivo</th><th>Resultado</th></tr></thead>
         <tbody>${trs}</tbody>
       </table></div>
       ${p.run.status === 'error' ? `<div class="error-panel" style="margin-top:12px">${escapeHtml(p.run.error)}</div>` : ''}
@@ -17711,6 +17758,10 @@ function bindPmx() {
   field('pmx-name', 'name'); field('pmx-business', 'business'); field('pmx-heads', 'heads'); field('pmx-longs', 'longs'); field('pmx-descs', 'descs'); field('pmx-videos', 'videos');
   const cs = document.getElementById('pmx-copy-signals');
   if (cs) cs.addEventListener('change', (e) => { p.copySignals = e.target.checked; pmxResetRun(); if (p.copySignals) pmxSignalsLoad(); else render(); });
+  const cv = document.getElementById('pmx-copy-videos');
+  if (cv) cv.addEventListener('change', (e) => { p.copyVideos = e.target.checked; pmxResetRun(); if (p.copyVideos) pmxVideosLoad(); else render(); });
+  const pv = document.getElementById('pmx-videos');
+  if (pv) pv.addEventListener('change', () => { if (p.copyVideos) { pmxResetRun(); render(); } });
   const f = document.getElementById('pmx-filter');
   if (f) f.addEventListener('change', (e) => { p.campaignFilter = e.target.value; pmxResetRun(); render(); });
   document.querySelectorAll('[data-pmx-sub]').forEach((el) => el.addEventListener('click', () => { state.nuevosAnuncios.pmaxTab = el.dataset.pmxSub; render(); }));
