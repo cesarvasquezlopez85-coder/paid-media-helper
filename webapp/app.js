@@ -11562,19 +11562,40 @@ function loadAdminAiUsage() {
     .catch((err) => { u.status = 'error'; u.error = err.message || String(err); render(); });
 }
 
-function loadAdminGadsUsage() {
+// `silent`: refresco automático o botón «Actualizar» — no vuelve a mostrar «Cargando…» (la tabla no parpadea), conserva el
+// scroll y, si falla, deja los datos que ya había en vez de reemplazarlos por un error.
+function loadAdminGadsUsage(silent) {
   const g = state.admin.gads;
-  g.status = 'loading'; g.error = null;
-  render();
+  if (g.fetching) return;
+  const keepScroll = () => { const y = window.scrollY; render(); window.scrollTo(0, y); };
+  if (!silent || g.status !== 'ready') { g.status = 'loading'; g.error = null; render(); }
+  g.fetching = true;
   fetch(`/api/admin/gads-usage?hours=${g.hours}`)
     .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
-      g.rows = data.rows || []; g.meta = data; g.status = 'ready';
-      render();
+      g.rows = data.rows || []; g.meta = data; g.status = 'ready'; g.updatedAt = new Date();
+      g.fetching = false;
+      keepScroll();
     })
-    .catch((err) => { g.status = 'error'; g.error = err.message || String(err); render(); });
+    .catch((err) => {
+      g.fetching = false;
+      if (silent && g.status === 'ready') return; // se queda con lo último que se pudo leer
+      g.status = 'error'; g.error = err.message || String(err); render();
+    });
 }
+
+// Refresco automático del uso de Google Ads cada 30 s (lo mismo que tarda el servidor en guardar el contador), solo con la
+// pestaña visible: página Administración, pestaña «Uso de Google Ads» y ventana en primer plano. Solo lee la base propia.
+const GADS_USAGE_REFRESH_MS = 30000;
+setInterval(() => {
+  try {
+    if (typeof currentUser === 'undefined' || !currentUser || !currentUser.isSuperAdmin) return;
+    if (state.page !== 'administracion' || state.admin.tab !== 'gads' || document.hidden) return;
+    if (state.admin.gads.status !== 'ready') return;
+    loadAdminGadsUsage(true);
+  } catch (e) { /* un fallo del refresco nunca debe afectar a la pantalla */ }
+}, GADS_USAGE_REFRESH_MS);
 
 // Nombre de la sección a partir de la ruta /api/... que provocó la llamada a Google Ads (el servidor guarda la ruta).
 function gadsSectionLabel(feature) {
@@ -11630,7 +11651,11 @@ function renderAdminGadsUsage() {
   const head = `
     <div class="table-panel-head">
       <h3>Uso de la API de Google Ads</h3>
-      <div class="seg-control">${periodButtons}</div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        ${g.updatedAt ? `<span class="footnote" style="margin:0"><span>Actualizado</span> ${g.updatedAt.toLocaleTimeString(dateLocale(), { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>` : ''}
+        <button class="btn-outline xs" data-action="admin-gads-usage-refresh">Actualizar</button>
+        <div class="seg-control">${periodButtons}</div>
+      </div>
     </div>`;
   if (g.status === 'loading' || g.status === 'idle') {
     return `<div class="card table-panel" style="margin-bottom:16px">${head}<div class="state-panel loading"><div class="spinner"></div><p>Cargando el uso…</p></div></div>`;
@@ -11691,7 +11716,7 @@ function renderAdminGadsUsage() {
         ${panel('Por tipo', 'Tipo', tableRows(byKind, (k) => GADS_KIND_LABELS[k] || k))}
         ${panel('Por hora (Colombia)', 'Hora', tableRows(byHour, (k) => k + ' h'))}
       </div>
-      <p class="footnote" style="margin-top:12px">Es lo que envía esta plataforma a Google Ads desde que se activó el contador (hora de Colombia; el día de cuota de Google corre con hora del Pacífico). «Operaciones» cuenta cada consulta como una y, en un cambio, las del lote. No incluye lo que gaste otra herramienta que use el mismo developer token, y no equivale exactamente a lo que Google descuenta de la cuota. «429» son las respuestas con las que Google rechazó la solicitud; «Bloqueadas» son lecturas que la plataforma ni envió porque Google acababa de pedir esperar. Se guardan 30 días y se actualiza cada 30 segundos.</p>
+      <p class="footnote" style="margin-top:12px">Es lo que envía esta plataforma a Google Ads desde que se activó el contador (hora de Colombia; el día de cuota de Google corre con hora del Pacífico). «Operaciones» cuenta cada consulta como una y, en un cambio, las del lote. No incluye lo que gaste otra herramienta que use el mismo developer token, y no equivale exactamente a lo que Google descuenta de la cuota. «429» son las respuestas con las que Google rechazó la solicitud; «Bloqueadas» son lecturas que la plataforma ni envió porque Google acababa de pedir esperar. Se guardan 30 días y la pantalla se actualiza sola cada 30 segundos (o con «Actualizar»).</p>
     </div>`;
 }
 
@@ -21107,6 +21132,7 @@ function handleAction(action) {
     case 'admin-tab-usuarios': setAdminTab('usuarios'); break;
     case 'admin-tab-gads': setAdminTab('gads'); break;
     case 'admin-tab-ia': setAdminTab('ia'); break;
+    case 'admin-gads-usage-refresh': loadAdminGadsUsage(true); break;
     case 'admin-gads-usage-24': state.admin.gads.hours = 24; loadAdminGadsUsage(); break;
     case 'admin-gads-usage-72': state.admin.gads.hours = 72; loadAdminGadsUsage(); break;
     case 'admin-gads-usage-168': state.admin.gads.hours = 168; loadAdminGadsUsage(); break;
