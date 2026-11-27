@@ -92,9 +92,74 @@ def _get_access_token():
     return _token_cache["access_token"]
 
 
+# --- Cuota de la API (429 RESOURCE_EXHAUSTED) ---------------------------------------------------------------------------
+# Cuando Google agota la cuota (p. ej. el tope diario de operaciones del acceso Básico, que es del developer token y
+# vale para TODAS las secciones), cada consulta que se sigue enviando falla igual y además gasta una petición. Se guarda
+# lo que Google dice (retryDelay): las lecturas (`_search`) no se envían mientras dure el bloqueo local y el mensaje que
+# ve la persona dice cuánto falta. El bloqueo local es corto (máx. QUOTA_PROBE_SECONDS): pasado ese tiempo la siguiente
+# lectura vuelve a preguntarle a Google, así que si la cuota se libera antes la plataforma se recupera sola. Las
+# escrituras no se bloquean aquí (son pocas y de una persona): llegan a Google y reciben el mismo mensaje claro.
+QUOTA_PROBE_SECONDS = 900
+_QUOTA = {"blocked_until": 0.0, "reset_at": 0.0}
+
+
+class QuotaExhausted(RuntimeError):
+    """Lectura no enviada porque Google ya dijo que la cuota está agotada. El texto empieza igual que un 429 de Google
+    («Google Ads API respondió 429»), para que lo traten igual los manejadores de errores que ya existen."""
+
+
+def _quota_retry_seconds(detail):
+    """Segundos que Google pide esperar en un error de cuota (`quotaError`), o None si el texto no es de cuota."""
+    text = str(detail or "")
+    if "respondió 429" not in text or "quotaError" not in text:
+        return None
+    m = re.search(r'"retryDelay":\s*"(\d+)s"', text) or re.search(r"Retry in (\d+) seconds", text)
+    return int(m.group(1)) if m else 0
+
+
+def note_quota_error(detail):
+    """Registra un error de cuota de Google (texto de la excepción). Devuelve True si lo era."""
+    if "[bloqueo local]" in str(detail):
+        return True  # lectura que no se envió: el estado ya estaba guardado
+    secs = _quota_retry_seconds(detail)
+    if secs is None:
+        return False
+    now = time.time()
+    if secs > 0:
+        _QUOTA["reset_at"] = now + secs
+        _QUOTA["blocked_until"] = now + min(secs, QUOTA_PROBE_SECONDS)
+    return True
+
+
+def quota_wait_message():
+    """Mensaje para la persona sobre la cuota agotada, con el tiempo que falta; None si no hay una cuota agotada vigente."""
+    secs = int(_QUOTA["reset_at"] - time.time())
+    if secs <= 0:
+        return None
+    if secs >= 3600:
+        return (f"Google Ads agotó la cuota diaria de solicitudes de la plataforma. Se libera en aproximadamente {max(1, round(secs / 3600))} h; "
+                "mientras tanto no se puede consultar ni cambiar nada en Google Ads.")
+    if secs >= 120:
+        return f"Google Ads está limitando las solicitudes ahora mismo. Intenta de nuevo en unos {round(secs / 60)} min."
+    return f"Google Ads está limitando las solicitudes ahora mismo. Intenta de nuevo en unos {max(5, secs)} s."
+
+
+def quota_message_for(detail):
+    """Si el texto de un error es de cuota agotada, lo registra y devuelve el mensaje claro; si no, None."""
+    if not note_quota_error(detail):
+        return None
+    return quota_wait_message()
+
+
+def _raise_if_quota_blocked():
+    if time.time() < _QUOTA["blocked_until"]:
+        raise QuotaExhausted(f"Google Ads API respondió 429: {quota_wait_message() or 'cuota agotada'} [bloqueo local]")
+
+
 def _search(customer_id, query):
     """Ejecuta una consulta GAQL contra `customer_id` y junta todas las
     páginas de resultados de googleAds:search."""
+    _raise_if_quota_blocked()
     url = f"{BASE_URL}/customers/{customer_id}/googleAds:search"
     headers = _auth_headers()
     results = []
@@ -115,6 +180,8 @@ def _search(customer_id, query):
                 payload = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", errors="replace")
+            if e.code == 429:
+                note_quota_error(f"Google Ads API respondió 429: {detail}")
             raise RuntimeError(f"Google Ads API respondió {e.code}: {detail}") from e
         except urllib.error.URLError as e:
             raise RuntimeError(f"No se pudo conectar a la API de Google Ads: {e.reason}") from e
@@ -365,6 +432,25 @@ def fetch_campaign_rows(customer_id, date_from, date_to, only_active=False):
     return rows
 
 
+# Caché corta del ritmo del mes en curso (gasto del mes y objetivo de Billing): abrir Ritmo de consumo consulta todas las
+# cuentas vigiladas y cada recarga repetía las mismas consultas. Solo guarda lecturas exitosas; vence a los 10 minutos y
+# al cambiar el día. El ritmo no depende del presupuesto diario de las campañas, así que las escrituras no lo invalidan.
+PACING_CACHE_SECONDS = 600
+_PACING_CACHE = {}
+
+
+def _pacing_cache_get(kind, customer_id, today):
+    hit = _PACING_CACHE.get((kind, str(customer_id)))
+    if hit and hit[0] == today and time.time() - hit[1] < PACING_CACHE_SECONDS:
+        return dict(hit[2])
+    return None
+
+
+def _pacing_cache_put(kind, customer_id, today, result):
+    _PACING_CACHE[(kind, str(customer_id))] = (today, time.time(), dict(result))
+    return result
+
+
 def fetch_account_pacing(customer_id, month_from=None, month_to=None):
     """Ritmo de consumo del mes en curso para una cuenta: el objetivo
     mensual sale de Billing > Presupuestos de cuenta (account_budget).
@@ -393,18 +479,22 @@ def fetch_account_pacing(customer_id, month_from=None, month_to=None):
     days_in_month = calendar.monthrange(today.year, today.month)[1]
     end_of_today = f"{today.isoformat()} 23:59:59"
 
+    cached = _pacing_cache_get("full", customer_id, today)
+    if cached is not None:
+        return cached
+
     campaign_rows = fetch_campaign_rows(customer_id, month_start.isoformat(), today.isoformat())
     spend_mtd = sum((r.get("cost") or 0) for r in campaign_rows)
 
     monthly_target = _account_budget_target(_account_budget_rows(customer_id, end_of_today, None), end_of_today)
 
-    return {
+    return _pacing_cache_put("full", customer_id, today, {
         "spend_mtd": spend_mtd,
         "monthly_target": monthly_target,
         "days_elapsed": today.day,
         "days_in_month": days_in_month,
         "is_complete": False,
-    }
+    })
 
 
 def _month_iter(first, last):
@@ -1443,6 +1533,9 @@ def fetch_account_pacing_light(customer_id):
     eliminadas y objetivo de Billing > Presupuestos de cuenta), pero en dos consultas livianas: sin traer las filas completas
     de campañas. Devuelve la misma forma que fetch_account_pacing para un solo mes."""
     today = datetime.date.today()
+    cached = _pacing_cache_get("light", customer_id, today)
+    if cached is not None:
+        return cached
     month_start = today.replace(day=1)
     end_of_today = f"{today.isoformat()} 23:59:59"
     spend = 0.0
@@ -1453,13 +1546,13 @@ def fetch_account_pacing_light(customer_id):
           AND campaign.status != 'REMOVED'
     """):
         spend += _micros_to_units(_int_or_none(r.get("metrics", {}).get("costMicros"))) or 0
-    return {
+    return _pacing_cache_put("light", customer_id, today, {
         "spend_mtd": spend,
         "monthly_target": _account_budget_target(_account_budget_rows(customer_id, end_of_today, None), end_of_today),
         "days_elapsed": today.day,
         "days_in_month": calendar.monthrange(today.year, today.month)[1],
         "is_complete": False,
-    }
+    })
 
 
 def fetch_campaign_windows(customer_id, windows=(7, 14, 30)):
@@ -2080,6 +2173,9 @@ def google_error_text(exc, limit=260):
     detail = str(exc)
     if isinstance(exc, ValueError):
         return detail[:limit]
+    quota = quota_message_for(detail)
+    if quota:
+        return quota[:limit]
     match = re.search(r"respondió \d{3}: (\{.*\})", detail, re.S)
     messages = []
     if match:

@@ -2852,9 +2852,13 @@ class Handler(SimpleHTTPRequestHandler):
 
         simulated = not google_ads_client.is_configured()
         rows = []
+        quota_msg = None  # si Google agotó la cuota, el resto de las cuentas ni se consulta: llevaría el mismo error
         for w in watched:
             customer_id = w["customer_id"]
             name = w["account_name"] or f"Cuenta {customer_id}"
+            if quota_msg:
+                rows.append({"customer_id": customer_id, "account_name": name, "error": quota_msg})
+                continue
             try:
                 if simulated:
                     pacing = google_ads_client.simulated_account_pacing(customer_id, month_from, month_to)
@@ -2870,6 +2874,11 @@ class Handler(SimpleHTTPRequestHandler):
                 rows.append({"customer_id": customer_id, "account_name": name, "error": None, **pacing,
                              "currency": "USD" if simulated else google_ads_client.fetch_customer_currency(customer_id)})
             except Exception as e:  # noqa: BLE001 — una cuenta con error no debe tumbar el resto del tablero
+                quota_msg = google_ads_client.quota_message_for(str(e))
+                if quota_msg:
+                    print("[pacing-error] cuota de Google agotada: se dejan de consultar las demás cuentas vigiladas.", flush=True)
+                    rows.append({"customer_id": customer_id, "account_name": name, "error": quota_msg})
+                    continue
                 print(f"[pacing-error] customer_id={customer_id} {' '.join(str(e).split())}", flush=True)
                 rows.append({
                     "customer_id": customer_id, "account_name": name,
@@ -6523,7 +6532,8 @@ class Handler(SimpleHTTPRequestHandler):
         elif status == "404":
             message = "No se encontró la cuenta o campaña indicada."
         elif status == "429":
-            message = "Google Ads está limitando las solicitudes ahora mismo — espera un momento e intenta de nuevo."
+            message = (google_ads_client.quota_message_for(detail)
+                       or "Google Ads está limitando las solicitudes ahora mismo — espera un momento e intenta de nuevo.")
         elif status and status.startswith("5"):
             message = "Google Ads tuvo un problema temporal — intenta de nuevo en unos minutos."
         else:
