@@ -6,6 +6,9 @@ Versión corta de `Guia_colaborador.md`. Marca cada punto al terminarlo. Sin cla
 Git, Railway y la memoria ya funcionan en ese computador; el cambio de cuenta de Claude no los toca. Solo hace falta:
 - [ ] Cerrar sesión en Claude Code y entrar con la otra cuenta (`/login`), o separar la configuración con `CLAUDE_CONFIG_DIR` si quieres alternar sin cerrar sesión (en ese caso hay que copiar la memoria).
 - [ ] Abrir la misma carpeta y comprobar que Claude conoce las reglas del proyecto.
+- [ ] Comprobar que la memoria se cargó (misma carpeta y mismo usuario del sistema): preguntar «¿qué sabes de la cuota de Google Ads?». Si no lo sabe, la memoria no está en la carpeta que corresponde (ver `Guia_colaborador.md`, sección 2b).
+- [ ] Revisar plugins, skills y conectores de la cuenta nueva (pertenecen a la cuenta, no al proyecto) y aprobar de nuevo los permisos (`.claude/settings.local.json` no viaja).
+- [ ] Las conversaciones anteriores pueden seguir listadas con `claude --resume` en el mismo computador, pero no está garantizado; no depender de ello.
 - [ ] Mantener el `git config user.email` actual: el repositorio es público y el correo del autor queda visible en el historial.
 - [ ] Aclarar la política de datos de la empresa (ver abajo).
 
@@ -30,7 +33,14 @@ Lo demás de esta lista aplica solo si el trabajo pasa a otro computador o a otr
 - [ ] Prueba: preguntarle por las reglas de commit del proyecto; debe decir que pregunta antes del commit y usa rutas concretas en `git add`.
 
 ## Memoria (solo si es otro computador)
-- [ ] Carpeta `memory/` copiada a la ruta equivalente de `~/.claude/projects/`. No va al repositorio.
+- [ ] Carpeta `memory/` copiada a la carpeta de `~/.claude/projects/` que lleva el nombre de la ruta nueva del proyecto (la memoria se busca por la ruta: otra ruta, otro usuario del sistema u otro computador = memoria vacía hasta copiarla). Si usas `CLAUDE_CONFIG_DIR`, copiarla dentro de esa carpeta de configuración. No va al repositorio.
+- [ ] Preguntas de comprobación hechas: reglas de commit, estado actual y pendientes (`roadmap.md`), cuota de Google Ads.
+
+## Solo si también cambia la propiedad del repositorio o de Railway
+Es una operación aparte, no probada en este proyecto (ver `Guia_colaborador.md`, sección 2c). Cambiar de cuenta de Claude no la necesita.
+- [ ] Respaldo de la base de datos (volumen `/data`) y variables de entorno guardadas en un gestor de contraseñas, fuera del repositorio.
+- [ ] Repositorio y proyecto de Railway movidos juntos; despliegue automático desde `main` comprobado; dirección `paid-media-helper.up.railway.app` sin cambios (si cambia, actualizar enlaces).
+- [ ] Prueba de humo sin sesión (401 o 403, no 500) y revisión de accesos.
 
 ## Servidor de prueba
 - [ ] Servidor simulado con `DATA_DIR` aislado arrancado en un puerto distinto de 8642 (el comando está en `CLAUDE.md`).

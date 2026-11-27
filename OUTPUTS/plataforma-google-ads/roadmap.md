@@ -1,6 +1,30 @@
 # Roadmap: Plataforma de Análisis de Google Ads
 Fecha: 2026-07-12
 
+## Estado al 2026-11-27 y pendientes
+
+Es la foto más reciente. Las secciones de abajo (V4, V3, V2…) son historia y conservan sus fechas. El detalle de cada función está en `Resumen_Proyecto.md`.
+
+**Construido y en producción desde el 2026-11-13** (todo verificado por la persona dueña salvo lo señalado en «Pendientes»):
+- **Campañas abierta a todos** (2026-11-18, con pausar, activar y presupuesto), con «Dónde invertir» (7/14/30 días, ROAS, CPA %, veredicto, flechas de orden y botón Proyectar) y la evolución de keywords.
+- **Idioma español/inglés** (solo super admin): interruptor, traducción central por diccionario y la IA que responde en el idioma elegido.
+- **Anuncios nuevos** (Función 19; administradores desde 2026-11-23): anuncios adaptables pausados por plantilla en hasta 40 cuentas de un MCC, activar/pausar/eliminar/etiquetar por etiqueta (a mano y programado), hotel e idioma a mano cuando el nombre de la campaña no los trae, y **Performance Max** (grupos de recursos pausados, textos con IA, copiar temas, audiencia y videos, activar/pausar/programar y fotos de grupos).
+- **Cuota de Google Ads:** aviso claro con el tiempo de espera, bloqueo local de lecturas, reintentos del programador, **contador de uso por sección, usuario y hora** y Administración en tres pestañas (Usuarios y accesos, Uso de Google Ads, Uso de la IA; las dos de uso solo para super admin). Ritmo de consumo hace una consulta de gasto por cuenta, con caché de 30 min y botón «Actualizar».
+
+**Decisiones tomadas**
+- Ninguna función se abre a más usuarios sin consultar; Hoteles, Audiencias, la pestaña «Con IA» de Negativización y el idioma siguen solo para super admin.
+- Performance Max: un grupo de recursos nuevo no se crea si no puede copiar temas y audiencia (cuando la casilla está marcada).
+- Guardar la última lectura de Ritmo de consumo en la base de datos: **en espera** hasta mirar el panel de uso unos días.
+
+**Pendientes**
+1. Pedir acceso **Estándar** a la API de Google Ads (la cuota Básica se agotó el 26 y el 27 de noviembre).
+2. Verificar en producción, en el próximo 429, el aviso, el bloqueo local y los reintentos del programador; reprogramar las programaciones que fallaron.
+3. Notas «verificado en producción» de Performance Max (fotos de grupos, subpestañas, varias campañas, copiar temas y audiencia, textos con IA).
+4. Prueba real de creación de grupos de recursos de Performance Max (con visto bueno explícito y cuenta de prueba).
+5. Conexiones de solo lectura (GA4, Tag Manager, Search Console, BigQuery): ejecutar la autorización.
+6. Los pendientes de la lista del 2026-10-20 que no estén tachados siguen vigentes (Auditoría, Hoteles, Audiencias, dominio propio, pruebas con datos reales).
+7. Documentación de traspaso: `Guia_colaborador.md` y `Checklist_colaborador.md` explican cómo seguir desde otra cuenta de Claude o computador.
+
 ## Versión: V4 (2026-11-03)
 La app está en V4 — el sidebar ya lo dice. Las novedades de la V4 (diseño Roiba para todos, 66 reglas en la auditoría, más herramientas de IA Max, análisis con IA para todos y copys con IA) están en `Resumen_Proyecto.md`, sección "Versión V4". Lo que sigue es el detalle de la V3:
 
@@ -208,6 +232,8 @@ Con las cuentas reales validadas y la app ya en producción (Railway), esto es l
 
 ## Pendientes consolidados (2026-10-20)
 
+*Lista del 2026-10-20, con lo tachado hasta el 2026-11-06. Para lo posterior (cuota de Google Ads, Anuncios nuevos, Performance Max, idioma) ver «Estado al 2026-11-27 y pendientes» al inicio.*
+
 Lista única de lo que falta, agrupada por tipo. Lo construido y validado está en "Ya construido y validado" más arriba.
 
 ### Funciones nuevas por construir
@@ -273,3 +299,5 @@ Pendiente más reciente (2026-08-11 en adelante): decidir si el análisis con IA
 **Pendiente más reciente (2026-10-06, Funciones 10-13):** seguir usando Ritmo de consumo con más cuentas vigiladas a la vez para confirmar con cesar si el margen de tolerancia del semáforo (±10%) es el que quiere mantener. Ya probado por cesar contra cuentas reales (2026-10-08): el toggle de AI Max (Función 10) y la escritura real de presupuesto diario por campaña (Función 13).
 
 **Pendiente más reciente (2026-10-14, V3):** probar la Auditoría de cuenta con 3 o 4 hoteles que cesar conozca bien y ajustar umbrales; decidir sobre el puntaje ponderado por área, las metas por campaña y las reglas aún sin construir (ver `Resumen_Proyecto.md`, Función 14); decidir si el rediseño Roiback se publica tal cual o con un interruptor de tema; configurar BigQuery; y sumar las conexiones por API de Google Analytics, Meta y Google Tag Manager. El 2026-10-16 hay recordatorio para revisar Railway, la cuota de Google Ads y los accesos cuando la plataforma empiece a tener usuarios.
+
+**Pendiente más reciente (2026-11-27):** ver «Estado al 2026-11-27 y pendientes» al inicio de este archivo; lo primero es pedir el acceso Estándar a la API de Google Ads y verificar en producción el aviso de cuota y los reintentos del programador cuando vuelva a haber un 429.

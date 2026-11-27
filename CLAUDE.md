@@ -26,10 +26,13 @@ Herramienta interna de una agencia de hoteles para analizar y operar cuentas de 
 - `claude_client.py`, `negativos_ia.py`, `hoteles_ia.py`: llamadas a Claude y validación con código de lo que propone la IA (la IA propone, el código valida).
 - `bigquery_client.py`: solo lectura, con tope de bytes por consulta.
 - Documentación completa y al día: `OUTPUTS/plataforma-google-ads/Resumen_Proyecto.md` (lee primero «Qué es», «Cómo corre la plataforma, y el login» y la función que vayas a tocar) y `roadmap.md`.
+- Para retomar el proyecto (nueva sesión, otra cuenta de Claude u otro computador): `Resumen_Proyecto.md` → «Cómo retomar el proyecto (lectura en orden)»; la foto más reciente de lo hecho, lo decidido y lo pendiente está en `roadmap.md` → «Estado al 2026-11-27 y pendientes»; el traspaso de cuenta está en `Guia_colaborador.md` y `Checklist_colaborador.md` (misma carpeta). La memoria de Claude es local y **no** viaja con el repositorio: ver esa guía.
 
 ## Roles y secciones restringidas
 
 Hay usuarios normales, administradores (`PMH_ADMIN_USERNAMES`) y super admin (`PMH_SUPER_ADMIN_USERNAMES`). Cada usuario no administrador solo accede a las cuentas de Google Ads que un administrador le asigna. Hoteles, Audiencias y la pestaña «Con IA» de Negativización son solo para super admin: el servidor responde 403 a cualquiera más, no solo se oculta el menú. **Anuncios nuevos** (todas sus pestañas, la IA de textos, las programaciones, las fotos y las plantillas) está abierta a **administradores y super admins** desde 2026-11-23 (decisión de la persona dueña; `_require_ads_json` en `server.py`, 403 a los usuarios normales; los administradores ya acceden a todas las cuentas); antes era solo super admin. No la abras a usuarios normales sin consultar. Campañas la ve y usa todo usuario con sesión, también pausar, activar y ajustar presupuesto; cada consulta y cada escritura valida el acceso a la cuenta. El rol se sincroniza con las variables de entorno **solo al arrancar el servidor**.
+
+**Administración** tiene tres pestañas: «Usuarios y accesos» (administradores), y «Uso de Google Ads» y «Uso de la IA», solo para super admin (el servidor responde 403 en `/api/admin/gads-usage` y en el consumo de la IA a cualquiera más). Un administrador no super admin ve solo usuarios y accesos, sin barra de pestañas.
 
 ## Escrituras reales en cuentas de clientes
 
@@ -75,4 +78,4 @@ La plataforma modifica cuentas reales (presupuesto diario, ROAS objetivo, AI Max
 
 ## Lo que queda pendiente
 
-Consulta `roadmap.md`. Cuando termines una función, actualiza `Resumen_Proyecto.md` (una entrada en las novedades y el detalle en la función correspondiente).
+Consulta `roadmap.md` (empieza por «Estado al 2026-11-27 y pendientes»; si ya pasó mucho tiempo, actualiza esa sección con la fecha nueva). Cuando termines una función, actualiza `Resumen_Proyecto.md` (una entrada en las novedades y el detalle en la función correspondiente).
