@@ -562,26 +562,74 @@ def fetch_campaign_rows(customer_id, date_from, date_to, only_active=False):
     return rows
 
 
-# Caché corta del ritmo del mes en curso (gasto del mes y objetivo de Billing): abrir Ritmo de consumo consulta todas las
-# cuentas vigiladas y cada recarga repetía las mismas consultas. Solo guarda lecturas exitosas; vence a los 10 minutos y
-# al cambiar el día. El ritmo no depende del presupuesto diario de las campañas, así que las escrituras no lo invalidan.
-PACING_CACHE_SECONDS = 600
+# Cachés del ritmo del mes en curso. Abrir Ritmo de consumo consulta todas las cuentas vigiladas y cada recarga repetía las
+# mismas consultas, que gastan la cuota diaria del developer token (compartida con todas las secciones).
+#  · Ritmo (gasto del mes + objetivo): 30 minutos, solo lecturas exitosas, vence al cambiar el día. Cada resultado lleva
+#    `fetched_at` (hora de la lectura) para que la pantalla diga de hace cuánto son los datos. El botón «Actualizar» fuerza
+#    una lectura nueva (`force=True`), pero no más de una por minuto y cuenta (`PACING_FORCE_MIN_SECONDS`).
+#  · Objetivo de Billing: todo el día (el presupuesto de cuenta se arma por mes y casi nunca cambia a media jornada); un
+#    cambio hecho en Billing se ve al día siguiente o con «Actualizar».
+# El ritmo no depende del presupuesto diario de las campañas, así que las escrituras no lo invalidan.
+PACING_CACHE_SECONDS = 1800
+PACING_FORCE_MIN_SECONDS = 60
 _PACING_CACHE = {}
+_BUDGET_CACHE = {}
 
 
-def _pacing_cache_get(kind, customer_id, today):
+def _pacing_cache_get(kind, customer_id, today, max_age=None):
     hit = _PACING_CACHE.get((kind, str(customer_id)))
-    if hit and hit[0] == today and time.time() - hit[1] < PACING_CACHE_SECONDS:
+    if hit and hit[0] == today and time.time() - hit[1] < (PACING_CACHE_SECONDS if max_age is None else max_age):
         return dict(hit[2])
     return None
 
 
 def _pacing_cache_put(kind, customer_id, today, result):
+    result = {**result, "fetched_at": int(time.time())}
     _PACING_CACHE[(kind, str(customer_id))] = (today, time.time(), dict(result))
     return result
 
 
-def fetch_account_pacing(customer_id, month_from=None, month_to=None):
+def _month_budget_target(customer_id, today, force=False):
+    """Objetivo mensual de Billing vigente hoy (None si no hay uno con límite), con caché de todo el día."""
+    if not force:
+        hit = _BUDGET_CACHE.get(str(customer_id))
+        if hit and hit[0] == today:
+            return hit[1]
+    end_of_today = f"{today.isoformat()} 23:59:59"
+    target = _account_budget_target(_account_budget_rows(customer_id, end_of_today, None), end_of_today)
+    _BUDGET_CACHE[str(customer_id)] = (today, target)
+    return target
+
+
+def _fetch_month_pacing(customer_id, today, force=False):
+    """Ritmo del mes en curso de una cuenta con el mínimo de consultas: UNA de gasto (que de paso trae la moneda de la
+    cuenta y la deja en caché) y el objetivo de Billing (en caché todo el día). Mismas cifras que sumar `cost` de
+    fetch_campaign_rows: el filtro de campañas es el mismo (no eliminadas); se verificó en cuentas reales."""
+    cached = _pacing_cache_get("month", customer_id, today, PACING_FORCE_MIN_SECONDS if force else None)
+    if cached is not None:
+        return cached
+    month_start = today.replace(day=1)
+    spend = 0.0
+    for r in _search(customer_id, f"""
+        SELECT customer.currency_code, campaign.id, metrics.cost_micros
+        FROM campaign
+        WHERE segments.date BETWEEN '{month_start.isoformat()}' AND '{today.isoformat()}'
+          AND campaign.status != 'REMOVED'
+    """):
+        spend += _micros_to_units(_int_or_none(r.get("metrics", {}).get("costMicros"))) or 0
+        code = r.get("customer", {}).get("currencyCode")
+        if code:
+            _CURRENCY_CACHE[str(customer_id)] = code
+    return _pacing_cache_put("month", customer_id, today, {
+        "spend_mtd": spend,
+        "monthly_target": _month_budget_target(customer_id, today, force),
+        "days_elapsed": today.day,
+        "days_in_month": calendar.monthrange(today.year, today.month)[1],
+        "is_complete": False,
+    })
+
+
+def fetch_account_pacing(customer_id, month_from=None, month_to=None, force=False):
     """Ritmo de consumo del mes en curso para una cuenta: el objetivo
     mensual sale de Billing > Presupuestos de cuenta (account_budget).
 
@@ -594,37 +642,19 @@ def fetch_account_pacing(customer_id, month_from=None, month_to=None):
     automático sin límite) o su tipo es INFINITE, monthly_target queda en
     None y el frontend lo muestra como "sin objetivo" en vez de semáforo.
 
-    El gasto a la fecha se calcula sumando el mismo campo "cost" que ya usa
-    Rendimiento (vía fetch_campaign_rows) para el mes en curso, en vez de
-    usar account_budget.amount_served_micros — así el número siempre
-    coincide con lo que el resto de la plataforma ya le muestra al usuario,
-    y no depende de qué tan al día esté Google con el prorrateo de la
-    facturación."""
+    El gasto a la fecha se calcula sumando el mismo costo de campañas no eliminadas que usa
+    Rendimiento (`campaign.status != 'REMOVED'`) para el mes en curso, en vez de
+    usar account_budget.amount_served_micros — así el número coincide con lo que
+    el resto de la plataforma le muestra a la persona, y no depende de qué tan
+    al día esté Google con el prorrateo de la facturación. El mes en curso sale
+    de `_fetch_month_pacing` (una consulta de gasto + objetivo en caché);
+    `force=True` salta las cachés (botón «Actualizar», máx. una vez por minuto)."""
     today = datetime.date.today()
     cur = (today.year, today.month)
     if month_from is not None and not (month_from == cur and month_to == cur):
         return _fetch_pacing_range(customer_id, month_from, month_to, today)
 
-    month_start = today.replace(day=1)
-    days_in_month = calendar.monthrange(today.year, today.month)[1]
-    end_of_today = f"{today.isoformat()} 23:59:59"
-
-    cached = _pacing_cache_get("full", customer_id, today)
-    if cached is not None:
-        return cached
-
-    campaign_rows = fetch_campaign_rows(customer_id, month_start.isoformat(), today.isoformat())
-    spend_mtd = sum((r.get("cost") or 0) for r in campaign_rows)
-
-    monthly_target = _account_budget_target(_account_budget_rows(customer_id, end_of_today, None), end_of_today)
-
-    return _pacing_cache_put("full", customer_id, today, {
-        "spend_mtd": spend_mtd,
-        "monthly_target": monthly_target,
-        "days_elapsed": today.day,
-        "days_in_month": days_in_month,
-        "is_complete": False,
-    })
+    return _fetch_month_pacing(customer_id, today, force)
 
 
 def _month_iter(first, last):
@@ -1659,30 +1689,9 @@ def _audience_ref(crit):
 
 
 def fetch_account_pacing_light(customer_id):
-    """Ritmo del mes en curso de una cuenta, con las mismas cifras que Ritmo de consumo (gasto del mes de las campañas no
-    eliminadas y objetivo de Billing > Presupuestos de cuenta), pero en dos consultas livianas: sin traer las filas completas
-    de campañas. Devuelve la misma forma que fetch_account_pacing para un solo mes."""
-    today = datetime.date.today()
-    cached = _pacing_cache_get("light", customer_id, today)
-    if cached is not None:
-        return cached
-    month_start = today.replace(day=1)
-    end_of_today = f"{today.isoformat()} 23:59:59"
-    spend = 0.0
-    for r in _search(customer_id, f"""
-        SELECT campaign.id, metrics.cost_micros
-        FROM campaign
-        WHERE segments.date BETWEEN '{month_start.isoformat()}' AND '{today.isoformat()}'
-          AND campaign.status != 'REMOVED'
-    """):
-        spend += _micros_to_units(_int_or_none(r.get("metrics", {}).get("costMicros"))) or 0
-    return _pacing_cache_put("light", customer_id, today, {
-        "spend_mtd": spend,
-        "monthly_target": _account_budget_target(_account_budget_rows(customer_id, end_of_today, None), end_of_today),
-        "days_elapsed": today.day,
-        "days_in_month": calendar.monthrange(today.year, today.month)[1],
-        "is_complete": False,
-    })
+    """Ritmo del mes en curso de una cuenta (lo usa «Dónde invertir» de Campañas). Es el mismo cálculo y la misma caché que
+    Ritmo de consumo: ver `_fetch_month_pacing`."""
+    return _fetch_month_pacing(customer_id, datetime.date.today())
 
 
 def fetch_campaign_windows(customer_id, windows=(7, 14, 30)):
@@ -5363,6 +5372,7 @@ def simulated_account_pacing(customer_id, month_from=None, month_to=None):
             return {
                 "spend_mtd": 0, "monthly_target": None,
                 "days_elapsed": today.day, "days_in_month": days_in_month, "is_complete": False,
+                "fetched_at": int(time.time()),
             }
         return {
             "spend_mtd": round(preset["spend_mtd_per_day"] * today.day, 2),
@@ -5370,6 +5380,7 @@ def simulated_account_pacing(customer_id, month_from=None, month_to=None):
             "days_elapsed": today.day,
             "days_in_month": days_in_month,
             "is_complete": False,
+            "fetched_at": int(time.time()),
         }
     months = list(_month_iter(month_from, month_to))
     spend_by_month, target_by_month = {}, {}

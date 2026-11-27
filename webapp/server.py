@@ -2965,6 +2965,8 @@ class Handler(SimpleHTTPRequestHandler):
         # ambos) es el ritmo de hoy de siempre.
         month_from = month_to = None
         q = query or {}
+        # «Actualizar»: salta la caché de 30 min (el cliente igual limita a una lectura por minuto y cuenta).
+        force_refresh = (q.get("refresh") or [""])[0] == "1"
         raw_from = (q.get("month_from") or [""])[0].strip()
         raw_to = (q.get("month_to") or [""])[0].strip()
         if raw_from or raw_to:
@@ -3016,7 +3018,7 @@ class Handler(SimpleHTTPRequestHandler):
                     })
                     continue
                 else:
-                    pacing = google_ads_client.fetch_account_pacing(customer_id, month_from, month_to)
+                    pacing = google_ads_client.fetch_account_pacing(customer_id, month_from, month_to, force=force_refresh)
                 rows.append({"customer_id": customer_id, "account_name": name, "error": None, **pacing,
                              "currency": "USD" if simulated else google_ads_client.fetch_customer_currency(customer_id)})
             except Exception as e:  # noqa: BLE001 — una cuenta con error no debe tumbar el resto del tablero

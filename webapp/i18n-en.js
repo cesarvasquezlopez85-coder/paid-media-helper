@@ -3564,4 +3564,6 @@ export const EN = {
   [`Elige el idioma de esta campaña (su nombre no lo trae)`]: `Choose this campaign's language (its name does not include it)`,
   [`Hotel de esta cuenta para las campañas cuyo nombre no lo trae (reemplaza {HOTEL}):`]: `Hotel of this account for the campaigns whose name does not include it (replaces {HOTEL}):`,
   [`p. ej. Hotel Costa Azul`]: `e.g. Costa Azul Hotel`,
+  [`Datos de hace {n0} min`]: `Data from {0} min ago`,
+  [`Datos de hace menos de 1 min`]: `Data from less than 1 min ago`,
 };

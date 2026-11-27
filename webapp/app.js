@@ -13188,11 +13188,13 @@ function loadPacingWatchlist() {
     });
 }
 
-function loadPacingRows() {
+// `refresh`: botón «Actualizar» — salta la caché de 30 min del servidor (solo vale para el mes en curso).
+function loadPacingRows(refresh) {
   const p = state.pacing;
   p.rowsStatus = 'loading';
   render();
-  fetch(`/api/google-ads/pacing${p.monthFrom ? `?month_from=${encodeURIComponent(p.monthFrom)}&month_to=${encodeURIComponent(p.monthTo)}` : ''}`)
+  const qs = p.monthFrom ? `?month_from=${encodeURIComponent(p.monthFrom)}&month_to=${encodeURIComponent(p.monthTo)}` : (refresh ? '?refresh=1' : '');
+  fetch(`/api/google-ads/pacing${qs}`)
     .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
     .then(({ ok, data }) => {
       if (!ok) throw new Error(data.error || 'Error desconocido.');
@@ -13658,6 +13660,15 @@ function pacingTotalRowsHtml(rows) {
   return { html, count: list.length };
 }
 
+// «Datos de hace N min»: la lectura más antigua de las cuentas (el servidor guarda el ritmo hasta 30 minutos). Vacío si las
+// filas no traen hora (archivo, modo simulado antiguo).
+function pacingAgeNote(p) {
+  const stamps = (p.rows || []).map((r) => r.fetched_at).filter((x) => typeof x === 'number');
+  if (!stamps.length) return '';
+  const mins = Math.max(0, Math.floor((Date.now() / 1000 - Math.min(...stamps)) / 60));
+  return `<span class="footnote" style="margin:0">${mins < 1 ? 'Datos de hace menos de 1 min' : `Datos de hace ${mins} min`}</span>`;
+}
+
 function renderPacingTable() {
   const p = state.pacing;
   if (p.watchlistStatus === 'loading' || p.rowsStatus === 'loading') {
@@ -13725,7 +13736,7 @@ function renderPacingTable() {
             Hasta
             <input type="month" id="pacing-month-to" value="${escapeHtml(p.monthTo || currentMonthValue())}" max="${currentMonthValue()}" />
           </label>
-          ${p.monthFrom ? '<button class="btn-link" data-action="pacing-month-current">Volver al mes en curso</button>' : ''}
+          ${p.monthFrom ? '<button class="btn-link" data-action="pacing-month-current">Volver al mes en curso</button>' : `${pacingAgeNote(p)}<button class="btn-outline sm" data-action="pacing-refresh">Actualizar</button>`}
           <button class="btn-outline sm" data-action="pacing-clear-watchlist">Quitar todas</button>
         </div>
       </div>
@@ -21044,6 +21055,7 @@ function handleAction(action) {
     case 'pacing-load-accounts': loadPacingAccounts(); break;
     case 'pacing-mcc-load': loadPacingMccGroups(); break;
     case 'pacing-clear-watchlist': clearPacingWatchlist(); break;
+    case 'pacing-refresh': loadPacingRows(true); break;
     case 'pacing-month-current': state.pacing.monthFrom = ''; state.pacing.monthTo = ''; loadPacingRows(); break;
     case 'pacing-campaigns-close': closePacingCampaignsModal(); break;
     case 'pacing-budget-edit-preview': adjustPacingCampaignBudget(true); break;
