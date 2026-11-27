@@ -196,9 +196,18 @@ AD_BULK_MAX_PER_ACCOUNT = 300
 AD_BULK_MAX_TOTAL = 1500
 AD_TEMPLATE_MAX_CHARS = 60000
 AD_TEMPLATE_MAX_COUNT = 200
-# Programación de activar o pausar anuncios por etiqueta: la hora es la de cada cuenta; si el servidor no pudo ejecutarla a
-# tiempo (reinicio, caída), se reintenta hasta SCHEDULE_CATCHUP_SECONDS después y, pasado ese margen, no se ejecuta.
+# Programación de activar o pausar anuncios o grupos de recursos: la hora es la de cada cuenta; si no se pudo ejecutar a tiempo
+# (reinicio, caída del servidor, cuota o error pasajero de Google), se reintenta hasta el margen de su acción y, pasado ese
+# margen, no se ejecuta. Decisión de la persona dueña (2026-11-26): activar 6 h (activar tarde puede ser peor que no
+# activar) y pausar 24 h (pausar tarde sigue siendo mejor que no pausar: los anuncios seguirían gastando).
 SCHEDULE_CATCHUP_SECONDS = 6 * 3600
+SCHEDULE_CATCHUP_PAUSE_SECONDS = 24 * 3600
+
+
+def _schedule_catchup_seconds(action):
+    return SCHEDULE_CATCHUP_PAUSE_SECONDS if action == "PAUSED" else SCHEDULE_CATCHUP_SECONDS
+
+
 SCHEDULE_RETRY_SECONDS = 300
 SCHEDULE_MAX_ATTEMPTS = 3
 SCHEDULE_MAX_PENDING = 100
@@ -1044,10 +1053,12 @@ def _schedule_user_can_access(user, customer_id):
         conn.close()
 
 
-def _schedule_save_run(schedule_id, customer_id, status, ok=0, skipped=0, failed=0, message="", permanent=False):
+def _schedule_save_run(schedule_id, customer_id, status, ok=0, skipped=0, failed=0, message="", permanent=False, retry=False):
+    """`retry`: fallo pasajero (cuota, error de Google, corte): queda «con error» pero el intento no cuenta, para que nunca llegue
+    al tope y se vuelva a intentar hasta el margen de la acción."""
     conn = get_db()
     try:
-        attempts_sql = ", attempts = ?" if permanent else ""
+        attempts_sql = ", attempts = ?" if permanent else (", attempts = MAX(attempts - 1, 0)" if retry else "")
         params = [status, time.time(), ok, skipped, failed, (message or "")[:400]]
         if permanent:
             params.append(SCHEDULE_MAX_ATTEMPTS)
@@ -1070,6 +1081,9 @@ def _schedule_execute_account(sched, acc):
     if not simulated:
         members = get_mcc_member_ids(sched["mcc_id"])
         if members is None:
+            quota = google_ads_client.quota_wait_message()
+            if quota:  # no se pudo leer porque Google agotó la cuota: se reintenta sin gastar un intento
+                return "retry", 0, 0, 0, quota, False
             return "error", 0, 0, 0, "No se pudo leer las cuentas del MCC.", False
         if cid not in members:
             return "error", 0, 0, 0, "La cuenta ya no pertenece al MCC.", True
@@ -1089,6 +1103,7 @@ def _schedule_execute_account(sched, acc):
     skipped = sum(1 for r in checked if not r.get("ok") and r.get("skipped"))
     failed_msgs = [r.get("error") for r in checked if not r.get("ok") and not r.get("skipped")]
     ok = 0
+    applied = []
     if to_apply:
         applied = change(cid, to_apply, sched["label"], sched["action"], validate_only=False)
         done_rows = [{"ad_group_id": it["ad_group_id"], "ad_id": it["ad_id"], "campaign_name": r.get("campaign_name"),
@@ -1103,6 +1118,8 @@ def _schedule_execute_account(sched, acc):
             except Exception as e:  # noqa: BLE001 — el cambio ya quedó en Google Ads; un fallo del registro no debe ocultarlo
                 print(f"[ad-status-log] {e}", flush=True)
     msg = " · ".join(dict.fromkeys(m for m in failed_msgs if m))[:300]
+    if any(r.get("transient") for r in list(checked) + list(applied)):
+        return "retry", ok, skipped, len(failed_msgs), msg, False  # cuota o error pasajero de Google: se reintenta más tarde
     return "done", ok, skipped, len(failed_msgs), msg, False
 
 
@@ -1119,6 +1136,7 @@ def _schedule_execute_asset_groups(sched, acc, simulated):
     skipped = sum(1 for r in checked if not r.get("ok") and r.get("skipped"))
     failed_msgs = [r.get("error") for r in checked if not r.get("ok") and not r.get("skipped")]
     ok = 0
+    applied = []
     if to_apply:
         applied = change(cid, to_apply, sched["action"], validate_only=False)
         done_rows = [{"campaign_id": it["campaign_id"], "asset_group_id": it["asset_group_id"], "campaign_name": r.get("campaign_name"),
@@ -1133,6 +1151,8 @@ def _schedule_execute_asset_groups(sched, acc, simulated):
             except Exception as e:  # noqa: BLE001 — el cambio ya quedó en Google Ads; un fallo del registro no debe ocultarlo
                 print(f"[asset-group-status-log] {e}", flush=True)
     msg = " · ".join(dict.fromkeys(m for m in failed_msgs if m))[:300]
+    if any(r.get("transient") for r in list(checked) + list(applied)):
+        return "retry", ok, skipped, len(failed_msgs), msg, False  # cuota o error pasajero de Google: se reintenta más tarde
     return "done", ok, skipped, len(failed_msgs), msg, False
 
 
@@ -1165,9 +1185,14 @@ def scheduler_tick():
                 continue
             conn = get_db()
             try:
-                if late > SCHEDULE_CATCHUP_SECONDS:
+                catchup = _schedule_catchup_seconds(sched["action"])
+                if late > catchup:
+                    missed_msg = f"No se ejecutó: el servidor o Google no permitieron hacerlo dentro del margen de {catchup // 3600} horas."
                     conn.execute("INSERT OR IGNORE INTO ad_schedule_runs (schedule_id, customer_id, status, attempts, finished_at, message) VALUES (?, ?, 'missed', 0, ?, ?)",
-                                 (sched["id"], acc["id"], now, "No se ejecutó: el servidor no pudo hacerlo dentro del margen de 6 horas."))
+                                 (sched["id"], acc["id"], now, missed_msg))
+                    # Si ya había intentos con error pasajero, el registro existe: se cierra como «no se ejecutó» en vez de quedar «en curso».
+                    conn.execute("UPDATE ad_schedule_runs SET status = 'missed', finished_at = ?, message = ? WHERE schedule_id = ? AND customer_id = ? AND status NOT IN ('done', 'missed')",
+                                 (now, missed_msg, sched["id"], acc["id"]))
                     conn.commit()
                     continue
                 if not run:
@@ -1188,8 +1213,19 @@ def scheduler_tick():
                 status, ok, skipped, failed, msg, permanent = _schedule_execute_account(sched, acc)
             except Exception as e:  # noqa: BLE001 — un fallo en una cuenta no debe frenar a las demás
                 print(f"[scheduler] cuenta {acc['id']}: {' '.join(str(e).split())[:300]}", flush=True)
-                status, ok, skipped, failed, msg, permanent = "error", 0, 0, 0, google_ads_client.google_error_text(e), False
-            _schedule_save_run(sched["id"], acc["id"], status, ok, skipped, failed, msg, permanent)
+                status = "retry" if google_ads_client.is_transient_error(e) else "error"
+                ok, skipped, failed, msg, permanent = 0, 0, 0, google_ads_client.google_error_text(e), False
+            # Lo cambiado en intentos anteriores (que luego se reintentó por un fallo pasajero) se suma, y ya no cuenta como «omitido».
+            prev_ok = (run or {}).get("ok_count") or 0
+            if prev_ok:
+                ok += prev_ok
+                if status == "done":
+                    skipped = max(0, skipped - prev_ok)
+            if status == "retry":
+                print(f"[scheduler] cuenta {acc['id']}: fallo pasajero de Google, se reintenta (no cuenta como intento).", flush=True)
+                _schedule_save_run(sched["id"], acc["id"], "error", ok, skipped, failed, msg, False, retry=True)
+            else:
+                _schedule_save_run(sched["id"], acc["id"], status, ok, skipped, failed, msg, permanent)
 
 
 def _scheduler_loop():
@@ -1548,7 +1584,8 @@ class Handler(SimpleHTTPRequestHandler):
             if not self._require_ads_json():
                 return
             self._send_json(200, {"schedules": list_ad_schedules(), "interval_seconds": SCHEDULER_INTERVAL_SECONDS,
-                                  "catchup_hours": SCHEDULE_CATCHUP_SECONDS // 3600})
+                                  "catchup_hours": SCHEDULE_CATCHUP_SECONDS // 3600,
+                                  "catchup_hours_pause": SCHEDULE_CATCHUP_PAUSE_SECONDS // 3600})
             return
 
         if path == "/api/google-ads/label-ads":

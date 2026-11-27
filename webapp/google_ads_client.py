@@ -151,6 +151,17 @@ def quota_message_for(detail):
     return quota_wait_message()
 
 
+def is_transient_error(exc):
+    """True si el fallo es pasajero y repetir más tarde puede funcionar: cuota o límite de Google (429), error del lado de
+    Google (5xx), corte de conexión o tiempo agotado. Un rechazo de Google por el contenido (400, permisos, políticas) NO lo es."""
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    text = str(exc)
+    if re.search(r"respondió (429|5\d\d)\b", text):
+        return True
+    return "No se pudo conectar a la API de Google Ads" in text or "timed out" in text
+
+
 def _raise_if_quota_blocked():
     if time.time() < _QUOTA["blocked_until"]:
         raise QuotaExhausted(f"Google Ads API respondió 429: {quota_wait_message() or 'cuota agotada'} [bloqueo local]")
@@ -2636,7 +2647,8 @@ def _mutate_ad_status_batch(customer_id, resources, status, validate_only):
             payload = _post_json(url, {"operations": ops, "partialFailure": True, "validateOnly": validate_only})
         except Exception as e:  # noqa: BLE001 — un lote que falla entero se reporta en cada anuncio del lote
             msg = google_error_text(e)
-            out.extend({"ok": False, "error": msg} for _ in chunk)
+            transient = is_transient_error(e)  # el programador lo reintenta más tarde en vez de darlo por terminado
+            out.extend({"ok": False, "error": msg, "transient": transient} for _ in chunk)
             continue
         errors = _partial_failure_errors(payload)
         for i in range(len(chunk)):
@@ -2687,7 +2699,7 @@ def set_label_ads_status(customer_id, items, label, status, validate_only=True):
     sent = _mutate_ad_status_batch(customer_id, to_send, status, validate_only) if to_send else []
     for i, res in zip(idx, sent):
         if not res["ok"]:
-            results[i] = {"ok": False, "error": res["error"]}
+            results[i] = {"ok": False, "error": res["error"], **({"transient": True} if res.get("transient") else {})}
     return results
 
 
@@ -3277,6 +3289,8 @@ def _mutate_asset_group_status(customer_id, campaign_id, asset_group_id, status,
     try:
         _post_json(url, {"operations": [{"update": {"resourceName": rn, "status": status}, "updateMask": "status"}], "validateOnly": validate_only})
     except Exception as e:  # noqa: BLE001 — se reporta en ese grupo y no frena a los demás
+        if is_transient_error(e):  # cuota, error de Google o corte: el programador lo reintenta más tarde
+            return {"ok": False, "error": google_error_text(e), "transient": True}
         return {"ok": False, "error": "Google Ads rechazó el cambio: " + google_error_text(e)}
     return {"ok": True}
 
@@ -3289,7 +3303,7 @@ def set_asset_groups_status(customer_id, items, status, validate_only=True):
     for i in idx:
         sent = _mutate_asset_group_status(customer_id, items[i]["campaign_id"], items[i]["asset_group_id"], status, validate_only)
         if not sent["ok"]:
-            results[i] = {"ok": False, "error": sent["error"]}
+            results[i] = {"ok": False, "error": sent["error"], **({"transient": True} if sent.get("transient") else {})}
     return results
 
 
