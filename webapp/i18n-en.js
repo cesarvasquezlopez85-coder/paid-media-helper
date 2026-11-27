@@ -3560,4 +3560,8 @@ export const EN = {
   [`Usuarios y accesos`]: `Users and access`,
   [`Uso de Google Ads`]: `Google Ads usage`,
   [`Actualizado`]: `Updated`,
+  [`Escribe el hotel de esta cuenta para usar esta campaña (su nombre no lo trae)`]: `Type this account's hotel to use this campaign (its name does not include it)`,
+  [`Elige el idioma de esta campaña (su nombre no lo trae)`]: `Choose this campaign's language (its name does not include it)`,
+  [`Hotel de esta cuenta para las campañas cuyo nombre no lo trae (reemplaza {HOTEL}):`]: `Hotel of this account for the campaigns whose name does not include it (replaces {HOTEL}):`,
+  [`p. ej. Hotel Costa Azul`]: `e.g. Costa Azul Hotel`,
 };

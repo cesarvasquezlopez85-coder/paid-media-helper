@@ -16796,6 +16796,7 @@ function nutNewState() {
     advOpen: null, pinsOpen: null, customUrl: '', path1: '', path2: '', campaignFilter: '', ai: { brief: '', status: 'idle', error: '', result: null },
     templates: [], templatesStatus: 'idle', templateMsg: '', templateError: '', templateBusy: false,
     rows: {}, targetsStatus: 'idle', targetsLabel: '', excluded: {}, previewKey: '', check: null,
+    nameOv: {}, // por cuenta: { hotel, langs: { nombre de campaña: idioma } } para campañas cuyo nombre no trae hotel e idioma
     run: { status: 'idle', error: null, results: {}, applied: false },
   };
 }
@@ -16922,6 +16923,27 @@ function nutParseCampaignName(name) {
   return null;
 }
 
+// Idioma suelto en el nombre («Hotel - es - BRND»): un tramo de solo dos letras que sea un idioma conocido; '' si no hay.
+function nutDetectLang(name) {
+  const parts = String(name || '').split(' - ');
+  for (let i = 1; i < parts.length; i++) {
+    const m = parts[i].trim().match(/^([A-Za-z]{2})$/);
+    if (m && NUT_LANG_NAMES[m[1].toLowerCase()]) return m[1].toLowerCase();
+  }
+  return '';
+}
+
+function nutCleanHotel(x) {
+  return String(x || '').replace(/[{}]/g, '').replace(/\s+/g, ' ').trim().slice(0, 60);
+}
+
+// Hotel e idioma que la persona puso a mano para las campañas de una cuenta cuyo nombre no los trae.
+function nutOverride(accId) {
+  const t = nutState();
+  if (!t.nameOv[accId]) t.nameOv[accId] = { hotel: '', langs: {} };
+  return t.nameOv[accId];
+}
+
 // Una fila por grupo de anuncios de la cuenta: si se puede crear o por qué se omite, y los textos finales.
 function nutComputeAccount(accRow) {
   const t = nutState();
@@ -16936,11 +16958,19 @@ function nutComputeAccount(accRow) {
   const out = [];
   accRow.campaigns.forEach((c) => {
     if (filter && !c.name.toLowerCase().includes(filter)) return;
-    const parsed = nutParseCampaignName(c.name);
+    let parsed = nutParseCampaignName(c.name);
+    // Nombre sin el formato «Hotel - MERCADO:idioma - TIPO»: el hotel (uno por cuenta) y el idioma (por campaña; se propone el
+    // que el nombre traiga suelto, como «- es -») los pone la persona. No se adivina nada.
+    let manual = null;
+    if (!parsed) {
+      const ov = t.nameOv[accRow.id] || {};
+      manual = { hotel: nutCleanHotel(ov.hotel), lang: (ov.langs && ov.langs[c.name]) || nutDetectLang(c.name) };
+      if (manual.hotel && manual.lang) parsed = { hotel: manual.hotel, lang: manual.lang };
+    }
     c.ad_groups.forEach((g) => {
-      const row = { key: `${accRow.id}:${g.id}`, accId: accRow.id, campaignName: c.name, groupId: g.id, groupName: g.name, hotel: parsed ? parsed.hotel : '', lang: parsed ? parsed.lang : '', url: custom ? customUrl : g.url, customUrl: !!custom, reason: '', heads: [], descs: [], hpins: [], dpins: [] };
+      const row = { key: `${accRow.id}:${g.id}`, accId: accRow.id, campaignName: c.name, groupId: g.id, groupName: g.name, hotel: parsed ? parsed.hotel : '', lang: parsed ? parsed.lang : (manual ? manual.lang : ''), manual: !!manual, url: custom ? customUrl : g.url, customUrl: !!custom, reason: '', heads: [], descs: [], hpins: [], dpins: [] };
       const tpl = parsed ? t.langs[parsed.lang] : null;
-      if (!parsed) row.reason = 'Nombre de campaña sin hotel e idioma (Hotel - MERCADO:idioma - TIPO)';
+      if (!parsed) row.reason = !manual.hotel ? 'Escribe el hotel de esta cuenta para usar esta campaña (su nombre no lo trae)' : 'Elige el idioma de esta campaña (su nombre no lo trae)';
       else if (!tpl || !(nutLines(tpl.headlines).length && nutLines(tpl.descriptions).length)) row.reason = `La plantilla no tiene textos en «${parsed.lang}»`;
       else if (g.labeled) row.reason = 'Ya tiene un anuncio con la etiqueta';
       else if (g.rsa_enabled >= 3) row.reason = 'Ya tiene 3 anuncios adaptables activos';
@@ -17176,14 +17206,25 @@ function nutAccountBody(accRow) {
   if (!rows.length) return '<p class="footnote">No hay grupos de anuncios activos en campañas Search activas que coincidan con el filtro.</p>';
   const ready = rows.filter((r) => !r.reason);
   const marked = ready.filter((r) => !t.excluded[r.key]).length;
+  const langCell = (r) => {
+    if (!r.manual) return r.lang ? escapeHtml(r.lang) : '—';
+    const codes = [...new Set([...t.langOrder, ...(r.lang ? [r.lang] : [])])];
+    return `<select data-nut-rowlang="${escapeHtml(accRow.id)}" data-camp="${escapeHtml(r.campaignName)}"><option value="">—</option>${codes.map((l) => `<option value="${escapeHtml(l)}" ${l === r.lang ? 'selected' : ''}>${escapeHtml(NUT_LANG_NAMES[l] || l)} (${escapeHtml(l)})</option>`).join('')}</select>`;
+  };
   const trs = rows.map((r) => `<tr>
       <td style="width:28px"><input type="checkbox" data-nut-inc="${escapeHtml(r.key)}" ${!r.reason && !t.excluded[r.key] ? 'checked' : ''} ${r.reason ? 'disabled' : ''} /></td>
       <td>${escapeHtml(r.campaignName)}</td><td>${escapeHtml(r.groupName)}</td>
-      <td>${r.lang ? escapeHtml(r.lang) : '—'}</td>
+      <td>${langCell(r)}</td>
       <td>${r.reason ? `<span class="field-hint">${escapeHtml(r.reason)}</span>` : `<button class="btn-link" data-nut-view="${escapeHtml(r.key)}">Ver textos</button>`}</td>
       <td id="nut-res-${escapeHtml(r.key)}">${nutResultCell(r)}</td>
     </tr>`).join('');
+  const hotelBox = rows.some((r) => r.manual) ? `
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:4px 0 8px">
+      <label class="field-hint" for="nut-hotel-${escapeHtml(accRow.id)}">Hotel de esta cuenta para las campañas cuyo nombre no lo trae (reemplaza {HOTEL}):</label>
+      <input type="text" id="nut-hotel-${escapeHtml(accRow.id)}" data-nut-hotel="${escapeHtml(accRow.id)}" value="${escapeHtml((t.nameOv[accRow.id] || {}).hotel || '')}" maxlength="60" style="width:240px" placeholder="p. ej. Hotel Costa Azul" autocomplete="off" />
+    </div>` : '';
   return `
+    ${hotelBox}
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:4px 0 6px">
       <span class="field-hint">${marked} marcados de ${ready.length} listos · ${rows.length - ready.length} omitidos</span>
       <button class="btn-outline xs" data-nut-all="${escapeHtml(accRow.id)}">Marcar todos</button>
@@ -18382,6 +18423,9 @@ function renderNuaModeSwitch() {
 function bindNutTargets() {
   const t = nutState();
   document.querySelectorAll('[data-nut-inc]').forEach((el) => { el.onchange = () => { if (el.checked) delete t.excluded[el.dataset.nutInc]; else t.excluded[el.dataset.nutInc] = true; nutResetRun(); render(); }; });
+  // Hotel e idioma puestos a mano: cambian los textos, así que lo validado antes deja de valer (nutTemplateEdited lo reinicia).
+  document.querySelectorAll('[data-nut-hotel]').forEach((el) => { el.onchange = () => { nutOverride(el.dataset.nutHotel).hotel = nutCleanHotel(el.value); nutTemplateEdited(); }; });
+  document.querySelectorAll('[data-nut-rowlang]').forEach((el) => { el.onchange = () => { nutOverride(el.dataset.nutRowlang).langs[el.dataset.camp] = el.value; nutTemplateEdited(); }; });
   document.querySelectorAll('[data-nut-view]').forEach((el) => { el.onclick = () => { t.previewKey = el.dataset.nutView; const pv = document.getElementById('nut-preview'); if (pv) pv.innerHTML = nutPreviewHtml(); }; });
   document.querySelectorAll('[data-nut-all]').forEach((el) => { el.onclick = () => { nutComputeAccount(t.rows[el.dataset.nutAll]).forEach((r) => { delete t.excluded[r.key]; }); nutResetRun(); render(); }; });
   document.querySelectorAll('[data-nut-none]').forEach((el) => { el.onclick = () => { nutComputeAccount(t.rows[el.dataset.nutNone]).forEach((r) => { if (!r.reason) t.excluded[r.key] = true; }); nutResetRun(); render(); }; });
