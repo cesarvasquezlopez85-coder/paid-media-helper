@@ -40,6 +40,7 @@ import struct
 import os
 import re
 import time
+import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 import urllib.error
@@ -2867,7 +2868,19 @@ def _pmax_operations(customer_id, campaign_id, name, url, business_name, heads, 
     for theme in (signals or {}).get("themes") or []:
         ops.append({"assetGroupSignalOperation": {"create": {"assetGroup": ag, "searchTheme": {"text": theme}}}})
     if (signals or {}).get("audience"):
-        ops.append({"assetGroupSignalOperation": {"create": {"assetGroup": ag, "audience": {"audience": signals["audience"]}}}})
+        adef = signals.get("audience_def") or {}
+        aud = signals["audience"]
+        if adef.get("scoped"):
+            # La audiencia del grupo de origen pertenece solo a ese grupo: Google no deja usarla en otro («the asset group referenced by
+            # the asset group signal does not match the asset group referenced by the audience»). Se crea una igual, propia del grupo nuevo.
+            aud = tmp("audiences")
+            new_aud = {"resourceName": aud, "name": f"{name} · {uuid.uuid4().hex[:6]}"[:255], "assetGroup": ag, "dimensions": adef.get("dimensions") or []}
+            if adef.get("description"):
+                new_aud["description"] = adef["description"]
+            if adef.get("exclusion_dimension"):
+                new_aud["exclusionDimension"] = adef["exclusion_dimension"]
+            ops.append({"audienceOperation": {"create": new_aud}})
+        ops.append({"assetGroupSignalOperation": {"create": {"assetGroup": ag, "audience": {"audience": aud}}}})
     return ops
 
 
@@ -2930,13 +2943,24 @@ def fetch_pmax_signal_source(customer_id):
         return {"source": None, "themes": [], "audience": ""}
     criterion, g = pick
     conv = g["conv30"] if criterion == "conv30" else g["conv_all"]
+    # ¿La audiencia es del grupo de origen (con `asset_group`) o de la cuenta? La de un grupo no se puede reutilizar en otro: hay que recrearla.
+    adef = {"scoped": False}
+    try:
+        arows = _search(customer_id, f"SELECT audience.resource_name, audience.name, audience.description, audience.asset_group, audience.dimensions, audience.exclusion_dimension "
+                                     f"FROM audience WHERE audience.resource_name = '{g['audience']}'")
+        a = (arows[0].get("audience") if arows else None) or {}
+        if a.get("assetGroup"):
+            adef = {"scoped": True, "dimensions": a.get("dimensions") or [], "description": a.get("description") or "", "exclusion_dimension": a.get("exclusionDimension")}
+    except Exception as e:  # noqa: BLE001 — sin el detalle no se sabe si es de un grupo: se avisa y el grupo no se crea a ciegas
+        raise RuntimeError("No se pudo leer la audiencia del grupo de origen: " + " ".join(str(e).split())[:200]) from e
     return {"source": {"asset_group_id": g["id"], "name": g["name"], "campaign_name": g["campaign_name"], "criterion": criterion,
                        "conversions": round(conv, 2)},
-            "themes": g["themes"][:PMAX_MAX_SEARCH_THEMES], "audience": g["audience"]}
+            "themes": g["themes"][:PMAX_MAX_SEARCH_THEMES], "audience": g["audience"], "audience_def": adef}
 
 
 def fetch_pmax_video_data(customer_id):
-    """Los grupos de recursos PMax de la cuenta con sus videos de YouTube activos y sus conversiones (30 días e historial):
+    """Los grupos de recursos PMax de la cuenta con sus videos de YouTube activos (solo los puestos por un anunciante, no los que Google
+    genera solo) y sus conversiones (30 días e historial):
     {asset_group_id: {id, name, campaign_id, campaign_name, active, conv30, val30, conv_all, val_all, videos: [{asset, youtube_id}]}}.
     Solo lectura. De aquí sale, con pick_pmax_video_source, de qué grupo se copian los videos a uno nuevo."""
     base = """
@@ -2959,12 +2983,16 @@ def fetch_pmax_video_data(customer_id):
     collect(_search(customer_id, base + " AND segments.date DURING LAST_30_DAYS"), "30")
     collect(_search(customer_id, base), "_all")
     rows = _search(customer_id, """
-        SELECT asset_group.id, asset_group_asset.asset, asset_group_asset.status, asset.youtube_video_asset.youtube_video_id
+        SELECT asset_group.id, asset_group_asset.asset, asset_group_asset.status, asset_group_asset.source, asset.source, asset.youtube_video_asset.youtube_video_id
         FROM asset_group_asset
         WHERE asset_group_asset.field_type = 'YOUTUBE_VIDEO' AND asset_group_asset.status = 'ENABLED'
           AND campaign.advertising_channel_type = 'PERFORMANCE_MAX' AND campaign.status != 'REMOVED' AND asset_group.status != 'REMOVED'""")
     for r in rows:
         gr = groups.get(str((r.get("assetGroup") or {}).get("id") or ""))
+        # Los videos que Google genera solos (AUTOMATICALLY_CREATED) no se pueden vincular a otro grupo: Google rechaza el grupo
+        # («Advertiser links cannot link to text customization»). Solo cuentan los que puso un anunciante.
+        if "AUTOMATICALLY_CREATED" in ((r.get("assetGroupAsset") or {}).get("source"), (r.get("asset") or {}).get("source")):
+            continue
         asset = (r.get("assetGroupAsset") or {}).get("asset") or ""
         vid = (((r.get("asset") or {}).get("youtubeVideoAsset")) or {}).get("youtubeVideoId") or ""
         if gr and asset and all(v["asset"] != asset for v in gr["videos"]):
