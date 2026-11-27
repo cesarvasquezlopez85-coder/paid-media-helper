@@ -51,6 +51,9 @@ import hoteles_ia
 import negativos_ia
 import google_ads_client
 
+# Igual que el estándar, pero las tareas heredan la sección y el usuario del contador de uso de Google Ads.
+ThreadPoolExecutor = google_ads_client.ThreadPoolExecutor
+
 PORT = int(os.environ.get("PORT", 8642))
 TIMEOUT_SECONDS = 15
 MAX_BYTES = 5_000_000  # 5 MB — suficiente para una página, evita descargas gigantes
@@ -766,6 +769,24 @@ def init_db():
             )
             """
         )
+        # Uso de la API de Google Ads por hora (hora de Colombia), sección (ruta /api/... o «programador»), usuario
+        # (0 = tarea de fondo o sin sesión) y tipo de llamada. Se vacía desde el contador en memoria cada 30 s.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS gads_usage (
+                hour TEXT NOT NULL,
+                feature TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                requests INTEGER NOT NULL DEFAULT 0,
+                operations INTEGER NOT NULL DEFAULT 0,
+                limited INTEGER NOT NULL DEFAULT 0,
+                errors INTEGER NOT NULL DEFAULT 0,
+                blocked INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (hour, feature, user_id, kind)
+            )
+            """
+        )
         # PMH_ADMIN_USERNAMES es solo un piso mínimo garantizado en cada
         # arranque (para nunca quedar sin ningún admin) — SOLO sube a admin
         # a esos usernames, nunca baja a nadie. Bajar el flag a alguien más
@@ -802,6 +823,54 @@ def store_ai_usage(user_id, feature, calls, input_tokens, output_tokens, cost_us
         conn.commit()
     finally:
         conn.close()
+
+
+GADS_USAGE_FLUSH_SECONDS = 30
+GADS_USAGE_KEEP_DAYS = 30
+
+
+def flush_gads_usage():
+    """Pasa el contador de uso de Google Ads de la memoria a la base. Si no se puede guardar, lo devuelve a la memoria."""
+    rows = google_ads_client.drain_usage()
+    if not rows:
+        return
+    try:
+        conn = get_db()
+        try:
+            conn.executemany(
+                """
+                INSERT INTO gads_usage (hour, feature, user_id, kind, requests, operations, limited, errors, blocked)
+                VALUES (:hour, :feature, :user_id, :kind, :requests, :operations, :limited, :errors, :blocked)
+                ON CONFLICT(hour, feature, user_id, kind) DO UPDATE SET
+                    requests = requests + excluded.requests,
+                    operations = operations + excluded.operations,
+                    limited = limited + excluded.limited,
+                    errors = errors + excluded.errors,
+                    blocked = blocked + excluded.blocked
+                """,
+                rows,
+            )
+            cutoff = (datetime.datetime.now(_COLOMBIA_TZ) - datetime.timedelta(days=GADS_USAGE_KEEP_DAYS)).strftime("%Y-%m-%d %H")
+            conn.execute("DELETE FROM gads_usage WHERE hour < ?", (cutoff,))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001 — contar el uso nunca debe afectar a la plataforma
+        google_ads_client.return_usage(rows)
+        print(f"[gads-usage] no se pudo guardar el uso: {' '.join(str(e).split())[:200]}", flush=True)
+
+
+def _gads_usage_loop():
+    while True:
+        time.sleep(GADS_USAGE_FLUSH_SECONDS)
+        flush_gads_usage()
+
+
+def _gads_feature_for_path(path):
+    """Sección a la que se le cuenta el uso de Google Ads: la ruta /api/... sin el prefijo (sin datos de la persona)."""
+    if path.startswith("/api/"):
+        return re.sub(r"[^a-zA-Z0-9/_-]", "", path[5:])[:60] or "otros"
+    return "otros"
 
 
 def _ai_language(user):
@@ -1231,6 +1300,7 @@ def scheduler_tick():
 def _scheduler_loop():
     while True:
         try:
+            google_ads_client.begin_usage_context("programador")
             scheduler_tick()
         except Exception as e:  # noqa: BLE001 — la tarea de fondo nunca debe morir
             print(f"[scheduler] {' '.join(str(e).split())[:300]}", flush=True)
@@ -1411,6 +1481,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        google_ads_client.begin_usage_context(_gads_feature_for_path(path))
 
         if path == "/api/fetch":
             if not self._require_auth_json():
@@ -1735,6 +1806,13 @@ class Handler(SimpleHTTPRequestHandler):
             self._handle_admin_ai_usage(parse_qs(parsed.query))
             return
 
+        # Uso de la API de Google Ads (solicitudes, operaciones, 429) por sección, usuario y hora — solo super admin.
+        if path == "/api/admin/gads-usage":
+            if not self._require_super_admin_json():
+                return
+            self._handle_admin_gads_usage(parse_qs(parsed.query))
+            return
+
         # Qué customer_id de Google Ads puede tocar un usuario — solo admins.
         if path == "/api/admin/access":
             if not self._require_admin_json():
@@ -1757,6 +1835,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        google_ads_client.begin_usage_context(_gads_feature_for_path(path))
         length = int(self.headers.get("Content-Length", 0) or 0)
         if length > MAX_REQUEST_BYTES:
             self._send_json(413, {"error": "La petición es demasiado grande."})
@@ -2100,6 +2179,7 @@ class Handler(SimpleHTTPRequestHandler):
             conn.close()
         if not row or row["expires_at"] < time.time():
             return None
+        google_ads_client.set_usage_user(row["id"])
         return {
             "id": row["id"], "username": row["username"], "is_admin": bool(row["is_admin"]),
             "must_change_password": bool(row["must_change_password"]),
@@ -2265,6 +2345,35 @@ class Handler(SimpleHTTPRequestHandler):
             "days": days, "since": since, "model": claude_client.MODEL,
             "price_input_per_million": price_in, "price_output_per_million": price_out,
             "timezone": "America/Bogota (UTC-5)",
+            "rows": [dict(r) for r in rows],
+        })
+
+    def _handle_admin_gads_usage(self, query):
+        try:
+            hours = max(1, min(24 * GADS_USAGE_KEEP_DAYS, int((query.get("hours") or ["24"])[0])))
+        except ValueError:
+            hours = 24
+        flush_gads_usage()  # incluye lo que aún estaba en memoria
+        since = (datetime.datetime.now(_COLOMBIA_TZ) - datetime.timedelta(hours=hours - 1)).strftime("%Y-%m-%d %H")
+        conn = get_db()
+        try:
+            rows = conn.execute(
+                """
+                SELECT g.hour, g.feature, g.user_id,
+                       CASE WHEN g.user_id = 0 THEN '(tarea de fondo o sin sesión)'
+                            ELSE COALESCE(u.username, '(usuario borrado)') END AS username,
+                       g.kind, g.requests, g.operations, g.limited, g.errors, g.blocked
+                FROM gads_usage g LEFT JOIN users u ON u.id = g.user_id
+                WHERE g.hour >= ?
+                ORDER BY g.hour DESC, g.feature
+                """,
+                (since,),
+            ).fetchall()
+        finally:
+            conn.close()
+        self._send_json(200, {
+            "hours": hours, "since": since, "timezone": "America/Bogota (UTC-5)",
+            "quota": google_ads_client.quota_state(),
             "rows": [dict(r) for r in rows],
         })
 
@@ -6597,6 +6706,7 @@ if __name__ == "__main__":
     os.chdir(BASE_DIR)
     init_db()
     threading.Thread(target=_scheduler_loop, name="ad-scheduler", daemon=True).start()
+    threading.Thread(target=_gads_usage_loop, name="gads-usage-flush", daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"Paid Media Helper corriendo en http://localhost:{PORT}")
     try:

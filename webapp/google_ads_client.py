@@ -42,7 +42,9 @@ import re
 import time
 import uuid
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor as _BaseThreadPoolExecutor
+import contextvars
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -81,7 +83,7 @@ def _get_access_token():
     }).encode("utf-8")
     req = urllib.request.Request(TOKEN_URL, data=data, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+        with _gads_urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")
@@ -90,6 +92,122 @@ def _get_access_token():
     _token_cache["access_token"] = payload["access_token"]
     _token_cache["expires_at"] = now + payload.get("expires_in", 3600)
     return _token_cache["access_token"]
+
+
+# --- Contador de uso de la API de Google Ads ------------------------------------------------------------------------------
+# Toda llamada a googleads.googleapis.com pasa por `_gads_urlopen`, que la anota en memoria por hora (hora de Colombia),
+# sección (la ruta /api/... que la provocó, o «programador»), usuario y tipo (lectura, vista_previa, escritura,
+# planificador, otros): solicitudes enviadas, operaciones (en un mutate son las del lote), respuestas 429, otros errores y
+# lecturas que el bloqueo local de cuota no envió. server.py vacía el contador a la base cada 30 s (`drain_usage`) y lo
+# muestra en Administración. Es lo que ENVÍA la plataforma: no incluye lo que consuma otra herramienta con el mismo
+# developer token, ni equivale exactamente a lo que Google cuenta contra la cuota.
+_USAGE_CTX = contextvars.ContextVar("gads_usage_ctx", default=None)
+_USAGE_LOCK = threading.Lock()
+_USAGE_BUF = {}  # (hora, sección, user_id, tipo) -> [solicitudes, operaciones, 429, errores, bloqueadas]
+_USAGE_TZ = datetime.timezone(datetime.timedelta(hours=-5))
+
+
+class ThreadPoolExecutor(_BaseThreadPoolExecutor):
+    """Igual que el estándar, pero cada tarea hereda la sección y el usuario de quien la lanzó (si no, el contador de uso
+    de las consultas en paralelo caería en «otros»)."""
+
+    def submit(self, fn, /, *args, **kwargs):
+        return super().submit(contextvars.copy_context().run, fn, *args, **kwargs)
+
+
+def begin_usage_context(feature):
+    """Marca a qué sección pertenece lo que corra a continuación en este hilo. Devuelve el diccionario de contexto."""
+    ctx = {"feature": str(feature or "otros")[:60], "user_id": 0}
+    _USAGE_CTX.set(ctx)
+    return ctx
+
+
+def set_usage_user(user_id):
+    ctx = _USAGE_CTX.get()
+    if ctx is not None:
+        try:
+            ctx["user_id"] = int(user_id or 0)
+        except (TypeError, ValueError):
+            pass
+
+
+def _usage_add(kind, requests=0, operations=0, limited=0, errors=0, blocked=0):
+    ctx = _USAGE_CTX.get() or {"feature": "otros", "user_id": 0}
+    key = (datetime.datetime.now(_USAGE_TZ).strftime("%Y-%m-%d %H"), ctx["feature"], ctx["user_id"], kind)
+    with _USAGE_LOCK:
+        rec = _USAGE_BUF.setdefault(key, [0, 0, 0, 0, 0])
+        rec[0] += requests
+        rec[1] += operations
+        rec[2] += limited
+        rec[3] += errors
+        rec[4] += blocked
+
+
+def _usage_classify(request_obj):
+    """(tipo, operaciones) de una petición a la API de Google Ads, o None si no es de esa API (p. ej. el token OAuth)."""
+    url = request_obj.full_url
+    if "googleads.googleapis.com" not in url:
+        return None
+    try:
+        body = json.loads(request_obj.data.decode("utf-8")) if request_obj.data else {}
+    except (ValueError, UnicodeDecodeError, AttributeError):
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    last = url.rsplit("/", 1)[-1]
+    action = last.rsplit(":", 1)[-1] if ":" in last else ""
+    if action in ("search", "searchStream"):
+        return "lectura", 1
+    if action.startswith("generate"):
+        return "planificador", 1
+    if action in ("mutate", "apply", "dismiss"):
+        ops = len(body.get("operations") or body.get("mutateOperations") or []) or 1
+        return ("vista_previa" if body.get("validateOnly") else "escritura"), ops
+    return "otros", 1
+
+
+def _gads_urlopen(request_obj, timeout=None):
+    """urlopen que anota la llamada en el contador de uso (ver arriba). Devuelve la respuesta igual que urlopen."""
+    info = _usage_classify(request_obj)
+    if info is None:
+        return urllib.request.urlopen(request_obj, timeout=timeout)
+    kind, ops = info
+    _usage_add(kind, requests=1, operations=ops)
+    try:
+        return urllib.request.urlopen(request_obj, timeout=timeout)
+    except urllib.error.HTTPError as e:
+        _usage_add(kind, limited=1 if e.code == 429 else 0, errors=0 if e.code == 429 else 1)
+        raise
+    except Exception:
+        _usage_add(kind, errors=1)
+        raise
+
+
+def drain_usage():
+    """Entrega y vacía lo acumulado en memoria: lista de diccionarios listos para guardar."""
+    with _USAGE_LOCK:
+        items = list(_USAGE_BUF.items())
+        _USAGE_BUF.clear()
+    return [{"hour": k[0], "feature": k[1], "user_id": k[2], "kind": k[3], "requests": v[0], "operations": v[1],
+             "limited": v[2], "errors": v[3], "blocked": v[4]} for k, v in items]
+
+
+def return_usage(rows):
+    """Devuelve al contador filas que no se pudieron guardar, para reintentar en el siguiente vaciado."""
+    with _USAGE_LOCK:
+        for r in rows:
+            rec = _USAGE_BUF.setdefault((r["hour"], r["feature"], r["user_id"], r["kind"]), [0, 0, 0, 0, 0])
+            rec[0] += r["requests"]
+            rec[1] += r["operations"]
+            rec[2] += r["limited"]
+            rec[3] += r["errors"]
+            rec[4] += r["blocked"]
+
+
+def quota_state():
+    """Segundos que faltan del bloqueo local de lecturas y de la espera que pidió Google (0 si no hay)."""
+    now = time.time()
+    return {"blocked_seconds": max(0, int(_QUOTA["blocked_until"] - now)), "reset_seconds": max(0, int(_QUOTA["reset_at"] - now))}
 
 
 # --- Cuota de la API (429 RESOURCE_EXHAUSTED) ---------------------------------------------------------------------------
@@ -164,6 +282,7 @@ def is_transient_error(exc):
 
 def _raise_if_quota_blocked():
     if time.time() < _QUOTA["blocked_until"]:
+        _usage_add("lectura", blocked=1)
         raise QuotaExhausted(f"Google Ads API respondió 429: {quota_wait_message() or 'cuota agotada'} [bloqueo local]")
 
 
@@ -187,7 +306,7 @@ def _search(customer_id, query):
             url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST"
         )
         try:
-            with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+            with _gads_urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", errors="replace")
@@ -731,7 +850,7 @@ def update_campaign_daily_budget(customer_id, budget_resource_name, new_daily_bu
         url, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
     )
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+        with _gads_urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
             resp.read()
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")
@@ -3878,7 +3997,7 @@ def update_campaign_target_roas(customer_id, campaign_id, bidding_strategy_type,
         url, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
     )
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+        with _gads_urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
             resp.read()
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")
@@ -3963,7 +4082,7 @@ def update_campaign_ai_max(customer_id, campaign_id, enable, validate_only=True)
         url, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
     )
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+        with _gads_urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
             resp.read()
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")
@@ -4289,7 +4408,7 @@ def _mutate_with_partial_failure(url, operations, validate_only):
     body = {"operations": operations, "partialFailure": True, "validateOnly": validate_only}
     req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+        with _gads_urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")
@@ -4464,7 +4583,7 @@ def push_negative_keywords(customer_id, items, validate_only=True):
         url, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
     )
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+        with _gads_urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")
@@ -4658,7 +4777,7 @@ def _mutate_customer_negative_criteria(customer_id, operations, validate_only):
         url, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
     )
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+        with _gads_urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")
@@ -4899,7 +5018,7 @@ def apply_recommendation(customer_id, resource_name):
         url, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
     )
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+        with _gads_urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
             resp.read()
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")
@@ -4919,7 +5038,7 @@ def dismiss_recommendation(customer_id, resource_name):
         url, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
     )
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+        with _gads_urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
             resp.read()
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")
@@ -4954,7 +5073,7 @@ def _post_json(url, body, timeout=None):
         url, data=json.dumps(body).encode("utf-8"), headers=_auth_headers(), method="POST"
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout or TIMEOUT_SECONDS) as resp:
+        with _gads_urlopen(req, timeout=timeout or TIMEOUT_SECONDS) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")

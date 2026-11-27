@@ -480,6 +480,8 @@ const state = {
   // lo exige en cada endpoint /api/admin/*, esto es solo la UI).
   admin: {
     usage: { status: 'idle', days: 30, rows: [], meta: null, error: null }, // consumo de la IA por usuario y día
+    tab: null, // usuarios | gads | ia (las dos últimas solo super admin); se lee de localStorage al abrir la página
+    gads: { status: 'idle', hours: 24, rows: [], meta: null, error: null }, // uso de la API de Google Ads por sección, usuario y hora
     usersStatus: 'idle', users: [], usersError: null,
     accessStatus: 'idle', access: [], mccAccess: [], accessError: null,
     deleteStatus: 'idle', deleteError: null,
@@ -11522,8 +11524,26 @@ function fmtDateTime(epochSeconds) {
   return new Date(epochSeconds * 1000).toLocaleString(dateLocale(), { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
+const ADMIN_TAB_KEY = 'pmh_admin_tab';
+const ADMIN_TABS = ['usuarios', 'gads', 'ia'];
+
+function adminSavedTab() {
+  try {
+    const t = localStorage.getItem(ADMIN_TAB_KEY);
+    return ADMIN_TABS.includes(t) ? t : 'usuarios';
+  } catch (e) { return 'usuarios'; }
+}
+
+function setAdminTab(tab) {
+  if (!ADMIN_TABS.includes(tab)) return;
+  state.admin.tab = tab;
+  try { localStorage.setItem(ADMIN_TAB_KEY, tab); } catch (e) { /* sin almacenamiento: la pestaña no se recuerda */ }
+  render();
+}
+
 function ensureAdminDataLoaded() {
-  if (currentUser.isSuperAdmin && state.admin.usage.status === 'idle') loadAdminAiUsage();
+  if (currentUser.isSuperAdmin && state.admin.tab === 'ia' && state.admin.usage.status === 'idle') loadAdminAiUsage();
+  if (currentUser.isSuperAdmin && state.admin.tab === 'gads' && state.admin.gads.status === 'idle') loadAdminGadsUsage();
   if (state.admin.usersStatus === 'idle') loadAdminUsers();
   if (state.admin.accessStatus === 'idle') loadAdminAccess();
 }
@@ -11540,6 +11560,139 @@ function loadAdminAiUsage() {
       render();
     })
     .catch((err) => { u.status = 'error'; u.error = err.message || String(err); render(); });
+}
+
+function loadAdminGadsUsage() {
+  const g = state.admin.gads;
+  g.status = 'loading'; g.error = null;
+  render();
+  fetch(`/api/admin/gads-usage?hours=${g.hours}`)
+    .then((r) => r.json().then((data) => ({ ok: r.ok, data })))
+    .then(({ ok, data }) => {
+      if (!ok) throw new Error(data.error || 'Error desconocido.');
+      g.rows = data.rows || []; g.meta = data; g.status = 'ready';
+      render();
+    })
+    .catch((err) => { g.status = 'error'; g.error = err.message || String(err); render(); });
+}
+
+// Nombre de la sección a partir de la ruta /api/... que provocó la llamada a Google Ads (el servidor guarda la ruta).
+function gadsSectionLabel(feature) {
+  const f = String(feature || '');
+  const rules = [
+    ['programador', 'Programador (tarea de fondo)'],
+    ['google-ads/pacing', 'Ritmo de consumo'],
+    ['google-ads/audit', 'Auditoría'],
+    ['google-ads/campaign', 'Campañas'],
+    ['google-ads/impression-share', 'Campañas'],
+    ['google-ads/hotel', 'Hoteles'],
+    ['google-ads/keyword-planner', 'Planificador de keywords'],
+    ['google-ads/ai-max', 'AI Max'],
+    ['google-ads/search-terms', 'Negativización'],
+    ['google-ads/negative', 'Negativización'],
+    ['negativos', 'Negativización'],
+    ['google-ads/content-exclusions', 'Exclusiones de contenido'],
+    ['google-ads/roas', 'ROAS objetivo'],
+    ['google-ads/recommendation', 'Recomendaciones'],
+    ['google-ads/audiences', 'Audiencias'],
+    ['google-ads/account-changes', 'Cambios de cuenta'],
+    ['google-ads/label', 'Anuncios nuevos'],
+    ['google-ads/ads-create', 'Anuncios nuevos'],
+    ['google-ads/ad-', 'Anuncios nuevos'],
+    ['google-ads/pmax', 'Anuncios nuevos'],
+    ['ad-schedules', 'Anuncios nuevos'],
+    ['ad-templates', 'Anuncios nuevos'],
+    ['pmax-snapshots', 'Anuncios nuevos'],
+    ['google-ads/accounts', 'Cuentas y MCC'],
+    ['google-ads/mcc', 'Cuentas y MCC'],
+    ['google-ads/status', 'Cuentas y MCC'],
+    ['ai/', 'Análisis con IA'],
+    ['admin/', 'Administración'],
+    ['otros', 'Otros'],
+  ];
+  const hit = rules.find(([prefix]) => f.startsWith(prefix));
+  return hit ? hit[1] : f;
+}
+
+const GADS_KIND_LABELS = { lectura: 'Lecturas', vista_previa: 'Vistas previas', escritura: 'Escrituras', planificador: 'Planificador', otros: 'Otras' };
+
+function fmtGadsWait(secs) {
+  if (secs >= 3600) return `${Math.max(1, Math.round(secs / 3600))} h`;
+  if (secs >= 60) return `${Math.round(secs / 60)} min`;
+  return `${secs} s`;
+}
+
+// Uso de la API de Google Ads que envía la plataforma, por sección, usuario y hora. Sirve para ver qué consume la cuota
+// del developer token. No incluye lo que gaste otra herramienta con el mismo token.
+function renderAdminGadsUsage() {
+  const g = state.admin.gads;
+  const periodButtons = [[24, '24 horas'], [72, '3 días'], [168, '7 días']].map(([h, label]) => `<button class="seg-btn ${g.hours === h ? 'active' : ''}" data-action="admin-gads-usage-${h}">${label}</button>`).join('');
+  const head = `
+    <div class="table-panel-head">
+      <h3>Uso de la API de Google Ads</h3>
+      <div class="seg-control">${periodButtons}</div>
+    </div>`;
+  if (g.status === 'loading' || g.status === 'idle') {
+    return `<div class="card table-panel" style="margin-bottom:16px">${head}<div class="state-panel loading"><div class="spinner"></div><p>Cargando el uso…</p></div></div>`;
+  }
+  if (g.status === 'error') {
+    return `<div class="card table-panel" style="margin-bottom:16px">${head}<div class="error-panel">${escapeHtml(g.error)}</div></div>`;
+  }
+
+  const meta = g.meta || {};
+  const quota = meta.quota || {};
+  const quotaNote = quota.reset_seconds > 0
+    ? `<p class="footnote" style="margin:0 0 12px;color:var(--danger,#b3261e)"><span>Google está limitando las solicitudes ahora: pidió esperar ${fmtGadsWait(quota.reset_seconds)}.</span>${quota.blocked_seconds > 0 ? ` <span>Las lecturas están bloqueadas localmente ${fmtGadsWait(quota.blocked_seconds)} más.</span>` : ''}</p>`
+    : '';
+  const rows = g.rows || [];
+  if (!rows.length) {
+    return `<div class="card table-panel" style="margin-bottom:16px">${head}${quotaNote}<p class="footnote">Todavía no hay uso registrado en las últimas ${fmtInt(g.hours)} horas. Se empieza a registrar con la primera llamada a Google Ads después de este cambio.</p></div>`;
+  }
+  const blank = () => ({ requests: 0, operations: 0, limited: 0, errors: 0, blocked: 0, reads: 0, writes: 0 });
+  const add = (a, r) => {
+    a.requests += r.requests; a.operations += r.operations; a.limited += r.limited; a.errors += r.errors; a.blocked += r.blocked;
+    if (r.kind === 'lectura') a.reads += r.operations;
+    else if (r.kind === 'escritura' || r.kind === 'vista_previa') a.writes += r.operations;
+  };
+  const group = (keyFn) => {
+    const m = new Map();
+    rows.forEach((r) => {
+      const k = keyFn(r);
+      if (!m.has(k)) m.set(k, { key: k, ...blank() });
+      add(m.get(k), r);
+    });
+    return [...m.values()];
+  };
+  const total = blank();
+  rows.forEach((r) => add(total, r));
+  const bySection = group((r) => gadsSectionLabel(r.feature)).sort((x, y) => y.operations - x.operations);
+  const byRoute = group((r) => r.feature).sort((x, y) => y.operations - x.operations).slice(0, 15);
+  const byUser = group((r) => r.username).sort((x, y) => y.operations - x.operations);
+  const byHour = group((r) => r.hour).sort((x, y) => (x.key < y.key ? 1 : -1));
+  const byKind = group((r) => r.kind).sort((x, y) => y.operations - x.operations);
+  const pct = (n) => (total.operations ? Math.round((n / total.operations) * 100) + '%' : '');
+  const tableRows = (list, label, withPct) => list.map((x) => `<tr><td>${escapeHtml(label ? label(x.key) : x.key)}</td><td>${fmtInt(x.requests)}</td><td>${fmtInt(x.operations)}${withPct ? ` <span class="footnote">(${pct(x.operations)})</span>` : ''}</td><td>${x.limited ? `<strong>${fmtInt(x.limited)}</strong>` : '0'}</td><td>${fmtInt(x.blocked)}</td></tr>`).join('');
+  const thead = (first) => `<thead><tr><th>${first}</th><th>Solicitudes</th><th>Operaciones</th><th>429</th><th>Bloqueadas</th></tr></thead>`;
+  const panel = (title, first, body) => `<div><h4 style="margin:0 0 6px">${title}</h4><div class="table-scroll" style="max-height:260px"><table>${thead(first)}<tbody>${body}</tbody></table></div></div>`;
+
+  return `
+    <div class="card table-panel" style="margin-bottom:16px">
+      ${head}
+      ${quotaNote}
+      <div class="stat-grid" style="margin-bottom:14px">
+        <div class="card stat-card accent"><div class="stat-label">Operaciones enviadas</div><div class="stat-value lg">${fmtInt(total.operations)}</div><div class="stat-sub">${fmtInt(total.requests)} solicitudes en ${fmtInt(g.hours)} h</div></div>
+        <div class="card stat-card"><div class="stat-label">Rechazadas por Google (429)</div><div class="stat-value lg">${fmtInt(total.limited)}</div><div class="stat-sub">${fmtInt(total.blocked)} lecturas ni se enviaron por el bloqueo local</div></div>
+        <div class="card stat-card"><div class="stat-label">Lecturas / escrituras</div><div class="stat-value lg">${fmtInt(total.reads)} / ${fmtInt(total.writes)}</div><div class="stat-sub">operaciones de lectura y de escritura (con vistas previas)</div></div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px">
+        ${panel('Por sección', 'Sección', tableRows(bySection, null, true))}
+        ${panel('Por ruta (las 15 mayores)', 'Ruta', tableRows(byRoute))}
+        ${panel('Por usuario', 'Usuario', tableRows(byUser, null, true))}
+        ${panel('Por tipo', 'Tipo', tableRows(byKind, (k) => GADS_KIND_LABELS[k] || k))}
+        ${panel('Por hora (Colombia)', 'Hora', tableRows(byHour, (k) => k + ' h'))}
+      </div>
+      <p class="footnote" style="margin-top:12px">Es lo que envía esta plataforma a Google Ads desde que se activó el contador (hora de Colombia; el día de cuota de Google corre con hora del Pacífico). «Operaciones» cuenta cada consulta como una y, en un cambio, las del lote. No incluye lo que gaste otra herramienta que use el mismo developer token, y no equivale exactamente a lo que Google descuenta de la cuota. «429» son las respuestas con las que Google rechazó la solicitud; «Bloqueadas» son lecturas que la plataforma ni envió porque Google acababa de pedir esperar. Se guardan 30 días y se actualiza cada 30 segundos.</p>
+    </div>`;
 }
 
 const AI_FEATURE_LABELS = { negativizacion: 'Negativización', auditoria: 'Auditoría', rendimiento: 'Rendimiento', copys: 'Copys', hoteles: 'Hoteles', anuncios: 'Anuncios nuevos' };
@@ -13852,6 +14005,7 @@ function renderAdminPage() {
   if (!currentUser.isAdmin) {
     return `<div class="error-panel">Esta sección requiere permisos de administrador.</div>`;
   }
+  if (!state.admin.tab) state.admin.tab = adminSavedTab();
   ensureAdminDataLoaded();
   const a = state.admin;
 
@@ -14105,7 +14259,18 @@ function renderAdminPage() {
   }
 
   // El consumo y costo de la IA solo lo ve el super admin.
-  return `${usersBody}${currentUser.isSuperAdmin ? renderAdminAiUsage() : ''}${mccGrantForm}${grantForm}${accessBody}`;
+  // Las pestañas de uso (Google Ads e IA) son solo del super admin; los demás administradores ven solo usuarios y accesos.
+  const tab = currentUser.isSuperAdmin && ADMIN_TABS.includes(a.tab) ? a.tab : 'usuarios';
+  if (!currentUser.isSuperAdmin) return `${usersBody}${mccGrantForm}${grantForm}${accessBody}`;
+  const tabBar = `
+    <div class="seg-control" style="margin-bottom:20px">
+      <button class="seg-btn ${tab === 'usuarios' ? 'active' : ''}" data-action="admin-tab-usuarios">Usuarios y accesos</button>
+      <button class="seg-btn ${tab === 'gads' ? 'active' : ''}" data-action="admin-tab-gads">Uso de Google Ads</button>
+      <button class="seg-btn ${tab === 'ia' ? 'active' : ''}" data-action="admin-tab-ia">Uso de la IA</button>
+    </div>`;
+  if (tab === 'gads') return `${tabBar}${renderAdminGadsUsage()}`;
+  if (tab === 'ia') return `${tabBar}${renderAdminAiUsage()}`;
+  return `${tabBar}${usersBody}${mccGrantForm}${grantForm}${accessBody}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -20939,6 +21104,12 @@ function handleAction(action) {
     case 'neg-tab-reglas': state.neg.tab = 'reglas'; render(); break;
     case 'compare-download-html': downloadTextFile(buildCompareHtml(), compareFileName('html'), 'text/html'); break;
     case 'compare-download-md': downloadTextFile(buildCompareMarkdown(), compareFileName('md'), 'text/markdown'); break;
+    case 'admin-tab-usuarios': setAdminTab('usuarios'); break;
+    case 'admin-tab-gads': setAdminTab('gads'); break;
+    case 'admin-tab-ia': setAdminTab('ia'); break;
+    case 'admin-gads-usage-24': state.admin.gads.hours = 24; loadAdminGadsUsage(); break;
+    case 'admin-gads-usage-72': state.admin.gads.hours = 72; loadAdminGadsUsage(); break;
+    case 'admin-gads-usage-168': state.admin.gads.hours = 168; loadAdminGadsUsage(); break;
     case 'admin-ai-usage-7': state.admin.usage.days = 7; loadAdminAiUsage(); break;
     case 'admin-ai-usage-30': state.admin.usage.days = 30; loadAdminAiUsage(); break;
     case 'admin-ai-usage-90': state.admin.usage.days = 90; loadAdminAiUsage(); break;

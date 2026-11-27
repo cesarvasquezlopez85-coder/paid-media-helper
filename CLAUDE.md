@@ -20,7 +20,7 @@ Herramienta interna de una agencia de hoteles para analizar y operar cuentas de 
 ## Mapa del código (`webapp/`)
 
 - `server.py`: servidor, login, sesiones, roles, Administración y todos los endpoints `/api/*`.
-- `google_ads_client.py`: lectura y escritura contra la API de Google Ads (`API_VERSION` en la parte superior, hoy v26; para volver atrás se cambia ese valor). Incluye las funciones `simulated_*` que alimentan el modo simulado.
+- `google_ads_client.py`: lectura y escritura contra la API de Google Ads (`API_VERSION` en la parte superior, hoy v26; para volver atrás se cambia ese valor). Incluye las funciones `simulated_*` que alimentan el modo simulado. Toda llamada a la API pasa por `_gads_urlopen`, que la cuenta por sección, usuario y hora (tabla `gads_usage`, panel «Uso de la API de Google Ads» en Administración, solo super admin): una llamada nueva a Google Ads usa `_gads_urlopen`, no `urllib.request.urlopen` directo.
 - `app.js`: estado, render y eventos de todo el frontend, en un solo archivo grande. Cada función nueva sigue el patrón de la anterior. `engine.js` tiene la lógica que procesa archivos CSV/Excel en el navegador.
 - `account_audit.py`: motor de 66 reglas de la Auditoría. Si cambian reglas o puntaje, sube `RULES_VERSION`.
 - `claude_client.py`, `negativos_ia.py`, `hoteles_ia.py`: llamadas a Claude y validación con código de lo que propone la IA (la IA propone, el código valida).
